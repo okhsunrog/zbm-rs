@@ -26,7 +26,8 @@ pub fn log(message: &str) {
         let _ = writeln!(file, "{message}");
     }
     if let Ok(mut file) = OpenOptions::new().write(true).open("/dev/ttyS0") {
-        let _ = writeln!(file, "ZBM_SUPERVISOR {message}");
+        let record = format!("ZBM_SUPERVISOR {message}\n");
+        let _ = file.write_all(record.as_bytes());
     }
 }
 

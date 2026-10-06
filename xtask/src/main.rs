@@ -29,6 +29,8 @@ enum Task {
     Smoke {
         #[arg(long)]
         run: PathBuf,
+        #[arg(long, default_value = "result-test")]
+        image: PathBuf,
         #[arg(long)]
         tcg: bool,
         #[arg(long, default_value_t = 2228)]
@@ -128,11 +130,12 @@ fn main() -> Result<()> {
         },
         Task::Smoke {
             run,
+            image,
             tcg,
             port,
             direct,
             lifecycle,
-        } => smoke::run(&run, tcg, port, direct, lifecycle)?,
+        } => smoke::run(&run, &image, tcg, port, direct, lifecycle)?,
     }
     Ok(())
 }

@@ -9,6 +9,8 @@
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
       mkImage = args: import ./nix/image.nix ({ inherit pkgs; source = self; zfsSource = zfskit; } // args);
+      leanUserspace = import ./nix/lean-userspace.nix { inherit pkgs; };
+      optimizedRust = { optLevel = "z"; lto = "fat"; codegenUnits = 1; };
       production = mkImage { };
       testing = mkImage { testProfile = true; };
     in {
@@ -18,10 +20,14 @@
         zbm-rs-efi = production;
         zbm-rs-efi-test = testing;
         zbm-rs = production.passthru.binary;
+        zbm-rs-efi-test-zstd = mkImage { testProfile = true; initramfsCompression = "zstd"; rustProfile = optimizedRust; udevPackage = pkgs.systemdMinimal; };
+        zbm-rs-efi-test-standalone-udev = mkImage { testProfile = true; initramfsCompression = "zstd"; rustProfile = optimizedRust; udevPackage = leanUserspace.systemdUdev; };
+        zbm-rs-efi-test-lean = mkImage { testProfile = true; initramfsCompression = "zstd"; rustProfile = optimizedRust; zfsUserspace = leanUserspace.zfs; udevPackage = leanUserspace.udev; };
+        zbm-rs-efi-lean = mkImage { initramfsCompression = "zstd"; rustProfile = optimizedRust; zfsUserspace = leanUserspace.zfs; udevPackage = leanUserspace.udev; };
         zbm-rs-efi-host-only-example = mkImage { profile = "host-only"; hardwareManifest = ./nix/hardware-example.json; };
       };
       checks.${system}.image-size = production.passthru.sizeCheck;
       nixosModules.default = import ./nix/nixos-module.nix { inherit self; };
-      devShells.${system}.default = pkgs.mkShell { packages = with pkgs; [ cargo rustc rustfmt clippy qemu cpio uv python3 ]; };
+      devShells.${system}.default = pkgs.mkShell { packages = with pkgs; [ cargo rustc rustfmt clippy qemu cpio uv python3 gzip xz zstd ]; };
     };
 }

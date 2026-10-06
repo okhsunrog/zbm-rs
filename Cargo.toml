@@ -8,4 +8,6 @@ license = "MIT OR Apache-2.0"
 
 [profile.release]
 strip = true
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+opt-level = "z"

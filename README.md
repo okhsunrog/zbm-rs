@@ -63,7 +63,7 @@ result/sizes.json
 
 Nix builds Rust from the locked sources, selects kernel and ZFS modules from one
 kernelPackages set, checks their ABI/version pairing, includes selected tools and
-ELF dependencies, creates cpio/gzip and invokes systemd ukify. Normal builds use
+ELF dependencies, creates cpio/zstd and invokes systemd ukify. Normal builds use
 neither dracut nor mkinitcpio nor /boot from the development host. No image-building
 code runs inside zbm-rs. `cargo xtask image [--test-ssh]` delegates to this same
 Nix derivation.
@@ -142,6 +142,19 @@ VT through /dev/vcs1 (ASCII labels, font glyphs replaced with spaces). PNG captu
 is separate evidence. The new Nix image has a visually checked complete TUI.
 The old host-derived image showed a raster/text discrepancy
 after Rescan; logs and text checks must not be treated as visual acceptance.
+
+## Size experiments
+
+Release builds use `opt-level="z"`, `codegen-units=1` and FatLTO with panic
+unwinding. The default image uses zstd-19 and the standard Nix systemdMinimal udev.
+Standalone-linked modern udev remains an experimental comparison profile. `lib.mkImage` also accepts
+`initramfsCompression = "gzip" | "xz" | "zstd"` and a `rustProfile` attrset for
+controlled comparisons. See [measured size experiments](docs/size-experiments.md).
+
+`zbm-rs-efi-lean` and `zbm-rs-efi-test-lean` are opt-in userspace experiments:
+eudev plus ZFS without optional URL fetching. Native encryption with local keys
+is retained; HTTPS encryption keylocations are unavailable in those profiles.
+The default preserves upstream ZFS URL-fetch support.
 
 ## Size regression policy
 

@@ -1,3 +1,31 @@
+# Published repository and size optimization verification — 2026-10-06
+
+Public repository: https://github.com/okhsunrog/zbm-rs. README documents the project
+origin, goals and the boundary between the working foundation and roadmap work.
+The initial GitHub Actions run 37400311280 passed all Rust/Nix/TCG lifecycle checks.
+
+Rust release defaults are opt-level z, FatLTO and one codegen unit; panic unwinding
+is retained. Nix defaults to zstd-19 and standard systemdMinimal/ZFS userspace.
+Production EFI is 28,632,576 bytes (27.31 MiB), down from 31,821,312 bytes.
+See size-experiments.md for the complete controlled profile/compression matrices.
+
+Passed locally on the new images:
+
+- fmt, 11 focused workspace tests, all-targets/all-features clippy and Cargo config input checks.
+- size-standard-fixed-001: standard userspace + zstd + optimized Rust, full UEFI lifecycle.
+- size-static-udev-fixed-001: standalone-linked modern udev, full UEFI lifecycle.
+- size-lean-fixed-001: eudev + ZFS without URL fetch, full UEFI lifecycle.
+- size-xz-001: XZ initramfs, ordinary UEFI discovery/encryption/shell/poweroff smoke.
+- Scenarios now exercise native encryption with a disposable local passphrase key.
+- Complete-record serial telemetry fixes were exercised in the successful reruns.
+
+The lean profiles preserve local-key native encryption but cannot fetch HTTPS keylocations.
+They are opt-in; the default retains URL fetching. Standalone-linked udev is also an
+experiment, with only a small compressed-size win and larger individual helper ELFs.
+No physical boot or successful installed-OS kexec is claimed.
+
+## Previous foundation verification
+
 # Current Nix / PID-1 / immutable JSON verification — 2026-10-06
 
 The canonical Nix production and test EFI builds pass, with kernel 6.18.55 and

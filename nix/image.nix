@@ -1,7 +1,9 @@
 { pkgs, source, zfsSource, kernelPackages ? pkgs.linuxPackages
 , zfsUserspace ? pkgs.zfs_2_4.override { enablePython = false; }
 , testProfile ? false, profile ? "portable", hardwareManifest ? null
-, extraModules ? [], forcedModules ? [], loaderConfig ? null }:
+, extraModules ? [], forcedModules ? [], loaderConfig ? null
+, initramfsCompression ? "zstd", rustProfile ? {}
+, udevPackage ? pkgs.systemdMinimal }:
 let
   lib = pkgs.lib;
   hardware = if hardwareManifest == null then {} else builtins.fromJSON (builtins.readFile hardwareManifest);
@@ -45,17 +47,24 @@ let
     cargoBuildFlags = [ "-p" "zbm-rs" ];
     cargoTestFlags = [ "-p" "zbm-rs" "-p" "zbm-core" ];
     buildFeatures = lib.optional testProfile "vm-test";
+    env = lib.optionalAttrs (rustProfile ? optLevel) { CARGO_PROFILE_RELEASE_OPT_LEVEL = toString rustProfile.optLevel; }
+      // lib.optionalAttrs (rustProfile ? lto) { CARGO_PROFILE_RELEASE_LTO = rustProfile.lto; }
+      // lib.optionalAttrs (rustProfile ? codegenUnits) { CARGO_PROFILE_RELEASE_CODEGEN_UNITS = toString rustProfile.codegenUnits; };
   };
+  udevDaemon = if (udevPackage.pname or "") == "eudev" then "${udevPackage}/bin/udevd"
+    else "${udevPackage}/lib/systemd/systemd-udevd";
+  udevRules = if (udevPackage.pname or "") == "eudev" then "${udevPackage}/var/lib/udev/rules.d"
+    else "${udevPackage}/lib/udev/rules.d";
   tools = [
     { source = "${binary}/bin/zbm-rs"; target = "/bin/zbm-rs"; }
     { source = "${pkgs.busybox}/bin/busybox"; link = "/bin/busybox"; }
     { source = "${pkgs.kmod}/bin/modprobe"; link = "/usr/bin/modprobe"; }
     { source = "${zfsUserspace}/bin/zfs"; link = "/usr/bin/zfs"; }
     { source = "${zfsUserspace}/bin/zpool"; link = "/usr/bin/zpool"; }
-    { source = "${pkgs.systemdMinimal}/lib/systemd/systemd-udevd"; link = "/usr/lib/systemd/systemd-udevd"; }
-    { source = "${pkgs.systemdMinimal}/bin/udevadm"; link = "/usr/bin/udevadm"; }
-    { source = "${pkgs.systemdMinimal}/lib/udev/ata_id"; link = "/usr/lib/udev/ata_id"; }
-    { source = "${pkgs.systemdMinimal}/lib/udev/scsi_id"; link = "/usr/lib/udev/scsi_id"; }
+    { source = "${udevDaemon}"; link = "/usr/lib/systemd/systemd-udevd"; }
+    { source = "${udevPackage}/bin/udevadm"; link = "/usr/bin/udevadm"; }
+    { source = "${udevPackage}/lib/udev/ata_id"; link = "/usr/lib/udev/ata_id"; }
+    { source = "${udevPackage}/lib/udev/scsi_id"; link = "/usr/lib/udev/scsi_id"; }
     { source = "${lib.getLib pkgs.kmod}/lib/libkmod.so.2"; link = "/usr/lib/libkmod.so.2"; }
     { source = "${lib.getLib pkgs.util-linux}/lib/libblkid.so.1"; link = "/usr/lib/libblkid.so.1"; }
   ] ++ lib.optionals testProfile [
@@ -86,9 +95,9 @@ let
     printf 'root::0:0:99999:7:::\nsshd:!:0:0:99999:7:::\n' > root/etc/shadow
     printf 'root:x:0:\nsshd:x:74:\nnobody:x:65534:\n' > root/etc/group
     mkdir -p root/usr/lib/udev/rules.d
-    cp ${pkgs.systemdMinimal}/lib/udev/rules.d/{60-persistent-storage,80-drivers}.rules root/usr/lib/udev/rules.d/
+    cp ${udevRules}/{60-persistent-storage,80-drivers}.rules root/usr/lib/udev/rules.d/
     substituteInPlace root/usr/lib/udev/rules.d/60-persistent-storage.rules \
-      --replace-quiet '${pkgs.systemdMinimal}/lib/udev' '/usr/lib/udev'
+      --replace-quiet '${udevPackage}/lib/udev' '/usr/lib/udev'
     ${lib.optionalString testProfile ''
       mkdir -p root/etc/ssh root/root/.ssh
       ssh-keygen -q -t ed25519 -N "" -C zbm-disposable-test -f client-key
@@ -102,15 +111,17 @@ let
     (cd root; find . -exec touch -h -d '@1' {} +; find . -print0 | LC_ALL=C sort -z | cpio --null --quiet -o -H newc --owner=0:0 --reproducible) > $out/root.cpio
     ${lib.optionalString testProfile "cp client-key $out/id_ed25519"}
   '';
-  initramfs = pkgs.runCommand "zbm-initramfs-${profile}" { nativeBuildInputs = [ pkgs.gzip ]; } ''
+  initramfs = pkgs.runCommand "zbm-initramfs-${profile}" { nativeBuildInputs = [ pkgs.gzip pkgs.xz pkgs.zstd ]; } ''
     mkdir -p $out
-    gzip -n -9 < ${runtime}/root.cpio > $out/initramfs.img
+    ${if initramfsCompression == "gzip" then "gzip -n -9"
+      else if initramfsCompression == "xz" then "xz --check=crc32 -6"
+      else "zstd -q -T1 -19"} < ${runtime}/root.cpio > $out/initramfs.img
   '';
   osRelease = pkgs.writeText "zbm-os-release" "ID=zbm-rs\nNAME=zbm-rs\nVERSION_ID=0.1.0\n";
   cmdline = "console=ttyS0,115200 console=tty0 loglevel=3 panic=-1";
   image = pkgs.runCommand "zbm-rs-efi-${profile}${lib.optionalString testProfile "-test"}" {
     nativeBuildInputs = [ pkgs.systemdUkify pkgs.python3 pkgs.uv ];
-    passthru = { inherit binary kernel zfsModule modules initramfs configJson; inherit sizeCheck; };
+    passthru = { inherit binary kernel zfsModule modules initramfs configJson runtime; inherit sizeCheck; };
   } ''
     export UV_CACHE_DIR="$TMPDIR/uv-cache"
     mkdir -p $out/esp/EFI/BOOT
@@ -124,13 +135,14 @@ let
     ${lib.optionalString testProfile "cp ${runtime}/id_ed25519 $out/id_ed25519"}
     uv run --offline --no-project --python ${pkgs.python3}/bin/python ${source}/nix/image-metadata.py \
       $out ${lib.escapeShellArg kernel.modDirVersion} ${lib.escapeShellArg zfsModule.version} \
-      ${if testProfile then "yes" else "no"} ${lib.escapeShellArg profile} ${source}/nix/image-size-policy.json
+      ${if testProfile then "yes" else "no"} ${lib.escapeShellArg profile} ${source}/nix/image-size-policy.json ${initramfsCompression}
   '';
   sizeCheck = pkgs.runCommand "zbm-image-size-check" {} ''
     test -s ${image}/sizes.json
     cp ${image}/sizes.json $out
   '';
 in
+assert lib.assertMsg (builtins.elem initramfsCompression [ "gzip" "xz" "zstd" ]) "Unknown initramfs compressor";
 assert lib.assertMsg (builtins.elem profile [ "portable" "host-only" ]) "Unknown image profile";
 assert lib.assertMsg (profile != "host-only" || hardwareManifest != null || extraModules != [] || forcedModules != []) "Host-only requires an explicit manifest or NixOS module lists";
 assert lib.assertMsg (zfsModule.kernel.modDirVersion == kernel.modDirVersion) "ZFS kernel module ABI mismatch";

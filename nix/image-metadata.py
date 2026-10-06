@@ -15,7 +15,7 @@ if budget["baselineEfiBytes"] is not None:
 (out / "sizes.json").write_text(json.dumps(sizes, indent=2) + "\n")
 (out / "manifest.json").write_text(json.dumps({
     "kernel": kernel, "zfs": zfs, "test_ssh": test == "yes", "profile": profile,
-    "builder": "nix", "sizes": sizes,
+    "builder": "nix", "compression": sys.argv[7], "sizes": sizes,
     "kernel_sha256": hashlib.sha256((out / "vmlinuz").read_bytes()).hexdigest(),
     "initramfs_sha256": hashlib.sha256((out / "initramfs.img").read_bytes()).hexdigest()
 }, indent=2) + "\n")

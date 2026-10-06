@@ -20,11 +20,11 @@ struct Options {
 fn emit(options: &Options, event: &str, state: &State) -> Result<()> {
     if let Some(path) = &options.events {
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        writeln!(
-            file,
-            "{}",
-            serde_json::json!({"event": event, "state": state, "pid": std::process::id(), "terminal_size": crossterm::terminal::size().ok(), "config": options.config})
-        )?;
+        let value = serde_json::json!({"event": event, "state": state, "pid": std::process::id(), "terminal_size": crossterm::terminal::size().ok(), "config": options.config});
+        // Construct a complete record before touching the shared serial device.
+        // The leading separator also recovers from another writer's partial line.
+        let record = format!("\n{value}\n");
+        file.write_all(record.as_bytes())?;
     }
     Ok(())
 }

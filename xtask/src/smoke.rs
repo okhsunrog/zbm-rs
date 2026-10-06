@@ -59,13 +59,22 @@ fn ready(run: &Path, scans: u64, pools: usize) -> Result<Value> {
     Ok(state)
 }
 
-pub fn run(run: &Path, tcg: bool, port: u16, direct: bool, lifecycle: bool) -> Result<()> {
+pub fn run(
+    run: &Path,
+    image: &Path,
+    tcg: bool,
+    port: u16,
+    direct: bool,
+    lifecycle: bool,
+) -> Result<()> {
     ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::Relaxed))?;
-    let mut command = Command::new(std::env::current_exe()?);
+    // Re-exec this running inode even if Cargo replaces the checkout binary.
+    let mut command = Command::new("/proc/self/exe");
     command
         .args(["vm", "--run"])
         .arg(run)
-        .args(["boot", "--port", &port.to_string()]);
+        .args(["boot", "--port", &port.to_string(), "--image"])
+        .arg(image);
     if tcg {
         command.arg("--tcg");
     }
@@ -97,7 +106,7 @@ pub fn run(run: &Path, tcg: bool, port: u16, direct: bool, lifecycle: bool) -> R
         // Disposable guest disk only; never attach host devices to this scenario.
         vm::ssh(
             run,
-            "zpool create -f -o cachefile=none -m none zbm_fixture /dev/vda && zfs create -o mountpoint=none zbm_fixture/ROOT && zfs snapshot zbm_fixture/ROOT@fresh && zfs clone -o mountpoint=none zbm_fixture/ROOT@fresh zbm_fixture/clone && zfs rename zbm_fixture/clone zbm_fixture/renamed && zfs promote zbm_fixture/renamed && zpool export zbm_fixture",
+            r#"zpool create -f -o cachefile=none -m none zbm_fixture /dev/vda && zfs create -o mountpoint=none zbm_fixture/ROOT && zfs snapshot zbm_fixture/ROOT@fresh && zfs clone -o mountpoint=none zbm_fixture/ROOT@fresh zbm_fixture/clone && zfs rename zbm_fixture/clone zbm_fixture/renamed && zfs promote zbm_fixture/renamed && printf '%s\n' disposable-zbm-test-passphrase > /run/zbm-test-key && zfs create -o encryption=aes-256-gcm -o keyformat=passphrase -o keylocation=file:///run/zbm-test-key -o mountpoint=none zbm_fixture/crypt && zfs unload-key zbm_fixture/crypt && zfs load-key zbm_fixture/crypt && test "$(zfs get -H -o value keystatus zbm_fixture/crypt)" = available && zpool export zbm_fixture"#,
         )?;
         vm::key(run, "r")?;
         let pool = wait_for(20, Some(&mut owned.0), || ready(run, 2, 1))?;
@@ -144,7 +153,7 @@ pub fn run(run: &Path, tcg: bool, port: u16, direct: bool, lifecycle: bool) -> R
                 "passed": true, "firmware": if direct { "direct-linux" } else { "OVMF-UEFI" },
                 "lifecycle": lifecycle,
                 "empty": empty, "pool": pool,
-                "checks": ["boot", "real-zfs-module", "ssh", "snapshot-clone-rename-promote", "discovery", "rescan", "QMP-keyboard", "real-vt-rendering", "shell-return", "guest-poweroff"]
+                "checks": ["boot", "real-zfs-module", "ssh", "snapshot-clone-rename-promote", "native-encryption-local-key", "discovery", "rescan", "QMP-keyboard", "real-vt-rendering", "shell-return", "guest-poweroff"]
             }))?,
         )?;
         Ok(())
