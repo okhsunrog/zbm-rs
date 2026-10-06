@@ -88,6 +88,10 @@ without remounting /run or duplicating the completed bootstrap. If recovery itse
 fails, PID 1 requests reboot; an unsuccessful reboot leaves a bounded-delay
 recovery retry loop. Production has no supervisor fault injection hooks.
 
+The shell behavior above describes the current development implementation. The
+accepted protected mode replaces unrestricted shell recovery on every failure
+path with diagnostics/restart/reboot/poweroff; see the planned trust boundary below.
+
 ## Private lifecycle protocol
 
 A private Unix datagram socketpair carries one typed byte: Restart, EmergencyShell,
@@ -117,6 +121,33 @@ or export a pool with a foreign mount. These ephemeral ownership records are
 runtime state, not mutable loader configuration or a persistent recovery journal.
 The first path does not create clones or change dataset properties.
 
+## Planned verified-boot boundary
+
+The complete accepted design is in [Secure Boot and verified boot](secure-boot-model.md).
+It is not implemented by the current executor or lifecycle protocol. Linux and
+NixOS discovery produce untrusted candidates; a signed BootAuthorization binds
+kernel/initramfs bytes, arguments and permitted dataset/snapshot-clone selection.
+
+Keep one ELF but add a privileged broker role, supervised alongside an
+unprivileged manager. Core owns trust policy and opaque verified-plan types;
+the manager submits typed target/operation requests and displays evidence. The
+broker independently resolves and authorizes inputs, owns privileged ZFS actions
+and passes the exact prepared immutable bytes to `kexec_file_load`. Generic ZFS
+mechanisms remain in zfskit. A private socket or a caller-supplied verified flag is
+not authorization, and a root-capable manager could bypass Rust type boundaries.
+
+Firmware authenticates the loader UKI. Trusted early kernel/initramfs setup then
+enforces kernel/module signatures, lockdown and target-initramfs IMA appraisal;
+the broker enforces the signed command-line/root policy. PID 1 must apply the same
+image policy to ordinary requests, crash recovery, last-ditch errors and failed
+handoff. No path automatically opens an unrestricted shell in `enforce`.
+
+Image policy is immutable `off`/`enforce` configuration, independent of observed
+firmware state. Disabling firmware Secure Boot never implicitly disables target
+verification. A separate option can require firmware protection too. Runtime UI
+permission for an untrusted target is deferred; no mandatory development image is
+introduced. Selected root contents and rollback resistance are separate promises.
+
 ## Canonical Nix image
 
 nix/image.nix builds the Rust ELF, chooses one kernelPackages set and derives both
@@ -141,6 +172,15 @@ kernel. Synthetic sysfs checks and an explicit host-only SCSI VM fixture cover
 the controller/frontend distinction. The NixOS
 module reuses boot.kernelPackages, boot.zfs.package and both initrd module lists.
 The same derivation is used by local builds, CI, QEMU and system.build.zbm-rs-efi.
+
+Planned security integration adds explicit loader `image.kernelPackages` selection
+and `image.kernelPolicy = validate | configure`. Validation is the default;
+configuration builds a separate loader variant and matching ZFS without changing
+the host kernel. Final kernel capabilities, embedded certificates and module
+signatures must be checked before packaging. Private signing keys stay outside
+Nix; owner deployment signs an output copy. See [planned options](configuration.md#planned-secure-boot-configuration)
+and the trust model's build pipeline. The selected OS kernel remains an externally
+produced authorized artifact, not something the boot manager rebuilds at runtime.
 
 Production has no VM fault hooks. The test image is opt-in and compiles vm-test,
 adds SSH and disposable fixture credentials (public Nix-store test data, never

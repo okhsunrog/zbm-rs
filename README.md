@@ -33,6 +33,9 @@ humans and automation operate the same VM through keys, screens, logs and SSH.
 - Provide safe snapshot boot through temporary clones, with clear recovery and encryption flows.
 - Preserve useful ZFSBootMenu on-disk conventions where compatibility is practical.
 - Keep PID 1 alive when the manager fails, and restore a usable recovery console.
+- Make verified boot a first-class feature: authorize kernel/initramfs bytes and
+  arguments, preserve trusted snapshot selection, and keep protected recovery
+  within that policy. This is accepted design, not current Secure Boot support.
 - Produce an immutable EFI image through one Nix build, with a matching kernel/ZFS pair,
   portable and explicit-manifest host-only profiles, and measurable image size.
 - Grow deterministic process, UI and ZFS integration tests alongside every boot feature.
@@ -161,7 +164,35 @@ The harness installs the generated closure from a read-only fixture disk onto a
 fresh disposable ZFS disk. It restarts the manager after import/mount, selects the
 older generation using the real keyboard, and requires a target-OS success marker
 with the exact current-system, root dataset and a new boot ID, then poweroff.
-See [the handoff trust model](docs/secure-boot-model.md) for security boundaries.
+See [the Secure Boot design](docs/secure-boot-model.md) for the accepted chain of
+trust and current security boundaries.
+
+## Secure Boot design and status
+
+The current image is unsigned; target authorization, IMA appraisal, privilege
+separation and protected recovery are not implemented. Existing VM boots do not
+establish Secure Boot acceptance.
+
+The accepted design uses image policy `off` or `enforce`. An enforced loader checks
+signed kernel/initramfs authorization and allowed arguments even when firmware
+Secure Boot is disabled; an independent option can require enabled firmware too.
+It does not automatically downgrade or open an unrestricted recovery shell on
+failure. Firmware authenticates the loader UKI, the loader kernel checks target
+kernel signatures and initramfs IMA signatures, and a privileged broker checks the
+signed argument/root-selection policy. This authenticates boot inputs, not every
+file in the selected root filesystem.
+
+Nix will validate the provided loader kernel or build a separately configured
+loader kernel with matching ZFS; it will not silently change the host/target OS
+kernel. Production private keys stay outside Nix and signing is a deployment step.
+No mandatory second development image is required. UI permission to boot without
+a trusted signature is deferred.
+
+Read [the complete design](docs/secure-boot-model.md),
+[planned configuration](docs/configuration.md#planned-secure-boot-configuration),
+[acceptance requirements](docs/verification.md#planned-secure-boot-acceptance) and
+[implementation roadmap](docs/roadmap.md). Planned options are not accepted by the
+current module/schema.
 
 ## Build
 

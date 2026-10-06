@@ -252,7 +252,7 @@ boot support.
 The zbm-rs implementation uses an opt-in Bootspec capability and a systemd-root
 override for a restricted layout; see [the snapshot module](../nix/snapshot-boot.nix),
 [the boot-plan resolver](../crates/core/src/boot.rs) and
-[the documented restrictions](../README.md#snapshot-boot). That mechanism is a
+[the documented restrictions](../README.md#snapshots-and-recovery). That mechanism is a
 reference for a possible compatibility policy, not proof that the proposed
 upstream adapter already handles clones.
 
@@ -294,7 +294,7 @@ architectural choice, not a prerequisite for offering a generation menu.
 Upstream's existing recovery and encryption facilities are available to an adapter,
 subject to its installation and root policies. Current zbm-rs still rejects
 encrypted NixOS BE boot, separate `/nix`, `initrdSecrets` and other layouts listed
-in [the README](../README.md#initial-nixos-boot-path).
+in [the README](../README.md#linux-and-nixos-boot-paths).
 
 ## Acceptance scenarios for an implementation
 
@@ -319,6 +319,13 @@ The target proof should include a changed kernel boot ID, exact toplevel and roo
 dataset. Run a disposable upstream-ZFSBootMenu fixture separately from zbm-rs's
 existing fixture. Physical boot and Secure Boot require their own acceptance;
 this note makes no claim for either.
+
+For zbm-rs, [the accepted Secure Boot design](secure-boot-model.md) adds a common
+signed BootAuthorization above both the Linux and Bootspec adapters. Publication
+of Bootspec, `.kcl` files or matching kernel/initrd names alone is not owner
+authorization. An enforced loader must bind the actual artifacts and allowed
+arguments/root variation, including snapshot clones. This is planned zbm-rs work,
+not a claim that the upstream adapter described here provides that trust chain.
 
 ## Sources
 

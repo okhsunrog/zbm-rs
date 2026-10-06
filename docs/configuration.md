@@ -58,8 +58,10 @@ field names and kebab-case enum variants, with defaults for omitted fields/secti
 
 ## Nix integration
 
-programs.zbm-rs options: timeout, ui.showSnapshots, ui.title,
-manager.restartLimit, zfs.importPolicy, configurationLimit and kernelArgs.
+Current options are under `programs.zbm-rs.settings`: `ui.timeout`,
+`ui.showSnapshots`, `ui.title`, `manager.restartLimit`, `zfs.importPolicy`,
+`nixos.generationLimit` and `kernelArgs`. Image packaging uses `image.profile`
+and `image.hardwareManifest`. The former top-level names remain renamed aliases.
 lib.mkImage accepts loaderConfig as a JSON-compatible Nix attrset. It goes through
 the same Rust schema validation as checked-in fixtures. Production uses
 default.json, the SSH/lifecycle test image uses test.json unless overridden.
@@ -69,8 +71,70 @@ NixOS derives this userspace from boot.zfs.package, preserving its version and
 matching module selection. Nix generates JSON only, never Rust source. JSON is not read from host /etc or /sys.
 
 A future small kernel-command-line emergency override layer belongs above this
-base configuration; it has not been implemented. Dynamic pools/Bootspec state
+base configuration; it has not been implemented. It must not weaken the signed
+security policy of an enforced image. Dynamic pools/Bootspec state
 remain separate. Features select code such as vm-test, never ordinary values.
+
+## Planned Secure Boot configuration
+
+These options are accepted design, **not implemented options or valid current
+configuration**. See [the full trust model](secure-boot-model.md) for enforcement,
+recovery, key roles and limitations. Ordinary policy stays in Nix-generated,
+shared-schema-validated immutable JSON; it does not become Cargo features.
+
+All paths below are relative to `programs.zbm-rs`:
+
+| Planned Nix option | Default / requirement | Meaning |
+| --- | --- | --- |
+| `settings.security.mode` | `off`; `off` or `enforce` | Image policy; `enforce` requires the complete target verification chain. |
+| `settings.security.requireFirmwareSecureBoot` | `false` | Also require confirmed enabled firmware Secure Boot before OS handoff. Does not control target verification. |
+| `settings.security.targetAuthorities` | Public certificate list; nonempty for `enforce` | Authorities allowed to sign BootAuthorization; copied into the immutable trust store. |
+| `image.kernelPolicy` | `validate`; `validate` or `configure` | Validate the selected final loader kernel, or build a separate configured loader-kernel variant. |
+| `image.kernelPackages` | Module defaults to `boot.kernelPackages` | Explicit loader kernel/ZFS package set; independent override does not change the host kernel. |
+| `image.kernelTrustedCertificates` | Public certificate list, sufficient for selected policy | Required target-kernel/module/IMA certificate trust; validate actual kernel integration. |
+| `image.imaCertificate` | Public certificate required for initial `enforce` profile | Authenticated certificate used for target-initramfs appraisal. |
+
+The last four are build inputs, not arbitrary boot-time overrides. Nix certificate
+paths are materialized as public trust-store resources; runtime JSON uses packaged
+paths/identities and snake_case names such as `security.target_authorities`.
+No production private key is a Nix option/path input or stored in that JSON.
+The exact serialized authority representation will be finalized with the verifier.
+
+Planned example (will not evaluate with today's module):
+
+```nix
+programs.zbm-rs = {
+  enable = true;
+  image = {
+    kernelPackages = pkgs.linuxPackages;
+    kernelPolicy = "configure";
+    kernelTrustedCertificates = [
+      ./kernel-signing.pem
+      ./module-signing.pem
+      ./ima-signing.pem
+    ];
+    imaCertificate = ./ima-signing.pem;
+  };
+  settings.security = {
+    mode = "enforce";
+    requireFirmwareSecureBoot = false;
+    targetAuthorities = [ ./boot-policy-signing.pem ];
+  };
+};
+```
+
+All example PEM files contain public certificates only. Firmware enrollment and
+UKI signing are separate owner deployment operations. An enforced image keeps
+verifying targets when firmware Secure Boot is disabled; setting the requirement
+to true additionally refuses that handoff. Missing checks, invalid configuration
+or unknown firmware state never silently select `off`.
+
+There are no independent `skipInitramfs`, `skipCommandLine` or legacy-kexec fallback
+options. `settings.kernelArgs` must fit the signed target authorization. Protected
+recovery defaults to diagnostics/restart/reboot/poweroff, including PID-1 failures;
+the current emergency shell behavior is not the protected-mode contract. Runtime
+permission to boot without a trusted signature is explicitly deferred, not a
+current configuration switch.
 
 ## Evaluated alternatives
 
