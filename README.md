@@ -158,6 +158,15 @@ use this same userspace. The previous `-lean` names are aliases for the defaults
 `zbm-rs-efi-full-userspace` and `zbm-rs-efi-test-full-userspace` retain upstream
 URL-fetch support and systemdMinimal for explicit comparisons or URL-key needs.
 
+## Whole-userspace musl experiment
+
+`zbm-rs-efi-musl` and `zbm-rs-efi-test-musl` target musl for the entire initramfs
+userspace: Rust, BusyBox, ZFS, eudev, kmod and their libraries. Native build tools
+and the matching kernel/ZFS module pair remain separate from that runtime package
+set. The staged ELF audit rejects glibc dependencies in musl images.
+See [the experiment](docs/musl-experiment.md) for build and acceptance results.
+The normal outputs continue to use glibc until an explicit default change.
+
 ## Size regression policy
 
 Every build writes sizes.json. nix/image-size-policy.json records initial

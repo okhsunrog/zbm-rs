@@ -1,0 +1,17 @@
+--- a/utils/gssd/gssd.c
++++ b/utils/gssd/gssd.c
+@@ -547,2 +547,2 @@
+-			printerr(0, "watchdog: attempt to join thread id 0x%lx returned %d (%s)!\n",
+-					info->tid, err, strerror(err));
++			printerr(0, "watchdog: attempt to join thread id 0x%" PRIxPTR " returned %d (%s)!\n",
++					(uintptr_t)info->tid, err, strerror(err));
+@@ -557,2 +557,2 @@
+-				printerr(0, "watchdog: thread id 0x%lx still busy on shutdown\n",
+-					 info->tid);
++				printerr(0, "watchdog: thread id 0x%" PRIxPTR " still busy on shutdown\n",
++					 (uintptr_t)info->tid);
+@@ -562,2 +562,2 @@
+-				printerr(0, "watchdog: attempt to join thread id 0x%lx returned %d (%s)!\n",
+-						info->tid, err, strerror(err));
++				printerr(0, "watchdog: attempt to join thread id 0x%" PRIxPTR " returned %d (%s)!\n",
++						(uintptr_t)info->tid, err, strerror(err));

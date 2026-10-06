@@ -9,6 +9,7 @@
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
       mkImage = args: import ./nix/image.nix ({ inherit pkgs; source = self; zfsSource = zfskit; } // args);
+      muslPkgs = import ./nix/musl-userspace.nix { inherit pkgs; };
       leanUserspace = import ./nix/lean-userspace.nix { inherit pkgs; };
       optimizedRust = { optLevel = "z"; lto = "fat"; codegenUnits = 1; };
       production = mkImage { };
@@ -20,6 +21,10 @@
         zbm-rs-efi = production;
         zbm-rs-efi-test = testing;
         zbm-rs = production.passthru.binary;
+        # One libc across the complete staged userspace; native tools build the
+        # image, and the kernel/ZFS module pair stays on the same kernelPackages.
+        zbm-rs-efi-musl = mkImage { runtimePkgs = muslPkgs; };
+        zbm-rs-efi-test-musl = mkImage { runtimePkgs = muslPkgs; testProfile = true; };
         zbm-rs-efi-full-userspace = mkImage { zfsUserspace = pkgs.zfs_2_4.override { enablePython = false; }; udevPackage = pkgs.systemdMinimal; };
         zbm-rs-efi-test-full-userspace = mkImage { testProfile = true; zfsUserspace = pkgs.zfs_2_4.override { enablePython = false; }; udevPackage = pkgs.systemdMinimal; };
         zbm-rs-efi-test-zstd = mkImage { testProfile = true; initramfsCompression = "zstd"; rustProfile = optimizedRust; zfsUserspace = pkgs.zfs_2_4.override { enablePython = false; }; udevPackage = pkgs.systemdMinimal; };
@@ -31,6 +36,6 @@
       };
       checks.${system}.image-size = production.passthru.sizeCheck;
       nixosModules.default = import ./nix/nixos-module.nix { inherit self; };
-      devShells.${system}.default = pkgs.mkShell { packages = with pkgs; [ cargo rustc rustfmt clippy qemu cpio uv python3 gzip xz zstd ]; };
+      devShells.${system}.default = pkgs.mkShell { packages = with pkgs; [ cargo rustc rustfmt clippy qemu cpio uv python3 gzip xz zstd patchelf ]; };
     };
 }

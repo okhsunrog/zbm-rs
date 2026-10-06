@@ -1,0 +1,6 @@
+--- a/utils/nfsdctl/nfsdctl.c
++++ b/utils/nfsdctl/nfsdctl.c
+@@ -21,2 +21,3 @@
+ #include <sys/queue.h>
++#include <libgen.h>
+ #include <limits.h>

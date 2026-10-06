@@ -1,9 +1,9 @@
-{ pkgs, source, zfsSource, kernelPackages ? pkgs.linuxPackages
-, zfsUserspace ? (import ./lean-userspace.nix { inherit pkgs; }).zfs
+{ pkgs, source, zfsSource, runtimePkgs ? pkgs, kernelPackages ? pkgs.linuxPackages
+, zfsUserspace ? (import ./lean-userspace.nix { pkgs = runtimePkgs; }).zfs
 , testProfile ? false, profile ? "portable", hardwareManifest ? null
 , extraModules ? [], forcedModules ? [], loaderConfig ? null
 , initramfsCompression ? "zstd", rustProfile ? {}
-, udevPackage ? (import ./lean-userspace.nix { inherit pkgs; }).udev }:
+, udevPackage ? (import ./lean-userspace.nix { pkgs = runtimePkgs; }).udev }:
 let
   lib = pkgs.lib;
   hardware = if hardwareManifest == null then {} else builtins.fromJSON (builtins.readFile hardwareManifest);
@@ -37,7 +37,7 @@ let
     cp -r ${rustSource}/Cargo.toml ${rustSource}/Cargo.lock ${rustSource}/crates ${rustSource}/xtask ${rustSource}/config $out/zbm-rs/
     cp -r ${zfsSource}/. $out/zfskit/
   '';
-  binary = pkgs.rustPlatform.buildRustPackage {
+  binary = runtimePkgs.rustPlatform.buildRustPackage {
     ZBM_RS_CONFIG = configJson;
     pname = "zbm-rs";
     version = "0.1.0";
@@ -49,7 +49,9 @@ let
     buildFeatures = lib.optional testProfile "vm-test";
     env = lib.optionalAttrs (rustProfile ? optLevel) { CARGO_PROFILE_RELEASE_OPT_LEVEL = toString rustProfile.optLevel; }
       // lib.optionalAttrs (rustProfile ? lto) { CARGO_PROFILE_RELEASE_LTO = rustProfile.lto; }
-      // lib.optionalAttrs (rustProfile ? codegenUnits) { CARGO_PROFILE_RELEASE_CODEGEN_UNITS = toString rustProfile.codegenUnits; };
+      // lib.optionalAttrs (rustProfile ? codegenUnits) { CARGO_PROFILE_RELEASE_CODEGEN_UNITS = toString rustProfile.codegenUnits; }
+      # Share the musl already needed by C tools instead of embedding another copy.
+      // lib.optionalAttrs (runtimeLibc == "musl") { RUSTFLAGS = "-C target-feature=-crt-static"; };
   };
   udevDaemon = if (udevPackage.pname or "") == "eudev" then "${udevPackage}/bin/udevd"
     else "${udevPackage}/lib/systemd/systemd-udevd";
@@ -57,34 +59,35 @@ let
     else "${udevPackage}/lib/udev/rules.d";
   tools = [
     { source = "${binary}/bin/zbm-rs"; target = "/bin/zbm-rs"; }
-    { source = "${pkgs.busybox}/bin/busybox"; link = "/bin/busybox"; }
-    { source = "${pkgs.kmod}/bin/modprobe"; link = "/usr/bin/modprobe"; }
+    { source = "${runtimePkgs.busybox}/bin/busybox"; link = "/bin/busybox"; }
+    { source = "${runtimePkgs.kmod}/bin/modprobe"; link = "/usr/bin/modprobe"; }
     { source = "${zfsUserspace}/bin/zfs"; link = "/usr/bin/zfs"; }
     { source = "${zfsUserspace}/bin/zpool"; link = "/usr/bin/zpool"; }
     { source = "${udevDaemon}"; link = "/usr/lib/systemd/systemd-udevd"; }
     { source = "${udevPackage}/bin/udevadm"; link = "/usr/bin/udevadm"; }
     { source = "${udevPackage}/lib/udev/ata_id"; link = "/usr/lib/udev/ata_id"; }
     { source = "${udevPackage}/lib/udev/scsi_id"; link = "/usr/lib/udev/scsi_id"; }
-    { source = "${lib.getLib pkgs.kmod}/lib/libkmod.so.2"; link = "/usr/lib/libkmod.so.2"; }
-    { source = "${lib.getLib pkgs.util-linux}/lib/libblkid.so.1"; link = "/usr/lib/libblkid.so.1"; }
+    { source = "${lib.getLib runtimePkgs.kmod}/lib/libkmod.so.2"; link = "/usr/lib/libkmod.so.2"; }
+    { source = "${lib.getLib runtimePkgs.util-linux}/lib/libblkid.so.1"; link = "/usr/lib/libblkid.so.1"; }
   ] ++ lib.optionals testProfile [
-    { source = "${pkgs.openssh}/bin/sshd"; link = "/usr/bin/sshd"; }
-    { source = "${pkgs.openssh}/bin/ssh-keygen"; link = "/usr/bin/ssh-keygen"; }
-    { source = "${pkgs.openssh}/libexec/sshd-session"; }
-    { source = "${pkgs.openssh}/libexec/sshd-auth"; }
+    { source = "${runtimePkgs.openssh}/bin/sshd"; link = "/usr/bin/sshd"; }
+    { source = "${runtimePkgs.openssh}/bin/ssh-keygen"; link = "/usr/bin/ssh-keygen"; }
+    { source = "${runtimePkgs.openssh}/libexec/sshd-session"; }
+    { source = "${runtimePkgs.openssh}/libexec/sshd-auth"; }
   ];
   setup = pkgs.writeText "setup.sh" (lib.replaceStrings
     [ "# NIX_FORCED_MODULES" ]
     [ (lib.concatMapStringsSep "\n" (name: "/usr/bin/modprobe " + lib.escapeShellArg name) (lib.remove "zfs" forcedModules)) ]
     (builtins.readFile (source + "/boot/setup.sh")));
+  runtimeLibc = runtimePkgs.stdenv.hostPlatform.libc;
   runtime = pkgs.runCommand "zbm-runtime-${profile}" {
     nativeBuildInputs = [ pkgs.uv pkgs.python3 pkgs.patchelf pkgs.cpio pkgs.openssh ];
   } ''
     export UV_CACHE_DIR="$TMPDIR/uv-cache"
     mkdir -p root/{bin,usr/bin,usr/lib,usr/sbin,etc/zbm-rs,root,proc,sys,dev,run,tmp,var/empty,usr/share/empty.sshd}
-    uv run --offline --no-project --python ${pkgs.python3}/bin/python ${source}/nix/stage-runtime.py root ${pkgs.writeText "tools.json" (builtins.toJSON tools)}
+    uv run --offline --no-project --python ${pkgs.python3}/bin/python ${source}/nix/stage-runtime.py root ${pkgs.writeText "tools.json" (builtins.toJSON tools)} ${runtimeLibc}
     ln -s /bin/zbm-rs root/init
-    ln -s ${pkgs.busybox}/bin/busybox root/bin/sh
+    ln -s ${runtimePkgs.busybox}/bin/busybox root/bin/sh
     ln -s usr/lib root/lib
     ln -s usr/sbin root/sbin
     cp -r ${modules}/lib/. root/usr/lib/
@@ -108,6 +111,7 @@ let
       touch root/etc/zbm-test-ssh
     ''}
     mkdir -p $out
+    cp runtime-audit.json $out/runtime-audit.json
     (cd root; find . -exec touch -h -d '@1' {} +; find . -print0 | LC_ALL=C sort -z | cpio --null --quiet -o -H newc --owner=0:0 --reproducible) > $out/root.cpio
     ${lib.optionalString testProfile "cp client-key $out/id_ed25519"}
   '';
@@ -121,12 +125,13 @@ let
   cmdline = "console=ttyS0,115200 console=tty0 loglevel=3 panic=-1";
   image = pkgs.runCommand "zbm-rs-efi-${profile}${lib.optionalString testProfile "-test"}" {
     nativeBuildInputs = [ pkgs.systemdUkify pkgs.python3 pkgs.uv ];
-    passthru = { inherit binary kernel zfsModule zfsUserspace udevPackage modules initramfs configJson runtime; inherit sizeCheck; };
+    passthru = { inherit binary kernel zfsModule zfsUserspace udevPackage modules initramfs configJson runtime runtimeLibc; inherit sizeCheck; };
   } ''
     export UV_CACHE_DIR="$TMPDIR/uv-cache"
     mkdir -p $out/esp/EFI/BOOT
     cp ${kernel}/bzImage $out/vmlinuz
     cp ${initramfs}/initramfs.img $out/initramfs.img
+    cp ${runtime}/runtime-audit.json $out/runtime-audit.json
     echo ${lib.escapeShellArg cmdline} > $out/cmdline
     ukify build --linux $out/vmlinuz --initrd $out/initramfs.img \
       --uname ${lib.escapeShellArg kernel.modDirVersion} --cmdline @${pkgs.writeText "cmdline" cmdline} \
