@@ -99,6 +99,10 @@ let
     printf 'root::0:0:99999:7:::\nsshd:!:0:0:99999:7:::\n' > root/etc/shadow
     printf 'root:x:0:\nsshd:x:74:\nnobody:x:65534:\n' > root/etc/group
     mkdir -p root/usr/lib/udev/rules.d
+    # eudev's vendor rules path is compiled against its original Nix prefix.
+    # This common path is searched by both eudev and systemd-udevd.
+    mkdir -p root/etc/udev
+    ln -s /usr/lib/udev/rules.d root/etc/udev/rules.d
     cp ${udevRules}/{60-persistent-storage,80-drivers}.rules root/usr/lib/udev/rules.d/
     substituteInPlace root/usr/lib/udev/rules.d/60-persistent-storage.rules \
       --replace-quiet '${udevPackage}/lib/udev' '/usr/lib/udev'
