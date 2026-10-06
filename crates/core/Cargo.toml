@@ -1,0 +1,10 @@
+[package]
+name = "zbm-core"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+tokio = { version = "1.53.2", features = ["rt", "time", "macros"] }
+zfskit = { version = "0.2.2", path = "../../../zfskit" }

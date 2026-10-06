@@ -1,0 +1,43 @@
+name: Rust and Nix image checks
+on:
+  push:
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: zbm-rs
+      - uses: actions/checkout@v4
+        with:
+          repository: okhsunrog/zfskit
+          ref: 6389c1be98b7721eec9858cc4916cb866d09d5c2
+          path: zfskit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: cachix/install-nix-action@v31
+      - run: cargo fmt --all --check
+        working-directory: zbm-rs
+      - run: cargo test --workspace --all-features --locked
+        working-directory: zbm-rs
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        working-directory: zbm-rs
+      - run: nix develop -c uv run --no-project nix/check-config.py
+        working-directory: zbm-rs
+      - run: nix build .#zbm-rs-efi .#checks.x86_64-linux.image-size --out-link result
+        working-directory: zbm-rs
+      - run: nix build .#zbm-rs-efi-test --out-link result-test
+        working-directory: zbm-rs
+      - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf
+      - run: cargo xtask smoke --run target/vm/ci-lifecycle --tcg --lifecycle
+        working-directory: zbm-rs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: image-sizes-and-vm-evidence
+          path: |
+            zbm-rs/result/sizes.json
+            zbm-rs/result-test/sizes.json
+            zbm-rs/target/vm/ci-lifecycle

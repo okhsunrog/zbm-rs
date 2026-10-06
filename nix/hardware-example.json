@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "modules": ["virtio_pci", "virtio_blk", "virtio_gpu", "usbhid", "hid_generic", "atkbd", "i8042"],
+  "firmwarePaths": []
+}

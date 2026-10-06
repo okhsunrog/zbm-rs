@@ -1,0 +1,7 @@
+{
+  "ui": {"timeout_secs": 5, "show_snapshots": true, "title": null},
+  "manager": {"restart_limit": 2},
+  "zfs": {"import_policy": "host-id"},
+  "nixos": {"generation_limit": 20},
+  "kernel_args": []
+}
