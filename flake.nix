@@ -21,6 +21,7 @@
         zbm-rs-efi = production;
         zbm-rs-efi-test = testing;
         zbm-rs = production.passthru.binary;
+        zbm-rs-boot-fixture = import ./nix/boot-fixture.nix { inherit pkgs nixpkgs system; };
         # One libc across the complete staged userspace; native tools build the
         # image, and the kernel/ZFS module pair stays on the same kernelPackages.
         zbm-rs-efi-musl = mkImage { runtimePkgs = muslPkgs; };
@@ -34,7 +35,13 @@
         zbm-rs-efi-lean = production;
         zbm-rs-efi-host-only-example = mkImage { profile = "host-only"; hardwareManifest = ./nix/hardware-example.json; };
       };
-      checks.${system}.image-size = production.passthru.sizeCheck;
+      checks.${system} = {
+        image-size = production.passthru.sizeCheck;
+        module-config = import ./nix/check-module-config.nix {
+        inherit self nixpkgs pkgs system;
+        binary = production.passthru.binary;
+        };
+      };
       nixosModules.default = import ./nix/nixos-module.nix { inherit self; };
       devShells.${system}.default = pkgs.mkShell { packages = with pkgs; [ cargo rustc rustfmt clippy qemu cpio uv python3 gzip xz zstd patchelf ]; };
     };

@@ -31,17 +31,87 @@ pub fn log(message: &str) {
     }
 }
 
+#[derive(Default)]
+struct Recovery {
+    console: Option<Console>,
+    active: Option<i32>,
+    mounted: bool,
+    bootstrapped: bool,
+}
+
 pub fn run() -> ! {
-    match std::panic::catch_unwind(supervise) {
-        Ok(Ok(())) => log("supervisor unexpectedly returned"),
-        Ok(Err(error)) => log(&format!("supervisor error: {error}")),
-        Err(_) => log("supervisor panic caught"),
-    }
-    // Never return from PID 1, including bootstrap or recovery failures.
+    // Keep console baseline and child identity outside the unwind boundary.
+    let mut recovery = Recovery::default();
     loop {
-        let _ = child::reap(None);
-        std::thread::sleep(Duration::from_secs(1));
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| supervise(&mut recovery))) {
+            Ok(Ok(())) => log("supervisor unexpectedly returned"),
+            Ok(Err(error)) => log(&format!("supervisor error: {error}")),
+            Err(_) => log("supervisor panic caught"),
+        }
+        // PID 1 must recover from its own errors too, not only manager failures.
+        loop {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                last_ditch(&mut recovery)
+            })) {
+                Ok(Ok(())) => {
+                    log("last-ditch-return; restarting supervisor");
+                    break;
+                }
+                result => {
+                    if let Ok(Err(error)) = result {
+                        log(&format!("last-ditch failed: {error}"));
+                    } else {
+                        log("last-ditch panic caught");
+                    }
+                    log("recovery unavailable; requesting reboot");
+                    unsafe {
+                        libc::sync();
+                        libc::reboot(libc::RB_AUTOBOOT);
+                    }
+                    // If reboot is unavailable, keep PID 1 alive and retry recovery.
+                    for _ in 0..10 {
+                        if matches!(child::reap(recovery.active), Ok(Some(_))) {
+                            recovery.active = None;
+                        }
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                }
+            }
+        }
     }
+}
+
+fn last_ditch(recovery: &mut Recovery) -> io::Result<()> {
+    log("last-ditch-recovery");
+    signals::install()?;
+    if let Some(pid) = recovery.active {
+        // The leader has not been reaped, so the process-group ID is reserved.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while child::reap(Some(pid))?.is_none() {
+            if Instant::now() >= deadline {
+                return Err(io::Error::other("Cannot reap failed supervisor's child"));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        recovery.active = None;
+    }
+    let _ = fs::remove_file("/run/zbm-rs/manager.pid");
+    if recovery.console.is_none() {
+        recovery.console = Some(Console::open()?);
+    }
+    let console = recovery.console.as_mut().unwrap();
+    console.restore()?;
+    if let Ok(state) = console.state() {
+        let _ = fs::write("/run/zbm-rs/console-restored", state);
+    }
+    recovery_shell(
+        console,
+        &mut recovery.active,
+        "zbm-rs emergency recovery: supervisor failed, PID 1 is alive (last-ditch recovery). Exit to restart the manager.",
+    )
 }
 
 struct CrashPolicy {
@@ -73,30 +143,44 @@ impl CrashPolicy {
     }
 }
 
-fn supervise() -> io::Result<()> {
-    early_mounts::setup()?;
+fn supervise(recovery: &mut Recovery) -> io::Result<()> {
+    if !recovery.mounted {
+        early_mounts::setup()?;
+        recovery.mounted = true;
+    }
     signals::install()?;
-    let mut console = Console::open()?;
-    let baseline = console.state()?;
-    fs::write("/run/zbm-rs/console-baseline", &baseline)?;
-    log(&format!("started pid=1 {baseline}"));
-    let mut bootstrap = Command::new("/bin/sh");
-    bootstrap
-        .arg("/etc/zbm-rs/setup.sh")
-        .env("PATH", "/usr/bin:/usr/sbin:/bin:/sbin")
-        .env("TERM", "linux")
-        .env("LD_LIBRARY_PATH", "/usr/lib");
-    let pid = child::spawn(&console, &mut bootstrap, None)?;
-    let (status, _) = wait(pid, None)?;
-    log(&format!("bootstrap status={status}"));
-    console.restore()?;
+    if recovery.console.is_none() {
+        recovery.console = Some(Console::open()?);
+    }
+    let console = recovery.console.as_mut().unwrap();
+    let active = &mut recovery.active;
+    if !recovery.bootstrapped {
+        let baseline = console.state()?;
+        fs::write("/run/zbm-rs/console-baseline", &baseline)?;
+        log(&format!("started pid=1 {baseline}"));
+        let mut bootstrap = Command::new("/bin/sh");
+        bootstrap
+            .arg("/etc/zbm-rs/setup.sh")
+            .env("PATH", "/usr/bin:/usr/sbin:/bin:/sbin")
+            .env("TERM", "linux")
+            .env("LD_LIBRARY_PATH", "/usr/lib");
+        let pid = child::spawn(console, &mut bootstrap, None)?;
+        *active = Some(pid);
+        let (status, _) = wait(pid, None, active)?;
+        log(&format!("bootstrap status={status}"));
+        console.restore()?;
+        if !status.success() {
+            return Err(io::Error::other("Early userspace bootstrap failed"));
+        }
+        recovery.bootstrapped = true;
+    }
     let config = loop {
         match crate::config::load(true) {
             Ok(config) => break config,
             Err(error) => {
                 log(&format!("invalid image configuration: {error:#}"));
                 console.notice(&format!("Invalid image configuration: {error:#}"));
-                emergency(&mut console)?;
+                emergency(console, active)?;
             }
         }
     };
@@ -112,18 +196,19 @@ fn supervise() -> io::Result<()> {
             .env("LD_LIBRARY_PATH", "/usr/lib")
             .env("PATH", "/usr/bin:/usr/sbin:/bin:/sbin")
             .env(session::FD_ENV, socket.as_raw_fd().to_string());
-        let pid = match child::spawn(&console, &mut command, Some(socket.as_raw_fd())) {
+        let pid = match child::spawn(console, &mut command, Some(socket.as_raw_fd())) {
             Ok(pid) => pid,
             Err(error) => {
                 log(&format!("manager spawn failed: {error}"));
-                emergency(&mut console)?;
+                emergency(console, active)?;
                 continue;
             }
         };
         drop(socket);
+        *active = Some(pid);
         fs::write("/run/zbm-rs/manager.pid", pid.to_string())?;
         log(&format!("manager-start pid={pid}"));
-        let (status, request) = wait(pid, Some(&parent))?;
+        let (status, request) = wait(pid, Some(&parent), active)?;
         let _ = fs::remove_file("/run/zbm-rs/manager.pid");
         console.restore()?;
         let restored = console.state()?;
@@ -141,7 +226,7 @@ fn supervise() -> io::Result<()> {
                 log("controlled-restart");
             }
             (true, Some(Request::EmergencyShell)) => {
-                emergency(&mut console)?;
+                emergency(console, active)?;
                 policy.reset();
             }
             (true, Some(Request::PowerOff | Request::Reboot)) => {
@@ -158,13 +243,13 @@ fn supervise() -> io::Result<()> {
                 if unsafe { libc::reboot(how) } < 0 {
                     log(&format!("shutdown failed: {}", io::Error::last_os_error()));
                 }
-                emergency(&mut console)?;
+                emergency(console, active)?;
                 policy.reset();
             }
             (_, Some(Request::KexecStarting)) => {
                 // A successful kexec never returns to this kernel. Returning is a failed handoff.
                 log("kexec-returned; recovery required");
-                emergency(&mut console)?;
+                emergency(console, active)?;
                 policy.reset();
             }
             _ => {
@@ -173,7 +258,7 @@ fn supervise() -> io::Result<()> {
                     log("crash-restart");
                 } else {
                     log("crash-loop");
-                    emergency(&mut console)?;
+                    emergency(console, active)?;
                     policy.reset();
                 }
             }
@@ -181,11 +266,17 @@ fn supervise() -> io::Result<()> {
     }
 }
 
-fn wait(pid: i32, channel: Option<&UnixDatagram>) -> io::Result<(ExitStatus, Option<Request>)> {
+fn wait(
+    pid: i32,
+    channel: Option<&UnixDatagram>,
+    active: &mut Option<i32>,
+) -> io::Result<(ExitStatus, Option<Request>)> {
     let mut request = None;
     let mut deadline = None;
     let mut killed = false;
     loop {
+        #[cfg(feature = "vm-test")]
+        crate::vm_test::supervisor_fault()?;
         let pending = signals::take();
         for signal in signals::FORWARDED {
             if pending & (1 << signal) != 0 {
@@ -198,6 +289,7 @@ fn wait(pid: i32, channel: Option<&UnixDatagram>) -> io::Result<(ExitStatus, Opt
         }
         drain(channel, &mut request, &mut deadline)?;
         if let Some(status) = child::reap(Some(pid))? {
+            *active = None;
             drain(channel, &mut request, &mut deadline)?;
             return Ok((status, request));
         }
@@ -244,13 +336,26 @@ fn drain(
     Ok(())
 }
 
-fn emergency(console: &mut Console) -> io::Result<()> {
+fn emergency(console: &mut Console, active: &mut Option<i32>) -> io::Result<()> {
+    recovery_shell(
+        console,
+        active,
+        "zbm-rs emergency recovery. Exit the shell to start a new manager.",
+    )
+}
+
+fn recovery_shell(console: &mut Console, active: &mut Option<i32>, notice: &str) -> io::Result<()> {
     console.restore()?;
-    console.notice("zbm-rs emergency recovery. Exit the shell to start a new manager.");
+    console.notice(notice);
     log("emergency-shell");
     let mut command = Command::new("/bin/sh");
+    command
+        .env("PATH", "/usr/bin:/usr/sbin:/bin:/sbin")
+        .env("TERM", "linux")
+        .env("LD_LIBRARY_PATH", "/usr/lib");
     let pid = child::spawn(console, &mut command, None)?;
-    wait(pid, None)?;
+    *active = Some(pid);
+    wait(pid, None, active)?;
     console.restore()?;
     log("emergency-return");
     Ok(())

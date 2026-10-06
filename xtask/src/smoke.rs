@@ -10,8 +10,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-struct OwnedVm(Child);
+pub(crate) struct OwnedVm(pub(crate) Child);
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+pub(crate) fn install_interrupt() -> Result<()> {
+    ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::Relaxed))?;
+    Ok(())
+}
 impl Drop for OwnedVm {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -67,7 +71,7 @@ pub fn run(
     direct: bool,
     lifecycle: bool,
 ) -> Result<()> {
-    ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::Relaxed))?;
+    install_interrupt()?;
     // Re-exec this running inode even if Cargo replaces the checkout binary.
     let mut command = Command::new("/proc/self/exe");
     command
@@ -159,6 +163,10 @@ pub fn run(
         Ok(())
     })();
     if let Err(error) = &result {
+        let _ = vm::screenshot(run, &run.join("failure.png"));
+        if let Ok(console) = vm::console(run) {
+            let _ = fs::write(run.join("failure.txt"), console);
+        }
         eprintln!(
             "Smoke failed: {error:#}. Preserved diagnostics: {}",
             run.display()

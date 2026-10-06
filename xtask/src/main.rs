@@ -1,3 +1,4 @@
+mod boot_smoke;
 mod lifecycle;
 mod qmp;
 mod smoke;
@@ -16,6 +17,18 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Task {
+    BootSmoke {
+        #[arg(long)]
+        run: PathBuf,
+        #[arg(long)]
+        image: PathBuf,
+        #[arg(long)]
+        fixture: PathBuf,
+        #[arg(long)]
+        tcg: bool,
+        #[arg(long, default_value_t = 2230)]
+        port: u16,
+    },
     Image {
         #[arg(long)]
         test_ssh: bool,
@@ -52,6 +65,8 @@ enum VmTask {
         port: u16,
         #[arg(long)]
         direct: bool,
+        #[arg(long)]
+        fixture: Option<PathBuf>,
     },
     Screen {
         #[arg(long)]
@@ -107,7 +122,8 @@ fn main() -> Result<()> {
                 tcg,
                 port,
                 direct,
-            } => vm::boot(&run, &image, tcg, port, direct)?,
+                fixture,
+            } => vm::boot(&run, &image, tcg, port, direct, fixture.as_deref())?,
             VmTask::Screen { text } => {
                 if text {
                     print!("{}", vm::console(&run)?);
@@ -136,6 +152,13 @@ fn main() -> Result<()> {
             direct,
             lifecycle,
         } => smoke::run(&run, &image, tcg, port, direct, lifecycle)?,
+        Task::BootSmoke {
+            run,
+            image,
+            fixture,
+            tcg,
+            port,
+        } => boot_smoke::run(&run, &image, &fixture, tcg, port)?,
     }
     Ok(())
 }

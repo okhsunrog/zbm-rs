@@ -1,4 +1,6 @@
 //! Boot-domain state. Discovery never imports, mounts or modifies a pool.
+pub mod boot;
+pub mod boot_zfs;
 use serde::Serialize;
 use std::time::Duration;
 pub use zfskit::Zfs;
@@ -29,10 +31,14 @@ pub struct State {
     pub scanning: bool,
     pub error: Option<String>,
     pub scans: u64,
+    pub targets: Vec<boot::BootTarget>,
+    pub selected_target: usize,
 }
 
 impl State {
     pub fn apply_scan(&mut self, result: Result<Vec<Pool>, String>) {
+        self.targets.clear();
+        self.selected_target = 0;
         self.scanning = false;
         self.scans += 1;
         match result {
@@ -64,11 +70,20 @@ pub async fn discover(zfs: &Zfs) -> Result<Vec<Pool>, String> {
         .await
         .map_err(|_| "Pool discovery timed out after 10 seconds".to_owned())?
         .map_err(|e| e.to_string())?;
-    pools
+    let mut pools: Vec<Pool> = pools
         .into_iter()
         .map(Pool::try_from)
         .collect::<Result<_, _>>()
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    for pool in boot_zfs::managed_pools(zfs)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        if !pools.iter().any(|p| p.guid == pool.guid) {
+            pools.push(pool);
+        }
+    }
+    Ok(pools)
 }
 
 pub fn preview() -> Vec<Pool> {

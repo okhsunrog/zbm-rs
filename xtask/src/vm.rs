@@ -16,7 +16,14 @@ pub fn absolute(path: &Path) -> Result<PathBuf> {
     })
 }
 
-pub fn boot(run: &Path, image: &Path, tcg: bool, port: u16, direct: bool) -> Result<()> {
+pub fn boot(
+    run: &Path,
+    image: &Path,
+    tcg: bool,
+    port: u16,
+    direct: bool,
+    fixture: Option<&Path>,
+) -> Result<()> {
     let run = absolute(run)?;
     let image = image
         .canonicalize()
@@ -70,7 +77,7 @@ pub fn boot(run: &Path, image: &Path, tcg: bool, port: u16, direct: bool) -> Res
         "-cpu",
         if tcg { "max" } else { "host" },
         "-m",
-        "1024",
+        if fixture.is_some() { "2048" } else { "1024" },
         "-smp",
         "2",
         "-vga",
@@ -84,10 +91,26 @@ pub fn boot(run: &Path, image: &Path, tcg: bool, port: u16, direct: bool) -> Res
         &format!("file:{}", run.join("serial.log").display()),
         "-drive",
         &format!(
-            "file={},format=qcow2,if=virtio",
+            "file={},format=qcow2,if=none,id=zbm-root",
             run.join("disk.qcow2").display()
         ),
+        "-device",
+        "virtio-blk-pci,drive=zbm-root,serial=zbm-fixture-disk",
     ]);
+    if let Some(fixture) = fixture {
+        let archive = fixture.join("root.tar").canonicalize()?;
+        ensure!(
+            archive.is_file() && !archive.to_string_lossy().contains(','),
+            "Invalid generated fixture archive"
+        );
+        cmd.args([
+            "-drive",
+            &format!(
+                "file={},format=raw,if=virtio,readonly=on",
+                archive.display()
+            ),
+        ]);
+    }
     if direct {
         cmd.arg("-kernel")
             .arg(image.join("vmlinuz"))
@@ -220,13 +243,19 @@ pub fn screen(run: &Path) -> Result<Value> {
 }
 
 pub fn ssh(run: &Path, command: &str) -> Result<String> {
+    ssh_timeout(run, command, 30)
+}
+pub fn ssh_timeout(run: &Path, command: &str, seconds: u32) -> Result<String> {
     let info: Value = serde_json::from_slice(&fs::read(run.join("connection.json"))?)?;
     if info["test_ssh"] != true {
         bail!("SSH unavailable: rebuild with cargo xtask image --test-ssh");
     }
-    let bounded = format!("timeout 30 /bin/sh -c '{}'", command.replace('\'', "'\\''"));
+    let bounded = format!(
+        "timeout {seconds} /bin/sh -c '{}'",
+        command.replace('\'', "'\\''")
+    );
     let output = Command::new("timeout")
-        .args(["--kill-after=2", "35", "ssh"])
+        .args(["--kill-after=2", &(seconds + 5).to_string(), "ssh"])
         .args([
             "-F",
             "/dev/null",
@@ -257,7 +286,8 @@ pub fn ssh(run: &Path, command: &str) -> Result<String> {
         .output()?;
     ensure!(
         output.status.success(),
-        "Guest SSH failed: {}",
+        "Guest SSH failed ({}): {}",
+        output.status,
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(String::from_utf8(output.stdout)?)

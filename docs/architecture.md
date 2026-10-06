@@ -28,6 +28,13 @@ opens an emergency shell. Exiting that shell explicitly starts a fresh manager.
 Intentional Restart/Shell reset the failure budget. Unannounced exit, including
 status 0, is unexpected; manager Q therefore does not terminate PID 1.
 
+The supervisor's own unwind/error boundary retains the original console and
+active child identity. Its last-ditch path kills/reaps the owned process group,
+restores the console and starts an emergency shell. Exit retries supervision
+without remounting /run or duplicating the completed bootstrap. If recovery itself
+fails, PID 1 requests reboot; an unsuccessful reboot leaves a bounded-delay
+recovery retry loop. Production has no supervisor fault injection hooks.
+
 ## Private lifecycle protocol
 
 A private Unix datagram socketpair carries one typed byte: Restart, EmergencyShell,
@@ -39,8 +46,23 @@ After intent, manager exit is bounded (2 seconds; 30 for a future kexec attempt)
 
 Shutdown requests are acted upon only after clean manager termination. Successful
 kexec leaves the old kernel; returning after KexecStarting is failed handoff and
-enters recovery, not a crash loop. Actual kexec/OS selection is not implemented.
-The current lifecycle test covers that failure classification, not kernel handoff.
+enters recovery, not a crash loop. The lifecycle scenario tests failed handoff;
+the separate NixOS boot scenario exercises actual kernel handoff and requires a
+success marker from the selected OS.
+
+## Initial boot backend
+
+core owns BootTarget, BootPlan, guest-root-aware Bootspec path resolution and
+explicit import/mount reconciliation. TUI selects a pool or generation; the
+manager executor loads through kexec_file_load and executes the handoff.
+Absolute OS symlinks resolve within that OS root, not the loader's /nix/store.
+
+Before import/mount effects, /run/zbm-rs/managed records the selected pool GUID
+and mount destinations. A restarted manager checks imported pools and mountinfo
+before reusing them. It does not claim pre-existing foreign imports, force import,
+or export a pool with a foreign mount. These ephemeral ownership records are
+runtime state, not mutable loader configuration or a persistent recovery journal.
+The first path does not create clones or change dataset properties.
 
 ## Canonical Nix image
 

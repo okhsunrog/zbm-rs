@@ -9,6 +9,7 @@ use ratatui::{
 };
 use std::{fs::OpenOptions, io::Write, path::PathBuf, process::Command, time::Duration};
 use zbm_core::{State, discover, preview};
+mod executor;
 
 struct Options {
     preview: bool,
@@ -50,6 +51,17 @@ fn draw(frame: &mut Frame, state: &State, config: &crate::config::Config) {
     );
     let items: Vec<ListItem> = if state.scanning {
         vec![ListItem::new("Discovering pools...")]
+    } else if !state.targets.is_empty() {
+        state
+            .targets
+            .iter()
+            .map(|target| {
+                ListItem::new(format!(
+                    "{}  generation {}  {}",
+                    target.dataset, target.generation, target.label
+                ))
+            })
+            .collect()
     } else if state.pools.is_empty() {
         vec![ListItem::new("No importable pools discovered")]
     } else {
@@ -60,16 +72,23 @@ fn draw(frame: &mut Frame, state: &State, config: &crate::config::Config) {
             .collect()
     };
     let list = List::new(items)
-        .block(Block::bordered().title("Importable ZFS pools"))
+        .block(Block::bordered().title(if state.targets.is_empty() {
+            "ZFS pools"
+        } else {
+            "NixOS generations"
+        }))
         .highlight_style(Style::default().bg(Color::Blue))
         .highlight_symbol("> ");
-    let mut selection =
-        ListState::default().with_selected((!state.pools.is_empty()).then_some(state.selected));
+    let mut selection = ListState::default().with_selected(if !state.targets.is_empty() {
+        Some(state.selected_target)
+    } else {
+        (!state.pools.is_empty()).then_some(state.selected)
+    });
     frame.render_stateful_widget(list, areas[1], &mut selection);
     let message = state
         .error
         .as_deref()
-        .unwrap_or("Discovery only. Linux boot and pool import are not implemented yet.");
+        .unwrap_or(if state.targets.is_empty() {"Enter: import the selected pool without force and inspect NixOS generations (read-only mounts)."} else {"Enter: boot the selected generation. R: return to pool discovery."});
     frame.render_widget(
         Paragraph::new(message)
             .wrap(Wrap { trim: true })
@@ -77,8 +96,10 @@ fn draw(frame: &mut Frame, state: &State, config: &crate::config::Config) {
         areas[2],
     );
     frame.render_widget(
-        Paragraph::new("[R] Rescan  [S] Shell  [N] Restart  [P] Power off (supervised)  [Q] Exit")
-            .block(Block::bordered()),
+        Paragraph::new(
+            "[Enter] Open / Boot  [R] Rescan  [S] Shell  [N] Restart  [P] Power off  [Q] Exit",
+        )
+        .block(Block::bordered()),
         areas[3],
     );
 }
@@ -144,8 +165,76 @@ async fn tui(
                     rescan = true;
                 }
                 KeyCode::Up | KeyCode::Down => {
-                    state.move_selection(key.code == KeyCode::Down);
+                    if state.targets.is_empty() {
+                        state.move_selection(key.code == KeyCode::Down);
+                    } else {
+                        let length = state.targets.len();
+                        state.selected_target = (state.selected_target
+                            + if key.code == KeyCode::Down {
+                                1
+                            } else {
+                                length - 1
+                            })
+                            % length;
+                    }
                     emit(options, "selection", &state)?;
+                }
+                KeyCode::Enter if options.supervised && !options.preview && !state.scanning => {
+                    if state.targets.is_empty() {
+                        if let Some(pool) = state.pools.get(state.selected) {
+                            state.error = Some("Inspecting selected pool...".into());
+                            terminal.draw(|frame| draw(frame, &state, &options.config))?;
+                            let readonly = matches!(
+                                options.config.zfs.import_policy,
+                                crate::config::ImportPolicy::ReadOnly
+                            );
+                            match zbm_core::boot_zfs::targets(
+                                &zbm_core::Zfs::new(),
+                                pool,
+                                readonly,
+                                options.config.nixos.generation_limit,
+                            )
+                            .await
+                            {
+                                Ok(targets) => {
+                                    state.error = targets
+                                        .is_empty()
+                                        .then(|| "No supported NixOS generations found".into());
+                                    state.targets = targets;
+                                    state.selected_target = 0;
+                                }
+                                Err(error) => state.error = Some(error.to_string()),
+                            }
+                            terminal.draw(|frame| draw(frame, &state, &options.config))?;
+                            emit(options, "boot-targets", &state)?;
+                        }
+                    } else {
+                        let preparation = async {
+                            let plan = zbm_core::boot::BootPlan::resolve(
+                                &state.targets[state.selected_target],
+                                &options.config.kernel_args,
+                            )?;
+                            let loaded = executor::LoadedKernel::load(&plan)?;
+                            let pool = &state.pools[state.selected];
+                            zbm_core::boot_zfs::release_owned(&zbm_core::Zfs::new(), pool).await?;
+                            Ok::<_, anyhow::Error>((plan, loaded))
+                        }
+                        .await;
+                        match preparation {
+                            Ok((plan, loaded)) => {
+                                let path = "/run/zbm-rs/boot-plan.json";
+                                std::fs::write(path, serde_json::to_vec(&plan)?)?;
+                                emit(options, "kexec", &state)?;
+                                ratatui::restore();
+                                channel.unwrap().request(Request::KexecStarting)?;
+                                loaded.execute()?;
+                            }
+                            Err(error) => {
+                                state.error = Some(format!("Boot preparation failed: {error:#}"));
+                                emit(options, "boot-error", &state)?;
+                            }
+                        }
+                    }
                 }
                 KeyCode::Char('s') => {
                     emit(options, "shell", &state)?;

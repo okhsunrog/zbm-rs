@@ -8,7 +8,7 @@ pub struct Config {
     pub manager: Manager,
     pub zfs: Zfs,
     pub nixos: Nixos,
-    /// Reserved for the future Linux boot backend; no kexec path exists yet.
+    /// Additional target kernel arguments, validated again by the boot backend.
     pub kernel_args: Vec<String>,
 }
 #[derive(Debug, Deserialize, Serialize)]

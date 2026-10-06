@@ -8,8 +8,10 @@ manager child; the manager owns Tokio, zfskit and Ratatui. Manager failure never
 terminates PID 1. The parent restores the console, restarts once after a rapid
 failure, then uses emergency recovery instead of an unlimited crash loop.
 
-Installed-OS selection/kexec, BE discovery, encryption unlock, snapshot boot,
-NixOS generation discovery and Secure Boot are not implemented yet.
+The first installed-OS path discovers NixOS Bootspec generations on a selected
+ZFS filesystem and boots one through kexec_file_load. Generic Linux discovery,
+encryption unlock UX, snapshot boot, specialisations and Secure Boot acceptance
+remain roadmap work.
 
 ## Why this project exists
 
@@ -35,9 +37,39 @@ humans and automation operate the same VM through keys, screens, logs and SSH.
   portable and explicit-manifest host-only profiles, and measurable image size.
 - Grow deterministic process, UI and ZFS integration tests alongside every boot feature.
 
-The working foundation today is discovery, the supervisor/manager split,
-immutable JSON configuration and the Nix/QEMU lifecycle harness. The boot targets,
-NixOS backend, snapshot boot and encryption goals above are roadmap work.
+The working foundation includes discovery, the supervisor/manager split,
+immutable JSON configuration and the Nix/QEMU lifecycle harness, plus an initial
+NixOS generation boot path. Snapshot boot and encryption UX remain roadmap work.
+
+## Initial NixOS boot path
+
+Enter on a pool explicitly imports it without force and mounts its filesystems
+read-only for generation discovery. Enter on a generation resolves its Bootspec,
+loads its kernel/initrd, unmounts the roots owned by this manager and exports its
+owned pools before executing kexec. Only pools imported by zbm-rs are eligible for export;
+restart reconciliation checks actual pool GUIDs and existing mountpoints.
+
+This first backend assumes that /nix/store and /nix/var/nix/profiles are in the
+selected root filesystem. Separate /nix datasets, encrypted roots, initrdSecrets,
+specialisations and kernel arguments requiring whitespace/quoting are unsupported.
+The generation's configured fstab root must match the selected dataset; this
+backend does not rewrite an initrd to boot clones under another dataset name.
+Discovery itself remains non-mutating. Boot actions are unavailable in local
+preview mode. Autoboot is not implemented.
+
+The persistent boot acceptance fixture contains two real NixOS generations:
+
+```sh
+nix build .#zbm-rs-efi-test --out-link result-test
+nix build .#zbm-rs-boot-fixture --out-link result-fixture
+cargo xtask boot-smoke --image result-test --fixture result-fixture --run target/vm/nixos-new --tcg
+```
+
+The harness installs the generated closure from a read-only fixture disk onto a
+fresh disposable ZFS disk. It restarts the manager after import/mount, selects the
+older generation using the real keyboard, and requires a target-OS success marker
+with the exact current-system, root dataset and a new boot ID, then poweroff.
+See [the handoff trust model](docs/secure-boot-model.md) for security boundaries.
 
 ## Build
 
@@ -89,10 +121,30 @@ in the selected kernel, so incompatible manifests fail rather than being ignored
 `zbm-rs-efi-host-only-example` is explicitly a QEMU fixture, not a probe of your host.
 
 Import `nixosModules.default`, enable `programs.zbm-rs.enable` and select its
-profile. `system.build.zbm-rs-efi` then uses the same builder with
+`image.profile`. `system.build.zbm-rs-efi` then uses the same builder with
 `boot.kernelPackages`, `boot.zfs.package`, `boot.initrd.availableKernelModules`
 and `boot.initrd.kernelModules`. The module exposes an artifact; it does not
 silently replace the machine's existing bootloader.
+
+Image composition lives under `programs.zbm-rs.image`; immutable runtime policy
+lives under `programs.zbm-rs.settings`, mirroring the Rust/JSON hierarchy:
+
+```nix
+programs.zbm-rs = {
+  enable = true;
+  image.profile = "portable";
+  settings = {
+    ui.timeout = 5; # Reserved until autoboot is implemented.
+    manager.restartLimit = 2;
+    zfs.importPolicy = "read-only";
+    nixos.generationLimit = 20;
+  };
+};
+```
+
+Previous flat option names remain deprecated aliases. The module-config Nix check
+compares generated defaults with Rust defaults, validates both range endpoints,
+and checks that legacy aliases produce the same JSON.
 
 ## Development and VM tests
 

@@ -63,6 +63,7 @@ let
     { source = "${runtimePkgs.kmod}/bin/modprobe"; link = "/usr/bin/modprobe"; }
     { source = "${zfsUserspace}/bin/zfs"; link = "/usr/bin/zfs"; }
     { source = "${zfsUserspace}/bin/zpool"; link = "/usr/bin/zpool"; }
+    { source = "${zfsUserspace}/bin/mount.zfs"; link = "/usr/sbin/mount.zfs"; }
     { source = "${udevDaemon}"; link = "/usr/lib/systemd/systemd-udevd"; }
     { source = "${udevPackage}/bin/udevadm"; link = "/usr/bin/udevadm"; }
     { source = "${udevPackage}/lib/udev/ata_id"; link = "/usr/lib/udev/ata_id"; }

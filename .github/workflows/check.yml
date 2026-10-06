@@ -30,10 +30,16 @@ jobs:
         working-directory: zbm-rs
       - run: nix build .#zbm-rs-efi .#checks.x86_64-linux.image-size --out-link result
         working-directory: zbm-rs
+      - run: nix build .#checks.x86_64-linux.module-config --out-link result-module-config
+        working-directory: zbm-rs
       - run: nix build .#zbm-rs-efi-test --out-link result-test
         working-directory: zbm-rs
       - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf
       - run: cargo xtask smoke --run target/vm/ci-lifecycle --tcg --lifecycle
+        working-directory: zbm-rs
+      - run: nix build .#zbm-rs-boot-fixture --out-link result-fixture
+        working-directory: zbm-rs
+      - run: cargo xtask boot-smoke --image result-test --fixture result-fixture --run target/vm/ci-nixos-boot --tcg
         working-directory: zbm-rs
       - uses: actions/upload-artifact@v4
         if: always()
@@ -43,3 +49,4 @@ jobs:
             zbm-rs/result/sizes.json
             zbm-rs/result-test/sizes.json
             zbm-rs/target/vm/ci-lifecycle
+            zbm-rs/target/vm/ci-nixos-boot

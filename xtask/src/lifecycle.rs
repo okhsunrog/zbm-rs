@@ -4,7 +4,7 @@ use crate::{
     vm,
 };
 use anyhow::{Result, ensure};
-use std::{fs, path::Path, time::Instant};
+use std::{fs, path::Path};
 
 fn send(run: &Path, action: &str) -> Result<()> {
     vm::ssh(run, &format!("/bin/zbm-rs --test-send {action}"))?;
@@ -93,13 +93,12 @@ pub fn exercise(run: &Path) -> Result<()> {
     vm::key(run, "n")?;
     changed(run, before)?;
     let before = manager_pid(run)?;
-    let start = Instant::now();
     send(run, "leak-restart")?;
     changed(run, before)?;
-    ensure!(
-        start.elapsed().as_secs_f32() < 4.0,
-        "Restart waited for leaked descriptor EOF"
-    );
+    vm::ssh(
+        run,
+        "leak=$(cat /run/zbm-rs/leak.pid); fd=$(cat /run/zbm-rs/leak.fd); test -d /proc/$leak && test -L /proc/$leak/fd/$fd && kill -TERM $leak",
+    )?;
 
     let before = manager_pid(run)?;
     vm::ssh(run, "kill -TERM 1")?;
@@ -131,6 +130,29 @@ pub fn exercise(run: &Path) -> Result<()> {
     send(run, "kexec-return")?;
     emergency(run)?;
     exit_shell(run, before)?;
+
+    for fault in ["supervisor-error", "supervisor-panic"] {
+        let before = manager_pid(run)?;
+        send(run, fault)?;
+        emergency(run)?;
+        vm::ssh(run, &format!("test -d /proc/1; test ! -e /proc/{before}"))?;
+        ensure!(
+            vm::console(run)?.contains("last-ditch recovery"),
+            "Supervisor failure did not reach last-ditch console"
+        );
+        // A restored flag alone is insufficient: type a command at the real VT.
+        for key in ["e", "c", "h", "o", "spc", "o", "k", "ret"] {
+            vm::key(run, key)?;
+        }
+        wait_for(5, None, || {
+            ensure!(
+                vm::console(run)?.contains("\nok"),
+                "Recovery shell did not execute keyboard input"
+            );
+            Ok(())
+        })?;
+        exit_shell(run, before)?;
+    }
     let log = vm::ssh(run, "cat /run/zbm-rs/supervisor.log")?;
     ensure!(
         !fs::read_to_string(run.join("serial.log"))?.contains("Attempted to kill init"),
@@ -140,6 +162,9 @@ pub fn exercise(run: &Path) -> Result<()> {
         log.contains("forward signal=15")
             && log.contains("crash-loop")
             && log.contains("kexec-returned")
+            && log.contains("supervisor error: Deliberate VM supervisor error")
+            && log.contains("supervisor panic caught")
+            && log.matches("last-ditch-return").count() == 2
             && log.contains("signal=Some(11)"),
         "Incomplete supervisor evidence"
     );
@@ -148,8 +173,8 @@ pub fn exercise(run: &Path) -> Result<()> {
         run.join("lifecycle.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
             "passed": true, "checks": ["one-ELF", "PID1-survives", "CLOEXEC", "orphan-reaping", "dirty-abort-console-restoration",
-            "controlled-restart", "leaked-FD-no-hang", "PID1-SIGTERM-forwarding", "manager-SIGINT", "panic", "SIGSEGV", "crash-loop-recovery", "failed-kexec-classification"],
-            "actual_kexec": "not implemented"
+            "controlled-restart", "leaked-FD-no-hang", "PID1-SIGTERM-forwarding", "manager-SIGINT", "panic", "SIGSEGV", "crash-loop-recovery", "failed-kexec-classification", "supervisor-error-recovery", "supervisor-panic-recovery", "last-ditch-keyboard"],
+            "actual_kexec": "covered by the separate boot-smoke scenario"
         }))?,
     )?;
     Ok(())
