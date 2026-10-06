@@ -63,7 +63,10 @@ manager.restartLimit, zfs.importPolicy, configurationLimit and kernelArgs.
 lib.mkImage accepts loaderConfig as a JSON-compatible Nix attrset. It goes through
 the same Rust schema validation as checked-in fixtures. Production uses
 default.json, the SSH/lifecycle test image uses test.json unless overridden.
-Nix generates JSON only, never Rust source. JSON is not read from host /etc or /sys.
+Image userspace defaults to eudev and ZFS without optional URL fetching, including
+NixOS integration. Local encryption keys work; HTTPS keylocations are unavailable.
+NixOS derives this userspace from boot.zfs.package, preserving its version and
+matching module selection. Nix generates JSON only, never Rust source. JSON is not read from host /etc or /sys.
 
 A future small kernel-command-line emergency override layer belongs above this
 base configuration; it has not been implemented. Dynamic pools/Bootspec state

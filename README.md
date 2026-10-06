@@ -146,15 +146,17 @@ after Rescan; logs and text checks must not be treated as visual acceptance.
 ## Size experiments
 
 Release builds use `opt-level="z"`, `codegen-units=1` and FatLTO with panic
-unwinding. The default image uses zstd-19 and the standard Nix systemdMinimal udev.
+unwinding. The default image uses zstd-19 and the eudev and ZFS userspace without optional URL fetching.
 Standalone-linked modern udev remains an experimental comparison profile. `lib.mkImage` also accepts
 `initramfsCompression = "gzip" | "xz" | "zstd"` and a `rustProfile` attrset for
 controlled comparisons. See [measured size experiments](docs/size-experiments.md).
 
-`zbm-rs-efi-lean` and `zbm-rs-efi-test-lean` are opt-in userspace experiments:
-eudev plus ZFS without optional URL fetching. Native encryption with local keys
-is retained; HTTPS encryption keylocations are unavailable in those profiles.
-The default preserves upstream ZFS URL-fetch support.
+Native encryption with local keys is retained. **HTTPS encryption keylocations
+are unavailable in the default image.** Normal configuration and NixOS builds
+use this same userspace. The previous `-lean` names are aliases for the defaults.
+
+`zbm-rs-efi-full-userspace` and `zbm-rs-efi-test-full-userspace` retain upstream
+URL-fetch support and systemdMinimal for explicit comparisons or URL-key needs.
 
 ## Size regression policy
 

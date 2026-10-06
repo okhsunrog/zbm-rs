@@ -47,7 +47,9 @@ The current lifecycle test covers that failure classification, not kernel handof
 nix/image.nix builds the Rust ELF, chooses one kernelPackages set and derives both
 kernel and ZFS modules from it. ABI and ZFS userspace/module version assertions are
 explicit. A shrunk modules closure includes requested modules and matching firmware.
-Selected ELF/tools and their interpreter/DT_NEEDED libraries are copied from Nix
+Default userspace is eudev plus ZFS without URL fetching; local-key native
+encryption is retained, HTTPS keylocations are unavailable. Selected ELF/tools
+and their interpreter/DT_NEEDED libraries are copied from Nix
 paths; there is no fallback to host libraries and no whole userspace closure copy.
 Nix builds deterministic cpio with configurable compression (default zstd-19) and systemd ukify constructs the unsigned UKI.
 Runtime crates never construct cpio or EFI files. dracut/mkinitcpio are not involved.

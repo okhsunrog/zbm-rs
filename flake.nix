@@ -20,10 +20,13 @@
         zbm-rs-efi = production;
         zbm-rs-efi-test = testing;
         zbm-rs = production.passthru.binary;
-        zbm-rs-efi-test-zstd = mkImage { testProfile = true; initramfsCompression = "zstd"; rustProfile = optimizedRust; udevPackage = pkgs.systemdMinimal; };
-        zbm-rs-efi-test-standalone-udev = mkImage { testProfile = true; initramfsCompression = "zstd"; rustProfile = optimizedRust; udevPackage = leanUserspace.systemdUdev; };
-        zbm-rs-efi-test-lean = mkImage { testProfile = true; initramfsCompression = "zstd"; rustProfile = optimizedRust; zfsUserspace = leanUserspace.zfs; udevPackage = leanUserspace.udev; };
-        zbm-rs-efi-lean = mkImage { initramfsCompression = "zstd"; rustProfile = optimizedRust; zfsUserspace = leanUserspace.zfs; udevPackage = leanUserspace.udev; };
+        zbm-rs-efi-full-userspace = mkImage { zfsUserspace = pkgs.zfs_2_4.override { enablePython = false; }; udevPackage = pkgs.systemdMinimal; };
+        zbm-rs-efi-test-full-userspace = mkImage { testProfile = true; zfsUserspace = pkgs.zfs_2_4.override { enablePython = false; }; udevPackage = pkgs.systemdMinimal; };
+        zbm-rs-efi-test-zstd = mkImage { testProfile = true; initramfsCompression = "zstd"; rustProfile = optimizedRust; zfsUserspace = pkgs.zfs_2_4.override { enablePython = false; }; udevPackage = pkgs.systemdMinimal; };
+        zbm-rs-efi-test-standalone-udev = mkImage { testProfile = true; initramfsCompression = "zstd"; rustProfile = optimizedRust; zfsUserspace = pkgs.zfs_2_4.override { enablePython = false; }; udevPackage = leanUserspace.systemdUdev; };
+        # Backwards-compatible names; lean is now the normal image.
+        zbm-rs-efi-test-lean = testing;
+        zbm-rs-efi-lean = production;
         zbm-rs-efi-host-only-example = mkImage { profile = "host-only"; hardwareManifest = ./nix/hardware-example.json; };
       };
       checks.${system}.image-size = production.passthru.sizeCheck;

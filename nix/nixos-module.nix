@@ -14,7 +14,7 @@ let
     source = self;
     zfsSource = self.inputs.zfskit;
     kernelPackages = config.boot.kernelPackages;
-    zfsUserspace = config.boot.zfs.package;
+    zfsUserspace = (import ./lean-userspace.nix { inherit pkgs; }).mkZfs config.boot.zfs.package;
     profile = cfg.profile;
     hardwareManifest = cfg.hardwareManifest;
     extraModules = config.boot.initrd.availableKernelModules;

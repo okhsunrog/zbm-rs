@@ -1,3 +1,22 @@
+# Lean userspace default — 2026-10-06
+
+The normal production/test outputs and the NixOS module now use eudev and ZFS
+without URL fetching. The previous lean names are aliases. Named full-userspace
+outputs retain systemdMinimal and URL fetching for explicit use. Native encryption
+with local keys remains supported; HTTPS keylocations are unavailable by default.
+
+Production/test EFI: 24,410,112 / 25,980,928 bytes. Regression baselines were lowered
+to these measured sizes; existing allowances/caps were retained.
+
+Passed: normal Nix production/test/size-check builds, fmt, workspace tests,
+all-targets/all-features clippy, and a fresh full TCG/OVMF lifecycle in
+`target/vm/lean-default-001`, including local-key native encryption and poweroff.
+NixOS evaluation confirms eudev, preservation of boot.zfs.package version 2.4.4,
+and a matched 6.18.55 kernel/ZFS module pair. GitHub CI for the previous optimized
+commit 099f7dd is also green (run 37401606613).
+
+## Prior size optimization verification
+
 # Published repository and size optimization verification — 2026-10-06
 
 Public repository: https://github.com/okhsunrog/zbm-rs. README documents the project

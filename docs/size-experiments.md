@@ -44,10 +44,10 @@ full libsystemd-shared dependency. The standalone-linked profile is a build expe
 
 The pinned Nix ZFS recipe forces libcurl link dependencies. Upstream
 [libfetch detection](https://github.com/openzfs/zfs/blob/zfs-2.4.4/config/user-libfetch.m4)
-is optional. The lean experiment omits curl/PAM/NLS, retaining OpenSSL and native ZFS
-encryption. HTTPS keylocations are unavailable in that experiment. It is not a
-silent default removal of a future encryption feature. Eudev is a separate
-standalone-daemon experiment; it retains kmod and storage rules/helpers.
+is optional. The adopted default omits curl/PAM/NLS, retaining OpenSSL and native
+ZFS encryption. HTTPS keylocations are unavailable; this is an explicit image
+policy. Eudev retains kmod and storage rules/helpers. Full userspace is available
+through the named comparison outputs.
 
 ## Reproduction
 
@@ -62,8 +62,8 @@ cargo xtask smoke --image target/image-zstd --run target/vm/zstd-new --lifecycle
 
 ## Nix image validation
 
-The default is Rust opt-level z/FatLTO/CGU1, zstd-19, standard systemdMinimal and
-standard ZFS userspace. Panic unwinding remains enabled for PID-1 recovery.
+The default is Rust opt-level z/FatLTO/CGU1, zstd-19, eudev and
+ZFS without optional URL fetching. Panic unwinding remains enabled for PID-1 recovery.
 
 | Image | EFI bytes | initramfs bytes | Acceptance |
 | --- | ---: | ---: | --- |
@@ -92,4 +92,9 @@ The standalone-link experiment removes the runtime DSO from the staged closure,
 but grows udevadm from 938,408 to 4,243,944 bytes, ata_id from 29,256 to 2,482,456
 and scsi_id from 45,976 to 2,494,744. Its test EFI was only 142,336 bytes smaller
 than the equivalent zstd/Rust profile with standard udev. It also needs a custom
-systemd build. Keep standard systemdMinimal as default; this is not a 6-MiB image saving.
+systemd build. This is not a 6-MiB image saving. The adopted default uses eudev instead.
+
+The lean userspace was adopted as the default on 2026-10-06. Production/test
+regression baselines are now 24,410,112 / 25,980,928 bytes; growth allowances and
+absolute caps are unchanged. The full-userspace named outputs preserve the old
+ZFS URL-fetch capability for explicit use.

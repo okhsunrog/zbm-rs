@@ -1,9 +1,9 @@
 { pkgs, source, zfsSource, kernelPackages ? pkgs.linuxPackages
-, zfsUserspace ? pkgs.zfs_2_4.override { enablePython = false; }
+, zfsUserspace ? (import ./lean-userspace.nix { inherit pkgs; }).zfs
 , testProfile ? false, profile ? "portable", hardwareManifest ? null
 , extraModules ? [], forcedModules ? [], loaderConfig ? null
 , initramfsCompression ? "zstd", rustProfile ? {}
-, udevPackage ? pkgs.systemdMinimal }:
+, udevPackage ? (import ./lean-userspace.nix { inherit pkgs; }).udev }:
 let
   lib = pkgs.lib;
   hardware = if hardwareManifest == null then {} else builtins.fromJSON (builtins.readFile hardwareManifest);
@@ -121,7 +121,7 @@ let
   cmdline = "console=ttyS0,115200 console=tty0 loglevel=3 panic=-1";
   image = pkgs.runCommand "zbm-rs-efi-${profile}${lib.optionalString testProfile "-test"}" {
     nativeBuildInputs = [ pkgs.systemdUkify pkgs.python3 pkgs.uv ];
-    passthru = { inherit binary kernel zfsModule modules initramfs configJson runtime; inherit sizeCheck; };
+    passthru = { inherit binary kernel zfsModule zfsUserspace udevPackage modules initramfs configJson runtime; inherit sizeCheck; };
   } ''
     export UV_CACHE_DIR="$TMPDIR/uv-cache"
     mkdir -p $out/esp/EFI/BOOT

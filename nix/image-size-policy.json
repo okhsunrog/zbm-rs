@@ -1,7 +1,16 @@
 {
-  "portable": { "maxEfiBytes": 67108864, "baselineEfiBytes": 31762432 },
-  "test": { "maxEfiBytes": 83886080, "baselineEfiBytes": 33750528 },
-  "host-only": { "maxEfiBytes": 67108864, "baselineEfiBytes": null },
+  "portable": {
+    "maxEfiBytes": 67108864,
+    "baselineEfiBytes": 24410112
+  },
+  "test": {
+    "maxEfiBytes": 83886080,
+    "baselineEfiBytes": 25980928
+  },
+  "host-only": {
+    "maxEfiBytes": 67108864,
+    "baselineEfiBytes": null
+  },
   "allowedGrowthPercent": 10,
   "growthAllowanceBytes": 2097152
 }
