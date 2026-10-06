@@ -10,7 +10,7 @@ manager, not a native UEFI ZFS implementation.
 - Nix is the canonical image path. Image configuration is Nix-generated JSON,
   validated by the shared Rust schema on the build host and at process startup.
   Ordinary config values are not Cargo features. No runtime config writer/reloader.
-- Use the sibling ../zfskit crate for ZFS operations. Do not duplicate its parsers.
+- Use the published zfskit crate for ZFS operations. Do not duplicate its parsers.
 - Discovery is non-mutating. Do not introduce automatic import, force import,
   key loading, mounts, rollback or destructive operations without explicit policy.
 - Every new boot feature grows the persistent harness and its fixtures/scenarios.

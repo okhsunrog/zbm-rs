@@ -16,14 +16,24 @@ pub fn absolute(path: &Path) -> Result<PathBuf> {
     })
 }
 
-pub fn boot(
-    run: &Path,
-    image: &Path,
-    tcg: bool,
-    port: u16,
-    direct: bool,
-    fixture: Option<&Path>,
-) -> Result<()> {
+pub struct BootOptions<'a> {
+    pub image: &'a Path,
+    pub tcg: bool,
+    pub port: u16,
+    pub direct: bool,
+    pub fixture: Option<&'a Path>,
+    pub scsi: bool,
+}
+
+pub fn boot(run: &Path, options: BootOptions<'_>) -> Result<()> {
+    let BootOptions {
+        image,
+        tcg,
+        port,
+        direct,
+        fixture,
+        scsi,
+    } = options;
     let run = absolute(run)?;
     let image = image
         .canonicalize()
@@ -63,7 +73,7 @@ pub fn boot(
     fs::write(
         run.join("connection.json"),
         serde_json::to_vec_pretty(
-            &json!({"ssh_port": port, "test_ssh": manifest["test_ssh"], "direct": direct}),
+            &json!({"ssh_port": port, "test_ssh": manifest["test_ssh"], "direct": direct, "disk_bus": if scsi { "scsi" } else { "virtio-blk" }}),
         )?,
     )?;
     let mut cmd = Command::new("qemu-system-x86_64");
@@ -94,9 +104,20 @@ pub fn boot(
             "file={},format=qcow2,if=none,id=zbm-root",
             run.join("disk.qcow2").display()
         ),
-        "-device",
-        "virtio-blk-pci,drive=zbm-root,serial=zbm-fixture-disk",
     ]);
+    if scsi {
+        cmd.args([
+            "-device",
+            "virtio-scsi-pci,id=scsi0",
+            "-device",
+            "scsi-hd,drive=zbm-root,bus=scsi0.0,serial=zbm-fixture-disk",
+        ]);
+    } else {
+        cmd.args([
+            "-device",
+            "virtio-blk-pci,drive=zbm-root,serial=zbm-fixture-disk",
+        ]);
+    }
     if let Some(fixture) = fixture {
         let archive = fixture.join("root.tar").canonicalize()?;
         ensure!(

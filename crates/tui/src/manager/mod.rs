@@ -1,15 +1,22 @@
 use crate::session::{Client, Request};
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::{
-    DefaultTerminal, Frame,
-    layout::{Constraint, Layout},
-    style::{Color, Style},
-    widgets::{Block, List, ListItem, ListState, Paragraph, Wrap},
+use crossterm::event::{self, Event, KeyEventKind};
+use ratatui::DefaultTerminal;
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    path::PathBuf,
+    process::Command,
+    time::{Duration, Instant},
 };
-use std::{fs::OpenOptions, io::Write, path::PathBuf, process::Command, time::Duration};
 use zbm_core::{State, discover, preview};
+mod command;
 mod executor;
+mod operation;
+mod ui;
+use command::Command as UiCommand;
+use operation::{Action, Outcome, Pending};
+use ui::{Input, Panel, Ui};
 
 struct Options {
     preview: bool,
@@ -18,10 +25,10 @@ struct Options {
     config: crate::config::Config,
 }
 
-fn emit(options: &Options, event: &str, state: &State) -> Result<()> {
+fn emit(options: &Options, event: &str, state: &State, ui: &Ui) -> Result<()> {
     if let Some(path) = &options.events {
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        let value = serde_json::json!({"event": event, "state": state, "pid": std::process::id(), "terminal_size": crossterm::terminal::size().ok(), "config": options.config});
+        let value = serde_json::json!({"event": event, "state": state, "pid": std::process::id(), "terminal_size": crossterm::terminal::size().ok(), "config": options.config, "ui": ui.telemetry(state)});
         // Construct a complete record before touching the shared serial device.
         // The leading separator also recovers from another writer's partial line.
         let record = format!("\n{value}\n");
@@ -30,78 +37,44 @@ fn emit(options: &Options, event: &str, state: &State) -> Result<()> {
     Ok(())
 }
 
-fn draw(frame: &mut Frame, state: &State, config: &crate::config::Config) {
-    let areas = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Min(3),
-        Constraint::Length(4),
-        Constraint::Length(3),
-    ])
-    .split(frame.area());
-    frame.render_widget(
-        Paragraph::new(
-            config
-                .ui
-                .title
-                .as_deref()
-                .unwrap_or("zbm-rs | ZFS boot environment manager"),
-        )
-        .block(Block::bordered()),
-        areas[0],
-    );
-    let items: Vec<ListItem> = if state.scanning {
-        vec![ListItem::new("Discovering pools...")]
-    } else if !state.targets.is_empty() {
-        state
-            .targets
-            .iter()
-            .map(|target| {
-                ListItem::new(format!(
-                    "{}  generation {}  {}",
-                    target.dataset, target.generation, target.label
-                ))
-            })
-            .collect()
-    } else if state.pools.is_empty() {
-        vec![ListItem::new("No importable pools discovered")]
+fn status_message(state: &State) -> String {
+    if let Some(message) = state.error.as_ref().or(state.operation.as_ref()) {
+        return message.clone();
+    }
+    if let Some(issue) = state.rejected_generations.first() {
+        return format!(
+            "{} generations unavailable; generation {}: {}. Enter boots a listed generation.",
+            state.rejected_generations.len(),
+            issue.generation,
+            issue.error
+        );
+    }
+    if !state.targets.is_empty() {
+        "Enter: boot the selected target. B: back to boot environments."
+    } else if state.snapshot_view {
+        "Enter: inspect snapshot boot targets. O: clone BE. M: clone/promote. U: rollback. B: back to boot environments."
+    } else if !state.environments.is_empty() {
+        "Enter: inspect boot targets. * marks pool bootfs. B: back to pools."
     } else {
-        state
-            .pools
-            .iter()
-            .map(|p| ListItem::new(format!("{}  {}  GUID {}", p.name, p.health, p.guid)))
-            .collect()
-    };
-    let list = List::new(items)
-        .block(Block::bordered().title(if state.targets.is_empty() {
-            "ZFS pools"
-        } else {
-            "NixOS generations"
-        }))
-        .highlight_style(Style::default().bg(Color::Blue))
-        .highlight_symbol("> ");
-    let mut selection = ListState::default().with_selected(if !state.targets.is_empty() {
-        Some(state.selected_target)
-    } else {
-        (!state.pools.is_empty()).then_some(state.selected)
-    });
-    frame.render_stateful_widget(list, areas[1], &mut selection);
-    let message = state
-        .error
-        .as_deref()
-        .unwrap_or(if state.targets.is_empty() {"Enter: import the selected pool without force and inspect NixOS generations (read-only mounts)."} else {"Enter: boot the selected generation. R: return to pool discovery."});
-    frame.render_widget(
-        Paragraph::new(message)
-            .wrap(Wrap { trim: true })
-            .block(Block::bordered().title("Status")),
-        areas[2],
-    );
-    frame.render_widget(
-        Paragraph::new(
-            "[Enter] Open / Boot  [R] Rescan  [S] Shell  [N] Restart  [P] Power off  [Q] Exit",
-        )
-        .block(Block::bordered()),
-        areas[3],
-    );
+        "Enter: import selected pool without force and discover boot environments."
+    }
+    .into()
+}
+
+fn refresh(
+    terminal: &mut DefaultTerminal,
+    state: &mut State,
+    options: &Options,
+    ui: &mut Ui,
+) -> Result<()> {
+    ui.sync(state);
+    terminal.draw(|frame| ui.draw(frame, state, options))?;
+    Ok(())
+}
+
+fn save_plan(plan: &zbm_core::boot::BootPlan) -> Result<()> {
+    std::fs::write("/run/zbm-rs/boot-plan.json", serde_json::to_vec(plan)?)?;
+    Ok(())
 }
 
 async fn tui(
@@ -112,8 +85,12 @@ async fn tui(
     #[cfg(feature = "vm-test")]
     let control = crate::vm_test::Control::open()?;
     let mut state = State::default();
+    let mut ui = Ui::default();
+    ui.sync(&mut state);
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let mut rescan = true;
+    let mut pending: Option<Pending> = None;
+    let mut last_tick = Instant::now();
     loop {
         #[cfg(feature = "vm-test")]
         if let Some(control) = &control
@@ -124,10 +101,11 @@ async fn tui(
                 .request(request)?;
             break;
         }
-        if rescan && !state.scanning {
+        if rescan && !state.scanning && pending.is_none() && !state.requires_restart {
             state.scanning = true;
             rescan = false;
-            emit(options, "scanning", &state)?;
+            refresh(terminal, &mut state, options, &mut ui)?;
+            emit(options, "scanning", &state, &ui)?;
             let tx = tx.clone();
             let is_preview = options.preview;
             let is_boot = options.supervised;
@@ -142,125 +120,289 @@ async fn tui(
                 let _ = tx.send(result).await;
             });
         }
-        let mut ready = false;
         if let Ok(result) = rx.try_recv() {
             state.apply_scan(result);
-            ready = true;
+            refresh(terminal, &mut state, options, &mut ui)?;
+            emit(options, "ready", &state, &ui)?;
         }
-        terminal.draw(|f| draw(f, &state, &options.config))?;
-        // Publish readiness only after the corresponding frame has been drawn.
-        if ready {
-            emit(options, "ready", &state)?;
-        }
-        if event::poll(Duration::from_millis(50))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            match key.code {
-                KeyCode::Char('q') => {
-                    emit(options, "exit", &state)?;
-                    break;
+        if pending.as_ref().is_some_and(Pending::is_finished) {
+            let mut completed = pending.take().unwrap();
+            state.operation = None;
+            let event = match completed.finish().await {
+                Ok(Outcome::Changed {
+                    environments,
+                    selected,
+                    message,
+                }) => {
+                    state.selected_environment = environments
+                        .iter()
+                        .position(|e| e.dataset == selected)
+                        .unwrap_or(0);
+                    state.environments = environments;
+                    state.targets.clear();
+                    state.rejected_generations.clear();
+                    state.snapshots.clear();
+                    state.snapshot_view = false;
+                    ui.reset_after_mutation();
+                    state.error = Some(message);
+                    "environment-changed"
                 }
-                KeyCode::Char('r') => {
-                    rescan = true;
+                Ok(Outcome::Environments(environments)) => {
+                    state.error = environments.is_empty().then(|| {
+                        "No visible boot environments (mountpoint=/ or legacy with active=on)"
+                            .into()
+                    });
+                    state.selected_environment = environments
+                        .iter()
+                        .position(|environment| environment.is_default)
+                        .unwrap_or(0);
+                    state.environments = environments;
+                    "boot-environments"
                 }
-                KeyCode::Up | KeyCode::Down => {
-                    if state.targets.is_empty() {
-                        state.move_selection(key.code == KeyCode::Down);
-                    } else {
-                        let length = state.targets.len();
-                        state.selected_target = (state.selected_target
-                            + if key.code == KeyCode::Down {
-                                1
-                            } else {
-                                length - 1
-                            })
-                            % length;
-                    }
-                    emit(options, "selection", &state)?;
+                Ok(Outcome::Snapshots(snapshots)) => {
+                    state.targets.clear();
+                    state.rejected_generations.clear();
+                    state.snapshots = snapshots;
+                    state.selected_snapshot = 0;
+                    state.snapshot_view = true;
+                    state.error = None;
+                    "snapshots"
                 }
-                KeyCode::Enter if options.supervised && !options.preview && !state.scanning => {
-                    if state.targets.is_empty() {
-                        if let Some(pool) = state.pools.get(state.selected) {
-                            state.error = Some("Inspecting selected pool...".into());
-                            terminal.draw(|frame| draw(frame, &state, &options.config))?;
-                            let readonly = matches!(
-                                options.config.zfs.import_policy,
-                                crate::config::ImportPolicy::ReadOnly
-                            );
-                            match zbm_core::boot_zfs::targets(
-                                &zbm_core::Zfs::new(),
-                                pool,
-                                readonly,
-                                options.config.nixos.generation_limit,
-                            )
-                            .await
-                            {
-                                Ok(targets) => {
-                                    state.error = targets
-                                        .is_empty()
-                                        .then(|| "No supported NixOS generations found".into());
-                                    state.targets = targets;
-                                    state.selected_target = 0;
-                                }
-                                Err(error) => state.error = Some(error.to_string()),
-                            }
-                            terminal.draw(|frame| draw(frame, &state, &options.config))?;
-                            emit(options, "boot-targets", &state)?;
-                        }
-                    } else {
-                        let preparation = async {
-                            let plan = zbm_core::boot::BootPlan::resolve(
-                                &state.targets[state.selected_target],
-                                &options.config.kernel_args,
-                            )?;
-                            let loaded = executor::LoadedKernel::load(&plan)?;
-                            let pool = &state.pools[state.selected];
-                            zbm_core::boot_zfs::release_owned(&zbm_core::Zfs::new(), pool).await?;
-                            Ok::<_, anyhow::Error>((plan, loaded))
-                        }
-                        .await;
-                        match preparation {
-                            Ok((plan, loaded)) => {
-                                let path = "/run/zbm-rs/boot-plan.json";
-                                std::fs::write(path, serde_json::to_vec(&plan)?)?;
-                                emit(options, "kexec", &state)?;
-                                ratatui::restore();
-                                channel.unwrap().request(Request::KexecStarting)?;
-                                loaded.execute()?;
-                            }
-                            Err(error) => {
-                                state.error = Some(format!("Boot preparation failed: {error:#}"));
-                                emit(options, "boot-error", &state)?;
-                            }
-                        }
-                    }
+                Ok(Outcome::Targets(discovery)) => {
+                    state.error = discovery
+                        .targets
+                        .is_empty()
+                        .then(|| "No usable boot targets in this snapshot".into());
+                    state.targets = discovery.targets;
+                    state.rejected_generations = discovery.rejected;
+                    state.selected_target = 0;
+                    "boot-targets"
                 }
-                KeyCode::Char('s') => {
-                    emit(options, "shell", &state)?;
-                    if let Some(channel) = channel {
-                        channel.request(Request::EmergencyShell)?;
-                        break;
-                    }
+                Ok(Outcome::Prepared(plan)) => {
+                    ui.prepared = Some(plan.clone());
+                    state.error = Some(format!(
+                        "Prepared clone: {}. Enter boots it; restart reuses it.",
+                        plan.target.dataset
+                    ));
+                    save_plan(&plan)?;
+                    "snapshot-prepared"
+                }
+                Ok(Outcome::Discarded(dataset)) => {
+                    ui.prepared = None;
+                    state.error = Some(format!("Discarded prepared clone {dataset}"));
+                    "snapshot-discarded"
+                }
+                Ok(Outcome::Boot(plan, loaded)) => {
+                    save_plan(&plan)?;
+                    emit(options, "kexec", &state, &ui)?;
                     ratatui::restore();
-                    let result = Command::new("/bin/sh").status();
-                    *terminal = ratatui::init();
-                    result?;
-                    emit(options, "shell-return", &state)?;
+                    channel.unwrap().request(Request::KexecStarting)?;
+                    loaded.execute()?;
+                    unreachable!("successful kexec leaves this kernel")
                 }
-                KeyCode::Char('n') if channel.is_some() => {
-                    if let Some(channel) = channel {
-                        channel.request(Request::Restart)?;
+                Err(error) => {
+                    state.requires_restart = error.is::<tokio::task::JoinError>()
+                        || matches!(completed.error_event, "rollback-error" | "clone-error");
+                    state.error = Some(format!("{} failed: {error:#}", completed.description));
+                    completed.error_event
+                }
+            };
+            refresh(terminal, &mut state, options, &mut ui)?;
+            emit(options, event, &state, &ui)?;
+        } else if pending.as_ref().is_some_and(Pending::expired) {
+            // Cancellation can interrupt an import/clone/export after an effect.
+            // Keep the intent journal and require a fresh manager to reconcile.
+            pending.take();
+            state.operation = None;
+            state.requires_restart = true;
+            state.error = Some("Operation timed out after 30 seconds. Use Shell or Restart to reconcile ZFS state.".into());
+            refresh(terminal, &mut state, options, &mut ui)?;
+            emit(options, "operation-timeout", &state, &ui)?;
+        }
+        if state.operation.is_some() && last_tick.elapsed() >= Duration::from_secs(1) {
+            refresh(terminal, &mut state, options, &mut ui)?;
+            last_tick = Instant::now();
+        }
+        if event::poll(Duration::from_millis(50))? {
+            let input = event::read()?;
+            if matches!(input, Event::Resize(..)) {
+                refresh(terminal, &mut state, options, &mut ui)?;
+                emit(options, "resize", &state, &ui)?;
+            }
+            if let Event::Key(key) = input
+                && key.kind == KeyEventKind::Press
+            {
+                let mut action = None;
+                let mut observed = None;
+                match ui.input(key, &mut state) {
+                    Input::Ignored => {}
+                    Input::Changed(event) => observed = Some(event),
+                    Input::Command(command, confirmed) => {
+                        if let Some(reason) = ui.reason(command, &state, options) {
+                            state.error = Some(reason);
+                            observed = Some("command-disabled");
+                        } else {
+                            match command {
+                                UiCommand::Exit => {
+                                    emit(options, "exit", &state, &ui)?;
+                                    break;
+                                }
+                                UiCommand::Shell => {
+                                    emit(options, "shell", &state, &ui)?;
+                                    if let Some(channel) = channel {
+                                        channel.request(Request::EmergencyShell)?;
+                                        break;
+                                    }
+                                    ratatui::restore();
+                                    let result = Command::new("/bin/sh").status();
+                                    *terminal = ratatui::init();
+                                    result?;
+                                    observed = Some("shell-return");
+                                }
+                                UiCommand::Restart => {
+                                    channel.unwrap().request(Request::Restart)?;
+                                    break;
+                                }
+                                UiCommand::PowerOff => {
+                                    channel.unwrap().request(Request::PowerOff)?;
+                                    break;
+                                }
+                                UiCommand::Back => {
+                                    if !state.targets.is_empty()
+                                        || !state.rejected_generations.is_empty()
+                                    {
+                                        state.targets.clear();
+                                        state.rejected_generations.clear();
+                                        state.selected_target = 0;
+                                    } else if state.snapshot_view {
+                                        state.snapshot_view = false;
+                                        state.snapshots.clear();
+                                    } else {
+                                        state.environments.clear();
+                                    }
+                                    state.error = None;
+                                    observed = Some("back");
+                                }
+                                UiCommand::Snapshots => {
+                                    let environment =
+                                        &state.environments[state.selected_environment];
+                                    action = Some(Action::Snapshots {
+                                        pool: state.pools[state.selected].clone(),
+                                        dataset: environment.dataset.clone(),
+                                    });
+                                }
+                                UiCommand::Prepare => {
+                                    action = Some(Action::Prepare {
+                                        pool: state.pools[state.selected].clone(),
+                                        target: ui.target(&state).unwrap().clone(),
+                                        args: options.config.kernel_args.clone(),
+                                    });
+                                }
+                                UiCommand::Rollback if !confirmed => {
+                                    ui.open_panel(Panel::ConfirmRollback);
+                                    observed = Some("rollback-confirmation");
+                                }
+                                UiCommand::ClonePromote if !confirmed => {
+                                    ui.open_panel(Panel::ConfirmPromote);
+                                    observed = Some("promote-confirmation");
+                                }
+                                UiCommand::Rollback => {
+                                    action = Some(Action::Rollback {
+                                        pool: state.pools[state.selected].clone(),
+                                        source: state.snapshots[state.selected_snapshot]
+                                            .source
+                                            .clone(),
+                                        limit: options.config.nixos.generation_limit,
+                                    });
+                                }
+                                UiCommand::Clone | UiCommand::ClonePromote => {
+                                    action = Some(Action::Clone {
+                                        pool: state.pools[state.selected].clone(),
+                                        source: state.snapshots[state.selected_snapshot]
+                                            .source
+                                            .clone(),
+                                        promote: command == UiCommand::ClonePromote,
+                                        limit: options.config.nixos.generation_limit,
+                                    });
+                                }
+                                UiCommand::Discard if !confirmed => {
+                                    ui.open_panel(Panel::ConfirmDiscard);
+                                    observed = Some("discard-confirmation");
+                                }
+                                UiCommand::Discard => {
+                                    action = Some(Action::Discard {
+                                        pool: state.pools[state.selected].clone(),
+                                        source: state.snapshots[state.selected_snapshot]
+                                            .source
+                                            .clone(),
+                                    });
+                                }
+                                UiCommand::Rescan => rescan = true,
+                                UiCommand::Open => {
+                                    if let Some(target) = ui.target(&state) {
+                                        action = Some(Action::Boot {
+                                            pool: state.pools[state.selected].clone(),
+                                            target: target.clone(),
+                                            args: options.config.kernel_args.clone(),
+                                        });
+                                    } else if state.snapshot_view {
+                                        let snapshot = &state.snapshots[state.selected_snapshot];
+                                        action = Some(Action::Targets {
+                                            pool: state.pools[state.selected].clone(),
+                                            snapshot: snapshot.clone(),
+                                            limit: options.config.nixos.generation_limit,
+                                        });
+                                    } else if !state.environments.is_empty() {
+                                        let environment =
+                                            &state.environments[state.selected_environment];
+                                        state.error = environment.unavailable.clone();
+                                        state.targets = environment.targets.clone();
+                                        state.rejected_generations =
+                                            environment.rejected_generations.clone();
+                                        state.selected_target = 0;
+                                        observed = Some("boot-targets");
+                                    } else {
+                                        action = Some(Action::Environments {
+                                            pool: state.pools[state.selected].clone(),
+                                            readonly: matches!(
+                                                options.config.zfs.import_policy,
+                                                crate::config::ImportPolicy::ReadOnly
+                                            ),
+                                            limit: options.config.nixos.generation_limit,
+                                        });
+                                    }
+                                }
+                                UiCommand::Search => {
+                                    ui.searching = true;
+                                    observed = Some("filter");
+                                }
+                                UiCommand::Help | UiCommand::Actions | UiCommand::Details => {
+                                    ui.open_panel(match command {
+                                        UiCommand::Help => Panel::Help,
+                                        UiCommand::Actions => Panel::Actions,
+                                        _ => Panel::Details,
+                                    });
+                                    observed = Some("panel");
+                                }
+                            }
+                        }
                     }
-                    break;
                 }
-                KeyCode::Char('p') if channel.is_some() => {
-                    if let Some(channel) = channel {
-                        channel.request(Request::PowerOff)?;
-                    }
-                    break;
+                if let Some(action) = action {
+                    let operation = Pending::start(action);
+                    state.operation = Some(format!(
+                        "{}. Shell, Restart and Power off remain available.",
+                        operation.description
+                    ));
+                    state.error = None;
+                    pending = Some(operation);
+                    ui.operation_started = Some(Instant::now());
+                    observed = Some("operation-started");
                 }
-                _ => {}
+                if let Some(event) = observed {
+                    refresh(terminal, &mut state, options, &mut ui)?;
+                    emit(options, event, &state, &ui)?;
+                }
             }
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -303,34 +445,7 @@ pub fn run(channel: Option<Client>) -> Result<()> {
     let mut terminal = ratatui::init();
     let result = runtime.block_on(tui(&mut terminal, &options, channel.as_ref()));
     ratatui::restore();
+    // A blocked filesystem read must not hold a requested recovery session open.
+    runtime.shutdown_timeout(Duration::from_millis(100));
     result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn rescan_and_pool_selection_preserve_footer() {
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 50)).unwrap();
-        let mut state = State::default();
-        for phase in 0..3 {
-            if phase == 1 {
-                state.scanning = true;
-            }
-            if phase == 2 {
-                state.apply_scan(Ok(preview()));
-            }
-            terminal
-                .draw(|frame| draw(frame, &state, &crate::config::Config::default()))
-                .unwrap();
-            let line: String = (0..160)
-                .map(|x| terminal.backend().buffer()[(x, 48)].symbol())
-                .collect();
-            assert!(
-                line.contains("Rescan"),
-                "Missing footer in phase {phase}: {line}"
-            );
-        }
-    }
 }

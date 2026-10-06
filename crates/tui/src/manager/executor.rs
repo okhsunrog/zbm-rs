@@ -7,7 +7,7 @@ impl LoadedKernel {
     pub fn load(plan: &BootPlan) -> io::Result<Self> {
         let kernel = File::open(&plan.kernel)?;
         let initrd = plan.initrd.as_ref().map(File::open).transpose()?;
-        let command = CString::new(plan.cmdline.join(" "))?;
+        let command = CString::new(zbm_core::linux::command_line(&plan.cmdline)?)?;
         let flags: libc::c_ulong = if initrd.is_none() { 4 } else { 0 };
         // SAFETY: live file descriptors, NUL-terminated command line and Linux
         // KEXEC_FILE_NO_INITRAMFS when no initrd exists. Kernel performs verification.

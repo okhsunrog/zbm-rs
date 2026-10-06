@@ -9,11 +9,75 @@ use std::{
 #[derive(Debug, Clone, Serialize)]
 pub struct BootTarget {
     pub dataset: String,
-    pub generation: u64,
+    pub generation: Option<u64>,
     pub label: String,
     pub root: PathBuf,
     /// Guest-absolute path, not a host path under the loader's /nix/store.
-    pub toplevel: PathBuf,
+    pub toplevel: Option<PathBuf>,
+    pub backend: Backend,
+    pub snapshot: Option<SnapshotSource>,
+    pub mountpoint: Option<String>,
+    pub issue: Option<String>,
+    /// Guest paths and arguments for inspection. Execution revalidates Bootspec.
+    pub inputs: BootInputs,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BootInputs {
+    pub kernel: PathBuf,
+    pub initrd: Option<PathBuf>,
+    pub init: Option<PathBuf>,
+    pub kernel_params: Vec<String>,
+}
+
+impl BootInputs {
+    fn from_spec(spec: &Bootspec) -> Self {
+        Self {
+            kernel: spec.kernel.clone(),
+            initrd: spec.initrd.clone(),
+            init: Some(spec.init.clone()),
+            kernel_params: spec.kernel_params.clone(),
+        }
+    }
+
+    pub fn command_line(&self, extra_args: &[String]) -> Vec<String> {
+        let mut args: Vec<String> = self
+            .init
+            .iter()
+            .map(|init| format!("init={}", init.display()))
+            .collect();
+        args.extend(self.kernel_params.iter().cloned());
+        args.extend_from_slice(extra_args);
+        args
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind")]
+pub enum Backend {
+    Nixos,
+    Linux {
+        rootprefix: String,
+        commandline: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotSource {
+    pub name: String,
+    pub guid: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GenerationIssue {
+    pub generation: u64,
+    pub error: String,
+}
+
+#[derive(Debug, Default)]
+pub struct TargetDiscovery {
+    pub targets: Vec<BootTarget>,
+    pub rejected: Vec<GenerationIssue>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,7 +154,7 @@ pub fn rooted_path(root: &Path, path: &Path) -> io::Result<PathBuf> {
     Ok(root.join(relative))
 }
 
-fn read_spec(root: &Path, toplevel: &Path) -> io::Result<Bootspec> {
+fn read_document(root: &Path, toplevel: &Path) -> io::Result<Document> {
     let path = rooted_path(root, &toplevel.join("boot.json"))?;
     let metadata = fs::metadata(&path)?;
     if !metadata.is_file() || metadata.len() > 1024 * 1024 {
@@ -113,21 +177,48 @@ fn read_spec(root: &Path, toplevel: &Path) -> io::Result<Bootspec> {
     if document.boot.initrd_secrets.is_some() {
         return Err(invalid("Bootspec initrdSecrets is not supported yet"));
     }
-    Ok(document.boot)
+    Ok(document)
+}
+fn read_spec(root: &Path, toplevel: &Path) -> io::Result<Bootspec> {
+    Ok(read_document(root, toplevel)?.boot)
+}
+pub fn supports_snapshot(target: &BootTarget) -> io::Result<bool> {
+    if matches!(target.backend, Backend::Linux { .. }) {
+        return Ok(true);
+    }
+    let spec = read_spec(
+        &target.root,
+        target
+            .toplevel
+            .as_ref()
+            .ok_or_else(|| invalid("Missing NixOS toplevel"))?,
+    )?;
+    let initrd = spec
+        .initrd
+        .ok_or_else(|| invalid("NixOS clone boot requires an initrd"))?;
+    crate::initrd::systemd(&rooted_path(&target.root, &initrd)?)
 }
 fn invalid_error(error: impl std::fmt::Display) -> io::Error {
     invalid(error.to_string())
 }
 
 pub fn generations(root: &Path, dataset: &str, limit: u32) -> io::Result<Vec<BootTarget>> {
+    Ok(discover_generations(root, dataset, limit)?.targets)
+}
+
+pub fn discover_generations(root: &Path, dataset: &str, limit: u32) -> io::Result<TargetDiscovery> {
     let directory = match rooted_path(root, Path::new("/nix/var/nix/profiles")) {
         Ok(path) => path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(TargetDiscovery::default());
+        }
         Err(error) => return Err(error),
     };
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(TargetDiscovery::default());
+        }
         Err(error) => return Err(error),
     };
     let mut candidates = vec![];
@@ -144,28 +235,57 @@ pub fn generations(root: &Path, dataset: &str, limit: u32) -> io::Result<Vec<Boo
     }
     candidates.sort_unstable_by(|a, b| b.cmp(a));
     candidates.truncate(limit as usize);
-    let mut targets = vec![];
+    let mut discovery = TargetDiscovery::default();
     for generation in candidates {
         let profile = PathBuf::from(format!("/nix/var/nix/profiles/system-{generation}-link"));
-        let spec = read_spec(root, &profile)?;
-        let actual = rooted_path(root, &profile)?;
-        if actual != rooted_path(root, &spec.toplevel)? {
-            return Err(invalid("Bootspec toplevel does not match generation"));
+        let target = (|| {
+            let spec = read_spec(root, &profile)?;
+            let actual = rooted_path(root, &profile)?;
+            if actual != rooted_path(root, &spec.toplevel)? {
+                return Err(invalid("Bootspec toplevel does not match generation"));
+            }
+            Ok(BootTarget {
+                inputs: BootInputs::from_spec(&spec),
+                dataset: dataset.into(),
+                generation: Some(generation),
+                label: spec.label,
+                root: root.into(),
+                toplevel: Some(spec.toplevel),
+                backend: Backend::Nixos,
+                snapshot: None,
+                mountpoint: None,
+                issue: None,
+            })
+        })();
+        match target {
+            Ok(target) => discovery.targets.push(target),
+            Err(error) => discovery.rejected.push(GenerationIssue {
+                generation,
+                error: error.to_string(),
+            }),
         }
-        targets.push(BootTarget {
-            dataset: dataset.into(),
-            generation,
-            label: spec.label,
-            root: root.into(),
-            toplevel: spec.toplevel,
-        });
     }
-    Ok(targets)
+    Ok(discovery)
 }
 
 impl BootPlan {
     pub fn resolve(target: &BootTarget, extra_args: &[String]) -> io::Result<Self> {
-        let spec = read_spec(&target.root, &target.toplevel)?;
+        if matches!(target.backend, Backend::Linux { .. }) {
+            return crate::linux::resolve(target, &target.dataset, extra_args);
+        }
+        Self::resolve_nixos(target, extra_args, None)
+    }
+
+    fn resolve_nixos(
+        target: &BootTarget,
+        extra_args: &[String],
+        root_override: Option<&str>,
+    ) -> io::Result<Self> {
+        let toplevel = target
+            .toplevel
+            .as_ref()
+            .ok_or_else(|| invalid("Missing NixOS toplevel"))?;
+        let spec = read_spec(&target.root, toplevel)?;
         let fstab_path = rooted_path(&target.root, &spec.toplevel.join("etc/fstab"))?;
         let metadata = fs::metadata(&fstab_path)?;
         if !metadata.is_file() || metadata.len() > 1024 * 1024 {
@@ -178,13 +298,14 @@ impl BootPlan {
             .map(|line| line.split_whitespace().collect())
             .filter(|fields: &Vec<_>| fields.len() >= 3)
             .collect();
-        if !mounts
-            .iter()
-            .any(|fields| fields[0] == target.dataset && fields[1] == "/" && fields[2] == "zfs")
-        {
+        let roots: Vec<_> = mounts.iter().filter(|fields| fields[1] == "/").collect();
+        if roots.len() != 1 || roots[0][2] != "zfs" {
             return Err(invalid(
                 "NixOS configuration root does not match selected ZFS dataset",
             ));
+        }
+        if roots[0][0] != target.dataset && root_override.is_none() {
+            return Self::resolve_nixos(target, extra_args, Some(&target.dataset));
         }
         if mounts
             .iter()
@@ -192,9 +313,7 @@ impl BootPlan {
         {
             return Err(invalid("Separate Nix store mounts are not supported yet"));
         }
-        let mut cmdline = vec![format!("init={}", spec.init.display())];
-        cmdline.extend(spec.kernel_params);
-        cmdline.extend_from_slice(extra_args);
+        let cmdline = BootInputs::from_spec(&spec).command_line(extra_args);
         for argument in &cmdline {
             if argument.is_empty()
                 || argument
@@ -231,6 +350,84 @@ impl BootPlan {
                 return Err(invalid("Kernel and initrd must be regular files"));
             }
         }
+        if let Some(root) = root_override {
+            if !supports_snapshot(target)? {
+                return Err(invalid("NixOS root override requires systemd initrd"));
+            }
+            Self::rewrite_systemd_root(plan, target, root)
+        } else {
+            Ok(plan)
+        }
+    }
+
+    /// The caller has validated and created this clone from the immutable source.
+    pub fn for_snapshot(
+        target: &BootTarget,
+        clone: &str,
+        extra_args: &[String],
+    ) -> io::Result<Self> {
+        zfskit::names::DatasetName::parse(clone).map_err(invalid_error)?;
+        if target.snapshot.is_none() || !supports_snapshot(target)? {
+            return Err(invalid(
+                "Cannot boot this NixOS initrd on a clone: systemd initrd is required",
+            ));
+        }
+        if matches!(target.backend, Backend::Linux { .. }) {
+            let mut plan = crate::linux::resolve(target, clone, extra_args)?;
+            plan.target.dataset = clone.into();
+            return Ok(plan);
+        }
+        Self::resolve_nixos(target, extra_args, Some(clone))
+    }
+
+    fn rewrite_systemd_root(mut plan: Self, target: &BootTarget, clone: &str) -> io::Result<Self> {
+        zfskit::names::DatasetName::parse(clone).map_err(invalid_error)?;
+        let fstab_path = rooted_path(
+            &target.root,
+            &target.toplevel.as_ref().unwrap().join("etc/fstab"),
+        )?;
+        if fs::read_to_string(fstab_path)?
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .map(|line| line.split_whitespace().collect::<Vec<_>>())
+            .any(|fields| {
+                fields.len() >= 3
+                    && fields[1] != "/"
+                    && (fields[1] == "/usr"
+                        || fields.get(3).is_some_and(|options| {
+                            options.split(',').any(|option| option == "x-initrd.mount")
+                        }))
+            })
+        {
+            return Err(invalid(
+                "Snapshot boot does not support additional initrd mounts",
+            ));
+        }
+        if plan.cmdline.iter().any(|arg| {
+            arg.starts_with("rootflags=")
+                || arg.starts_with("rootfstype=")
+                || arg.starts_with("rd.fstab=")
+                || arg == "ro"
+        }) {
+            return Err(invalid(
+                "Snapshot boot cannot override conflicting root policy",
+            ));
+        }
+        plan.cmdline.retain(|arg| !arg.starts_with("root="));
+        plan.cmdline.extend([
+            format!("root={clone}"),
+            "rootfstype=zfs".into(),
+            if clone == target.dataset
+                && target.mountpoint.as_deref().is_some_and(|p| p != "legacy")
+            {
+                "rootflags=defaults,zfsutil".into()
+            } else {
+                "rootflags=defaults".into()
+            },
+            "rw".into(),
+            "rd.fstab=no".into(),
+        ]);
+        plan.target.dataset = clone.into();
         Ok(plan)
     }
 }
@@ -285,7 +482,7 @@ mod tests {
         }
         let targets = generations(&root, "tank/root", 1).unwrap();
         assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].generation, 12);
+        assert_eq!(targets[0].generation, Some(12));
         let plan = BootPlan::resolve(&targets[0], &["quiet".into()]).unwrap();
         assert_eq!(plan.kernel, root.join("nix/store/os/kernel"));
         assert_eq!(
@@ -297,6 +494,39 @@ mod tests {
         let mut wrong_root = targets[0].clone();
         wrong_root.dataset = "tank/other-root".into();
         assert!(BootPlan::resolve(&wrong_root, &[]).is_err());
+        let mut snapshot = targets[0].clone();
+        snapshot.snapshot = Some(SnapshotSource {
+            name: "tank/root@good".into(),
+            guid: 9,
+        });
+        assert!(BootPlan::for_snapshot(&snapshot, "tank/clone", &[]).is_err());
+        fs::write(
+            root.join("nix/store/os/initrd"),
+            crate::initrd::tests::archive("/usr/lib/systemd/systemd"),
+        )
+        .unwrap();
+        let clone_plan = BootPlan::for_snapshot(&snapshot, "tank/clone", &[]).unwrap();
+        assert!(clone_plan.cmdline.contains(&"root=tank/clone".into()));
+        assert!(clone_plan.cmdline.contains(&"rootfstype=zfs".into()));
+        assert!(!clone_plan.cmdline.contains(&"root=fstab".into()));
+        assert_eq!(clone_plan.target.dataset, "tank/clone");
+        assert_eq!(clone_plan.kernel, plan.kernel);
+        let mut persistent = targets[0].clone();
+        persistent.dataset = "tank/promoted".into();
+        persistent.mountpoint = Some("/".into());
+        let persistent_plan = BootPlan::resolve(&persistent, &[]).unwrap();
+        assert!(
+            persistent_plan
+                .cmdline
+                .contains(&"root=tank/promoted".into())
+        );
+        assert!(
+            persistent_plan
+                .cmdline
+                .contains(&"rootflags=defaults,zfsutil".into())
+        );
+        assert!(persistent_plan.target.snapshot.is_none());
+        assert!(BootPlan::for_snapshot(&snapshot, "tank/clone", &["rootflags=ro".into()]).is_err());
         document["org.nixos.bootspec.v1"]["initrdSecrets"] = "/nix/store/os/secret-appender".into();
         fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
         assert!(BootPlan::resolve(&targets[0], &[]).is_err());
@@ -306,7 +536,64 @@ mod tests {
             .remove("initrdSecrets");
         document["org.nixos.bootspec.v1"]["system"] = "aarch64-linux".into();
         fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
-        assert!(generations(&root, "tank/root", 20).is_err());
+        let discovery = discover_generations(&root, "tank/root", 20).unwrap();
+        assert!(discovery.targets.is_empty());
+        assert_eq!(discovery.rejected.len(), 2);
+        assert!(discovery.rejected[0].error.contains("architecture"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn broken_and_unsupported_generations_do_not_hide_usable_generations() {
+        use std::os::unix::fs::symlink;
+        let root =
+            std::env::temp_dir().join(format!("zbm-mixed-generations-{}", std::process::id()));
+        fs::create_dir_all(root.join("nix/var/nix/profiles")).unwrap();
+        for number in 1..=4 {
+            let toplevel = format!("/nix/store/os-{number}");
+            let directory = root.join(toplevel.trim_start_matches('/'));
+            fs::create_dir_all(&directory).unwrap();
+            let mut document = serde_json::json!({"org.nixos.bootspec.v1": {
+                "system": "x86_64-linux", "kernel": format!("{toplevel}/kernel"),
+                "init": format!("{toplevel}/init"), "toplevel": toplevel,
+                "kernelParams": [], "label": format!("generation {number}")
+            }});
+            if number == 2 {
+                document["org.nixos.bootspec.v1"]["initrdSecrets"] = "/unsupported".into();
+            }
+            fs::write(
+                directory.join("boot.json"),
+                if number == 3 {
+                    b"broken-json".to_vec()
+                } else {
+                    serde_json::to_vec(&document).unwrap()
+                },
+            )
+            .unwrap();
+            symlink(
+                &toplevel,
+                root.join(format!("nix/var/nix/profiles/system-{number}-link")),
+            )
+            .unwrap();
+        }
+        let discovery = discover_generations(&root, "tank/root", 4).unwrap();
+        assert_eq!(
+            discovery
+                .targets
+                .iter()
+                .map(|target| target.generation)
+                .collect::<Vec<_>>(),
+            [Some(4), Some(1)]
+        );
+        assert_eq!(
+            discovery
+                .rejected
+                .iter()
+                .map(|issue| issue.generation)
+                .collect::<Vec<_>>(),
+            [3, 2]
+        );
+        assert!(discovery.rejected[1].error.contains("initrdSecrets"));
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -1,0 +1,7 @@
+{
+  "ui": {"timeout_secs": 0, "show_snapshots": true, "title": "zbm-rs snapshot test"},
+  "manager": {"restart_limit": 2},
+  "zfs": {"import_policy": "host-id"},
+  "nixos": {"generation_limit": 3},
+  "kernel_args": ["quiet", "zbm.test=1", "zbm.snapshot-test=1"]
+}

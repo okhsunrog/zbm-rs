@@ -8,9 +8,9 @@ manager child; the manager owns Tokio, zfskit and Ratatui. Manager failure never
 terminates PID 1. The parent restores the console, restarts once after a rapid
 failure, then uses emergency recovery instead of an unlimited crash loop.
 
-The first installed-OS path discovers NixOS Bootspec generations on a selected
-ZFS filesystem and boots one through kexec_file_load. Generic Linux discovery,
-encryption unlock UX, snapshot boot, specialisations and Secure Boot acceptance
+The installed-OS paths discover ordinary Linux kernels/initramfs and NixOS
+Bootspec generations on selected ZFS filesystems, then boot through
+kexec_file_load. Encryption unlock UX, specialisations and Secure Boot acceptance
 remain roadmap work.
 
 ## Why this project exists
@@ -39,23 +39,115 @@ humans and automation operate the same VM through keys, screens, logs and SSH.
 
 The working foundation includes discovery, the supervisor/manager split,
 immutable JSON configuration and the Nix/QEMU lifecycle harness, plus an initial
-NixOS generation boot path. Snapshot boot and encryption UX remain roadmap work.
+Linux and NixOS boot paths, snapshot clone boot, persistent clones/promotion and
+confirmed single-dataset rollback. Encryption UX remains roadmap work.
 
-## Initial NixOS boot path
+Cargo and Nix use the published `zfskit 0.3` crate from crates.io, pinned by
+`Cargo.lock`. A sibling zfskit checkout is not required.
 
-Enter on a pool explicitly imports it without force and mounts its filesystems
-read-only for generation discovery. Enter on a generation resolves its Bootspec,
+## Linux and NixOS boot paths
+
+Enter on a pool explicitly imports it without force and discovers boot environments.
+The list follows ZFSBootMenu visibility: `mountpoint=/` unless
+`org.zfsbootmenu:active=off`, or `mountpoint=legacy` with `active=on` (including
+inherited values). `bootfs` marks and selects the default BE; it never triggers
+automatic boot. Eligible unencrypted datasets are mounted read-only; hidden and
+non-root datasets are not mounted. Encrypted or `canmount=off` candidates remain
+visible with a diagnostic. Enter on a BE opens its Linux kernels or NixOS generations; B goes back.
+An individual mount or Bootspec failure leaves other BEs and generations
+available. Rejected generations retain their generation number and diagnostic.
+Enter on a generation resolves its Bootspec,
 loads its kernel/initrd, unmounts the roots owned by this manager and exports its
 owned pools before executing kexec. Only pools imported by zbm-rs are eligible for export;
 restart reconciliation checks actual pool GUIDs and existing mountpoints.
 
-This first backend assumes that /nix/store and /nix/var/nix/profiles are in the
+The Linux backend follows ZBM kernel/initramfs naming in `/boot`, naturally sorts
+versions, honors `org.zfsbootmenu:kernel`, and reads `commandline` (including
+`%{parent}` expansion) or a per-kernel `.kcl` file. `rootprefix` is explicit or
+inferred from `ID`/`ID_LIKE` without executing os-release. The loader suppresses
+conflicting `root=`/`zfs=` arguments and names the selected dataset, including
+clones. Existing initramfs images are used unchanged. Paths and matching pairs
+are checked again before handoff; ZFS properties are freshly read.
+
+The NixOS backend assumes that /nix/store and /nix/var/nix/profiles are in the
 selected root filesystem. Separate /nix datasets, encrypted roots, initrdSecrets,
 specialisations and kernel arguments requiring whitespace/quoting are unsupported.
-The generation's configured fstab root must match the selected dataset; this
-backend does not rewrite an initrd to boot clones under another dataset name.
+A configured root different from the selected dataset requires an automatically
+recognized systemd initrd for root override; scripted NixOS initrd root override
+is unsupported. No target initrd is rewritten.
 Discovery itself remains non-mutating. Boot actions are unavailable in local
 preview mode. Autoboot is not implemented.
+
+Linux ZBM properties do not override NixOS Bootspec. Pool
+`org.zfsbootmenu:readonly` and the image import policy govern mutations.
+Encrypted BE unlock/keysource, duplicate via send/receive and some other ZBM
+features are still unimplemented; this is not full ZBM feature parity.
+
+## Snapshots and recovery
+
+From the BE list, T opens snapshots when `settings.ui.showSnapshots` is enabled.
+Enter inspects a snapshot's Linux targets or NixOS generations read-only.
+C prepares an owned boot clone, D discards a prepared clone, and Enter on a target
+prepares/reuses a clone and boots it. Snapshot listings are capped at the newest
+256 per BE.
+
+O creates a persistent ordinary boot environment from the selected snapshot;
+M creates and promotes it, after confirmation. These operations do not require
+a discoverable boot target or NixOS metadata. The clone is selected in the normal
+BE list; its boot properties are preserved and pool bootfs is unchanged.
+U rolls the original dataset back to the selected snapshot, after typing
+`ROLLBACK`. This discards current changes and newer snapshots (`zfs rollback -r`),
+but never force-destroys dependent clones or recursively rolls back child datasets.
+Owned inspection mounts are removed first; foreign mounts or read-only policy
+block the operation. Boot targets are rediscovered afterward.
+
+No installed-system flag or custom Bootspec extension is required. Linux clone
+boot uses the selected dataset via the native root prefix. NixOS clone boot
+inspects the actual `/init` in a bounded newc initramfs (gzip, xz or zstd) and
+requires systemd initrd, with the Nix store in the root dataset; additional initrd
+mounts such as a separate /usr remain unsupported. The legacy
+`programs.zbm-rs.snapshotBoot.enable` option is a compatibility no-op.
+Rollback and persistent clone/promotion do not depend on this initrd check.
+
+Mutations require a writable owned pool import. Read-only policy is never
+silently upgraded; `org.zfsbootmenu:readonly` also forbids mutations.
+Prepared boot clones are separate from ordinary persistent BEs.
+Prepared clones have `canmount=noauto`, `active=off` and an ownership token.
+Linux boot clones use `mountpoint=/` for native initramfs compatibility; NixOS
+boot clones use `mountpoint=legacy` with the explicit systemd root override. An ephemeral `/run` journal records intent before creation and verifies
+the token, origin and snapshot GUID before restart reuse or explicit discard.
+Discard uses non-recursive destruction and refuses mounted or retained clones.
+
+Clones are marked `org.zbm-rs:state=retained` before handoff. They remain after
+boot, reboot or a failed handoff, preserving writes from the target OS. They
+are hidden from ordinary BE discovery and are never automatically deleted.
+The user can inspect their origin and ownership properties and manage retained
+clones with ZFS tooling. Reuse of prepared clones is currently limited to
+manager restarts within the same loader boot; cross-reboot cleanup/adoption
+is intentionally deferred.
+
+```sh
+nix build .#zbm-rs-efi-test-snapshot --out-link result-snapshot
+nix build .#zbm-rs-boot-fixture --out-link result-fixture
+cargo xtask boot-smoke --snapshot --image result-snapshot --fixture result-fixture --run target/vm/snapshot-new
+```
+
+Arch acceptance uses the actual sanitized mkarchiso staging tree from
+`archinstall_zfs`, a real ZFS-root mkinitcpio image and a disposable VM disk:
+
+```sh
+uv run --no-project python xtask/fixtures/build_arch.py \
+  ~/code/archinstall_zfs/gen_iso/workdir/x86_64/airootfs \
+  target/arch-fixture-new --sudo
+cargo xtask arch-smoke --image result-snapshot --fixture target/arch-fixture-new \
+  --run target/vm/arch-live-new --mode live
+```
+
+Use fresh run directories with `--mode snapshot`, `rollback`, `clone` or
+`promote` for the other paths. The reviewed fixture builder currently pins
+Linux LTS 6.18.53-1-lts. This is a staged-BE boot test, not a full installer-wizard
+run. Rollback checks cancellation, modified Enter, dependent-clone protection
+and read-only policy before restoring data and booting the result.
 
 The persistent boot acceptance fixture contains two real NixOS generations:
 
@@ -158,11 +250,22 @@ cargo xtask smoke --run target/vm/lifecycle-001 --lifecycle
 ```
 
 Build result-test first. Every run uses a fresh folder and its own disposable disk.
-Smoke owns and reaps QEMU even on failure/interruption. The lifecycle variant
+Smoke owns and reaps QEMU even on failure/interruption. Add `--failures` to
+exercise isolated mount/Bootspec failures, Shell during a blocked mount,
+operation timeout/restart reconciliation, and Power off during a blocked mount.
+The lifecycle variant
 also checks abort/panic/SIGSEGV, actual terminal damage/restoration, manager
 restart, PID-1 signal forwarding, adopted-child reaping, CLOEXEC, deliberately
-leaked descriptors and failed-kexec classification. Successful kernel handoff
-will need a later scenario once kexec exists.
+leaked descriptors and failed-kexec classification. The separate `boot-smoke`
+scenario proves successful handoff into the selected installed generation.
+
+The explicit host-only SCSI fixture exercises the disk frontend omitted by a
+controller-only hardware manifest:
+
+```sh
+nix build .#zbm-rs-efi-test-host-only-scsi --out-link result-scsi
+cargo xtask smoke --image result-scsi --run target/vm/scsi-new --port 2231 --scsi
+```
 
 Interactive boot stays in a tracked foreground terminal/session. Other controls
 run from another terminal:
@@ -188,6 +291,31 @@ R rescans, S asks PID 1 for a shell, N requests a clean restart, P asks PID 1 to
 power off. Exiting the supervised shell starts a fresh manager with coherent ZFS
 state. Q exits manager; without an intent PID 1 treats that as unexpected exit.
 Outside supervision S runs a local shell and Q exits normally.
+Boot operations run individually while recovery keys remain available. A
+30-second operation timeout cancels the async command and requires Shell or
+Restart before further boot actions; the next manager reconciles recorded
+resource intent. Blocking OS-root reads run outside the input loop, and shutdown
+does not wait indefinitely for those reads.
+
+The TUI uses a candidate list and a read-only details pane on wide consoles
+(110 columns or more). Smaller consoles keep the list and recovery controls;
+I/F3 opens the same complete details in a scrollable panel. Bootspec previews
+show the generation's actual kernel, initrd, init and arguments. Execution still
+revalidates the boot inputs. Rejected generations can be inspected but cannot boot.
+
+- `/` starts fuzzy search in the current list. Enter accepts the filter without
+  booting; Esc clears it. Filters and selection survive navigation back to a list.
+- F1/`?` shows keyboard help; F2 opens all actions, including unavailable actions
+  with their reasons. Both use the same command inventory as dispatch.
+- Existing Enter/B/T/C/D/R/S/N/P/Q bindings remain available outside search.
+  F4 Shell, F5 Rescan, F6 Restart manager and F10 Power off provide function-key
+  alternatives; recovery remains available during search and pending operations.
+- D opens a confirmation before discarding a prepared owned clone. Esc cancels;
+  Enter confirms. Clone ownership and non-recursive destruction stay in core.
+
+N restarts only the manager; Q exits it and leaves recovery to PID 1. These actions
+do not reboot the machine. The interface does not yet provide chroot, full pool
+status, kernel-argument editing, diff or other unimplemented ZBM actions.
 
 `screen` returns instrumented application state. `screen --text` reads the actual
 VT through /dev/vcs1 (ASCII labels, font glyphs replaced with spaces). PNG capture

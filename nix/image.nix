@@ -1,4 +1,4 @@
-{ pkgs, source, zfsSource, runtimePkgs ? pkgs, kernelPackages ? pkgs.linuxPackages
+{ pkgs, source, runtimePkgs ? pkgs, kernelPackages ? pkgs.linuxPackages
 , zfsUserspace ? (import ./lean-userspace.nix { pkgs = runtimePkgs; }).zfs
 , testProfile ? false, profile ? "portable", hardwareManifest ? null
 , extraModules ? [], forcedModules ? [], loaderConfig ? null
@@ -32,17 +32,11 @@ let
       let relative = lib.removePrefix (toString source + "/") path;
       in path == toString source || lib.any (name: relative == name || lib.hasPrefix (name + "/") relative) [ "Cargo.toml" "Cargo.lock" "crates" "xtask" "config" ];
   };
-  combinedSource = pkgs.runCommand "zbm-workspace-source" {} ''
-    mkdir -p $out/zbm-rs $out/zfskit
-    cp -r ${rustSource}/Cargo.toml ${rustSource}/Cargo.lock ${rustSource}/crates ${rustSource}/xtask ${rustSource}/config $out/zbm-rs/
-    cp -r ${zfsSource}/. $out/zfskit/
-  '';
   binary = runtimePkgs.rustPlatform.buildRustPackage {
     ZBM_RS_CONFIG = configJson;
     pname = "zbm-rs";
     version = "0.1.0";
-    src = combinedSource;
-    sourceRoot = "zbm-workspace-source/zbm-rs";
+    src = rustSource;
     cargoLock.lockFile = rustSource + "/Cargo.lock";
     cargoBuildFlags = [ "-p" "zbm-rs" ];
     cargoTestFlags = [ "-p" "zbm-rs" "-p" "zbm-core" ];

@@ -18,25 +18,7 @@
     },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs",
-        "zfskit": "zfskit"
-      }
-    },
-    "zfskit": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1791246229,
-        "narHash": "sha256-f5eWap+wQdPV+fkT1YgJIFFkn6Uw88RaG7yd0Cny1tU=",
-        "owner": "okhsunrog",
-        "repo": "zfskit",
-        "rev": "6389c1be98b7721eec9858cc4916cb866d09d5c2",
-        "type": "github"
-      },
-      "original": {
-        "owner": "okhsunrog",
-        "repo": "zfskit",
-        "rev": "6389c1be98b7721eec9858cc4916cb866d09d5c2",
-        "type": "github"
+        "nixpkgs": "nixpkgs"
       }
     }
   },

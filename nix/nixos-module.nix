@@ -12,7 +12,6 @@ let
       kernel_args = cfg.settings.kernelArgs;
     };
     source = self;
-    zfsSource = self.inputs.zfskit;
     kernelPackages = config.boot.kernelPackages;
     zfsUserspace = (import ./lean-userspace.nix { inherit pkgs; }).mkZfs config.boot.zfs.package;
     profile = cfg.image.profile;
@@ -21,7 +20,7 @@ let
     forcedModules = config.boot.initrd.kernelModules;
   };
 in {
-  imports = map (pair: lib.mkRenamedOptionModule
+  imports = [ ./snapshot-boot.nix ] ++ map (pair: lib.mkRenamedOptionModule
     ([ "programs" "zbm-rs" ] ++ builtins.elemAt pair 0)
     ([ "programs" "zbm-rs" ] ++ builtins.elemAt pair 1)) [
       [ [ "timeout" ] [ "settings" "ui" "timeout" ] ]
@@ -36,7 +35,7 @@ in {
     ];
   options.programs.zbm-rs = {
     settings.ui.timeout = lib.mkOption { type = lib.types.ints.between 0 300; default = 5; description = "Reserved autoboot timeout in seconds (autoboot is not implemented yet)."; };
-    settings.ui.showSnapshots = lib.mkOption { type = lib.types.bool; default = true; description = "Reserved snapshot visibility policy."; };
+    settings.ui.showSnapshots = lib.mkOption { type = lib.types.bool; default = true; description = "Enable the snapshot browser; creating a clone still requires an explicit action and writable pool."; };
     settings.ui.title = lib.mkOption { type = lib.types.nullOr lib.types.str; default = null; description = "Optional TUI heading."; };
     settings.manager.restartLimit = lib.mkOption { type = lib.types.ints.between 0 8; default = 2; description = "Rapid failure count that enters recovery; 0 and 1 recover on the first failure."; };
     settings.zfs.importPolicy = lib.mkOption { type = lib.types.enum [ "host-id" "read-only" ]; default = "host-id"; description = "Policy for explicit selected-pool import; discovery never imports or forces import."; };

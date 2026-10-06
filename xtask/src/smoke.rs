@@ -63,14 +63,25 @@ fn ready(run: &Path, scans: u64, pools: usize) -> Result<Value> {
     Ok(state)
 }
 
+pub struct Scenarios {
+    pub lifecycle: bool,
+    pub failures: bool,
+    pub scsi: bool,
+}
+
 pub fn run(
     run: &Path,
     image: &Path,
     tcg: bool,
     port: u16,
     direct: bool,
-    lifecycle: bool,
+    scenarios: Scenarios,
 ) -> Result<()> {
+    let Scenarios {
+        lifecycle,
+        failures,
+        scsi,
+    } = scenarios;
     install_interrupt()?;
     // Re-exec this running inode even if Cargo replaces the checkout binary.
     let mut command = Command::new("/proc/self/exe");
@@ -85,6 +96,9 @@ pub fn run(
     if direct {
         command.arg("--direct");
     }
+    if scsi {
+        command.arg("--scsi");
+    }
     let mut owned = OwnedVm(command.stdout(Stdio::null()).spawn()?);
     let result = (|| {
         let empty = wait_for(90, Some(&mut owned.0), || ready(run, 1, 0))?;
@@ -98,7 +112,7 @@ pub fn run(
         wait_for(30, Some(&mut owned.0), || {
             vm::ssh(
                 run,
-                "uname -r; test -c /dev/zfs; test -L /etc/zbm-rs/config.json; test -r /etc/zbm-rs/config.json",
+                "uname -r; test -c /dev/zfs; test -L /etc/zbm-rs/config.json; test -r /etc/zbm-rs/config.json; test -r /etc/udev/rules.d/80-drivers.rules",
             )
         })?;
         let console = vm::console(run)?;
@@ -107,17 +121,83 @@ pub fn run(
             "Missing VT controls"
         );
         fs::write(run.join("empty.txt"), console)?;
+        crate::interface::empty(run)?;
         // Disposable guest disk only; never attach host devices to this scenario.
-        vm::ssh(
+        let disk = vm::ssh(
             run,
-            r#"zpool create -f -o cachefile=none -m none zbm_fixture /dev/vda && zfs create -o mountpoint=none zbm_fixture/ROOT && zfs snapshot zbm_fixture/ROOT@fresh && zfs clone -o mountpoint=none zbm_fixture/ROOT@fresh zbm_fixture/clone && zfs rename zbm_fixture/clone zbm_fixture/renamed && zfs promote zbm_fixture/renamed && printf '%s\n' disposable-zbm-test-passphrase > /run/zbm-test-key && zfs create -o encryption=aes-256-gcm -o keyformat=passphrase -o keylocation=file:///run/zbm-test-key -o mountpoint=none zbm_fixture/crypt && zfs unload-key zbm_fixture/crypt && zfs load-key zbm_fixture/crypt && test "$(zfs get -H -o value keystatus zbm_fixture/crypt)" = available && zpool export zbm_fixture"#,
+            r#"for path in /dev/disk/by-id/*zbm-fixture-disk; do [ -L "$path" ] && readlink -f "$path"; done | sort -u"#,
         )?;
+        let disk = disk.trim();
+        ensure!(
+            disk.starts_with("/dev/")
+                && disk
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"/_-".contains(&b)),
+            "Expected one disposable disk with fixture serial, found: {disk:?}"
+        );
+        if scsi {
+            ensure!(disk.starts_with("/dev/sd"), "Expected a SCSI disk: {disk}");
+        }
+        let provision = r#"zpool create -f -o cachefile=none -m none zbm_fixture DISPOSABLE_DISK && zfs create -o mountpoint=none zbm_fixture/ROOT && zfs snapshot zbm_fixture/ROOT@fresh && zfs clone -o mountpoint=none zbm_fixture/ROOT@fresh zbm_fixture/clone && zfs rename zbm_fixture/clone zbm_fixture/renamed && zfs promote zbm_fixture/renamed && printf '%s\n' disposable-zbm-test-passphrase > /run/zbm-test-key && zfs create -o encryption=aes-256-gcm -o keyformat=passphrase -o keylocation=file:///run/zbm-test-key -o mountpoint=none zbm_fixture/crypt && zfs unload-key zbm_fixture/crypt && zfs load-key zbm_fixture/crypt && test "$(zfs get -H -o value keystatus zbm_fixture/crypt)" = available && zpool export zbm_fixture"#;
+        vm::ssh(run, &provision.replace("DISPOSABLE_DISK", disk))?;
         vm::key(run, "r")?;
         let pool = wait_for(20, Some(&mut owned.0), || ready(run, 2, 1))?;
         ensure!(
             pool["state"]["pools"][0]["name"] == "zbm_fixture",
             "Wrong pool: {pool}"
         );
+        // BE policy fixture: inherited active, hidden roots, explicit legacy,
+        // non-root filesystems and an encrypted candidate with a useful diagnostic.
+        vm::ssh(
+            run,
+            "set -eu; zpool import -N -o cachefile=none zbm_fixture; zfs set canmount=noauto mountpoint=/ zbm_fixture/ROOT; zfs set org.zfsbootmenu:active=on zbm_fixture; zfs create -o canmount=noauto -o mountpoint=legacy zbm_fixture/default; zfs create -o canmount=noauto -o mountpoint=/ -o org.zfsbootmenu:active=off zbm_fixture/hidden; zfs create -o canmount=noauto -o mountpoint=/home zbm_fixture/data; zfs set canmount=noauto mountpoint=/ zbm_fixture/crypt; zpool set bootfs=zbm_fixture/default zbm_fixture; zpool export zbm_fixture",
+        )?;
+        vm::key(run, "ret")?;
+        wait_for(30, None, || {
+            let state = vm::screen(run)?;
+            ensure!(
+                state["event"] == "boot-environments" && state["state"]["error"].is_null(),
+                "Waiting for boot environments: {state}"
+            );
+            let environments = state["state"]["environments"].as_array().unwrap();
+            let names: Vec<_> = environments
+                .iter()
+                .map(|be| be["dataset"].as_str().unwrap())
+                .collect();
+            ensure!(
+                names
+                    == [
+                        "zbm_fixture/ROOT",
+                        "zbm_fixture/crypt",
+                        "zbm_fixture/default"
+                    ],
+                "Wrong BE visibility: {names:?}"
+            );
+            ensure!(
+                state["state"]["selected_environment"] == 2
+                    && environments[2]["is_default"] == true,
+                "bootfs was not selected"
+            );
+            ensure!(
+                environments[1]["unavailable"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("Encrypted")),
+                "Missing encrypted-root diagnostic"
+            );
+            fs::write(
+                run.join("environments.json"),
+                serde_json::to_vec_pretty(&state)?,
+            )?;
+            Ok(())
+        })?;
+        vm::screenshot(run, &run.join("environments.png"))?;
+        fs::write(run.join("environments.txt"), vm::console(run)?)?;
+        crate::interface::environments(run)?;
+        vm::ssh(
+            run,
+            r#"test "$(zpool get -H -o value readonly zbm_fixture)" = on; test "$(awk 'index($5, "/run/zbm-rs/roots/") == 1 {n++} END {print n}' /proc/self/mountinfo)" = 2"#,
+        )?;
+        vm::key(run, "b")?;
         vm::screenshot(run, &run.join("pool.png"))?;
         let console = vm::console(run)?;
         ensure!(
@@ -125,6 +205,9 @@ pub fn run(
             "Incomplete pool VT"
         );
         fs::write(run.join("pool.txt"), console)?;
+        if failures {
+            crate::failures::exercise(run)?;
+        }
         if lifecycle {
             crate::lifecycle::exercise(run)?;
         }
@@ -143,6 +226,9 @@ pub fn run(
         wait_for(20, Some(&mut owned.0), || ready(run, 2, 1))?;
         vm::screenshot(run, &run.join("shell-return.png"))?;
         fs::write(run.join("shell-return.txt"), vm::console(run)?)?;
+        if failures {
+            crate::failures::start_hung_mount(run)?;
+        }
         vm::key(run, "p")?;
         wait_for(15, None, || {
             ensure!(
@@ -156,8 +242,9 @@ pub fn run(
             serde_json::to_vec_pretty(&serde_json::json!({
                 "passed": true, "firmware": if direct { "direct-linux" } else { "OVMF-UEFI" },
                 "lifecycle": lifecycle,
+                "failures": failures, "disk_bus": if scsi { "scsi" } else { "virtio-blk" },
                 "empty": empty, "pool": pool,
-                "checks": ["boot", "real-zfs-module", "ssh", "snapshot-clone-rename-promote", "native-encryption-local-key", "discovery", "rescan", "QMP-keyboard", "real-vt-rendering", "shell-return", "guest-poweroff"]
+                "checks": ["boot", "real-zfs-module", "ssh", "snapshot-clone-rename-promote", "native-encryption-local-key", "discovery", "BE-visibility", "inherited-active", "bootfs-selection", "encrypted-BE-diagnostic", "read-only-candidate-mounts", "rescan", "QMP-keyboard", "real-vt-rendering", "shell-return", "guest-poweroff"]
             }))?,
         )?;
         Ok(())

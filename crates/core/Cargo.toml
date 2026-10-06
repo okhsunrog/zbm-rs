@@ -5,7 +5,11 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
+flate2 = "1.1.10"
+lzma-rs = "0.3.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+shlex = "2.0.1"
 tokio = { version = "1.53.2", features = ["rt", "time", "macros"] }
-zfskit = { version = "0.2.2", path = "../../../zfskit" }
+zfskit = { version = "0.3.0" }
+zstd = "0.14.0"

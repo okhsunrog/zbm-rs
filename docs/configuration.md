@@ -43,11 +43,11 @@ Missing or invalid explicit files fail instead of silently choosing defaults.
 | JSON field | Default | Constraint / current behavior |
 | --- | --- | --- |
 | ui.timeout_secs | 5 | 0..300; reserved for future autoboot |
-| ui.show_snapshots | true | reserved for future snapshot UI |
+| ui.show_snapshots | true | enable snapshot browsing from the BE list |
 | ui.title | null | optional heading; <=256 bytes, no control characters |
 | manager.restart_limit | 2 | 0..8; rapid failure threshold entering recovery |
-| zfs.import_policy | host-id | host-id or read-only; reserved, no automatic import |
-| nixos.generation_limit | 20 | 1..512; reserved for future NixOS discovery |
+| zfs.import_policy | host-id | host-id or read-only; explicit import only, never force |
+| nixos.generation_limit | 20 | 1..512; maximum generations per root or snapshot |
 | kernel_args | [] | <=64 strings, <=4096 bytes each, no NUL; future target kernel |
 
 A threshold of 2 restarts on the first rapid failure and enters recovery on the

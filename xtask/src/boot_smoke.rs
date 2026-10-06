@@ -9,7 +9,14 @@ use std::{
     path::Path,
     process::{Command, Stdio},
 };
-pub fn run(run: &Path, image: &Path, fixture: &Path, tcg: bool, port: u16) -> Result<()> {
+pub fn run(
+    run: &Path,
+    image: &Path,
+    fixture: &Path,
+    tcg: bool,
+    port: u16,
+    snapshot: bool,
+) -> Result<()> {
     crate::smoke::install_interrupt()?;
     let expected = fs::read_to_string(fixture.join("generation-1"))?
         .trim()
@@ -36,9 +43,21 @@ pub fn run(run: &Path, image: &Path, fixture: &Path, tcg: bool, port: u16) -> Re
         println!("Loader ready; installing generated NixOS fixture on disposable /dev/vda");
         vm::ssh(
             run,
-            "set -eu; zpool create -o cachefile=none -O compression=lz4 -O mountpoint=none zbm_fixture /dev/vda; zfs create -o mountpoint=legacy zbm_fixture/nixos; mkdir -p /fixture-root; mount -t zfs zbm_fixture/nixos /fixture-root",
+            "set -eu; zpool create -o cachefile=none -O compression=lz4 -O mountpoint=none zbm_fixture /dev/vda; zfs create -o mountpoint=legacy -o org.zfsbootmenu:active=on zbm_fixture/nixos; zfs create -o mountpoint=legacy -o org.zfsbootmenu:active=on zbm_fixture/inspect; zpool set bootfs=zbm_fixture/nixos zbm_fixture; mkdir -p /fixture-root; mount -t zfs zbm_fixture/nixos /fixture-root",
         )?;
         vm::ssh_timeout(run, "tar -xf /dev/vdb -C /fixture-root", 900)?;
+        // A malformed peer must not hide either real NixOS generation, including
+        // when their profiles are later browsed inside the source snapshot.
+        vm::ssh(
+            run,
+            "set -eu; mkdir -p /fixture-root/nix/store/zbm-broken-generation; echo broken-json > /fixture-root/nix/store/zbm-broken-generation/boot.json; ln -s /nix/store/zbm-broken-generation /fixture-root/nix/var/nix/profiles/system-3-link",
+        )?;
+        if snapshot {
+            vm::ssh(
+                run,
+                "set -eu; cd /fixture-root/nix/var/nix/profiles; cp -a system-2-link /run/system-2-link; rm system-2-link; ln -sfn system-1-link system; echo snapshot-original > /fixture-root/snapshot-proof; zfs snapshot zbm_fixture/nixos@known-good; cp -a /run/system-2-link .; ln -sfn system-2-link system; echo live-changed > /fixture-root/snapshot-proof",
+            )?;
+        }
         vm::ssh(run, "umount /fixture-root; zpool export zbm_fixture")?;
         vm::key(run, "r")?;
         wait_for(20, None, || {
@@ -53,11 +72,18 @@ pub fn run(run: &Path, image: &Path, fixture: &Path, tcg: bool, port: u16) -> Re
             Ok(())
         })?;
         vm::key(run, "ret")?;
+        environments(run)?;
+        if snapshot {
+            return snapshot_boot(run, &mut owned, &expected, original_boot.trim());
+        }
+        vm::key(run, "ret")?;
         targets(run)?;
         vm::screenshot(run, &run.join("generations.png"))?;
         let old = manager_pid(run)?;
         vm::key(run, "n")?;
         wait_for(20, None, || new_manager(run, old, 1))?;
+        vm::key(run, "ret")?;
+        environments(run)?;
         vm::key(run, "ret")?;
         targets(run)?;
         vm::key(run, "down")?;
@@ -75,15 +101,15 @@ pub fn run(run: &Path, image: &Path, fixture: &Path, tcg: bool, port: u16) -> Re
             .lines()
             .find_map(|line| {
                 let (before, after) = line.split_once(" - ")?;
-                (after.split_whitespace().nth(1) == Some("zbm_fixture"))
+                (after.split_whitespace().nth(1) == Some("zbm_fixture/inspect"))
                     .then(|| before.split_whitespace().nth(4).unwrap().to_owned())
             })
-            .ok_or_else(|| anyhow::anyhow!("Missing owned pool-root mount"))?;
+            .ok_or_else(|| anyhow::anyhow!("Missing owned inspection mount"))?;
         ensure!(
             mount.starts_with("/run/zbm-rs/roots/")
                 && mount
                     .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"/-".contains(&b)),
+                    .all(|b| b.is_ascii_alphanumeric() || b"/_-".contains(&b)),
             "Unexpected mount path"
         );
         vm::ssh(
@@ -122,7 +148,7 @@ pub fn run(run: &Path, image: &Path, fixture: &Path, tcg: bool, port: u16) -> Re
         vm::ssh(
             run,
             &format!(
-                "set -eu; zpool list -H -o name zbm_fixture; umount '{mount}'; zpool export zbm_foreign; mount -t zfs -o ro,zfsutil zbm_fixture '{mount}'"
+                "set -eu; zpool list -H -o name zbm_fixture; umount '{mount}'; zpool export zbm_foreign; mount -t zfs -o ro,zfsutil zbm_fixture/inspect '{mount}'"
             ),
         )?;
         println!("Booting selected NixOS generation 1 via kexec_file_load");
@@ -195,6 +221,283 @@ fn targets(run: &Path) -> Result<()> {
             targets.len() == 2 && targets[0]["generation"] == 2 && targets[1]["generation"] == 1,
             "Wrong generations: {targets:?}"
         );
+        ensure!(
+            state["state"]["rejected_generations"][0]["generation"] == 3,
+            "Missing malformed-generation diagnostic: {state}"
+        );
         Ok(())
     })
+}
+
+fn environments(run: &Path) -> Result<()> {
+    wait_for(30, None, || {
+        let state = vm::screen(run)?;
+        ensure!(
+            state["event"] == "boot-environments" && state["state"]["error"].is_null(),
+            "Waiting for BE discovery: {state}"
+        );
+        let selected = state["state"]["selected_environment"].as_u64().unwrap() as usize;
+        ensure!(
+            state["state"]["environments"][selected]["dataset"] == "zbm_fixture/nixos"
+                && state["state"]["environments"][selected]["is_default"] == true,
+            "bootfs was not selected: {state}"
+        );
+        Ok(())
+    })
+}
+
+fn snapshot_generations(run: &Path) -> Result<()> {
+    vm::key(run, "t")?;
+    wait_for(30, None, || {
+        let state = vm::screen(run)?;
+        ensure!(
+            state["event"] == "snapshots" && state["state"]["error"].is_null(),
+            "Waiting for snapshots: {state}"
+        );
+        ensure!(
+            state["state"]["snapshots"][0]["source"]["name"] == "zbm_fixture/nixos@known-good",
+            "Missing snapshot"
+        );
+        Ok(())
+    })?;
+    vm::screenshot(run, &run.join("snapshots.png"))?;
+    vm::key(run, "ret")?;
+    wait_for(30, None, || {
+        let state = vm::screen(run)?;
+        ensure!(
+            state["event"] == "boot-targets" && state["state"]["error"].is_null(),
+            "Waiting for snapshot generations: {state}"
+        );
+        let targets = state["state"]["targets"].as_array().unwrap();
+        ensure!(
+            targets.len() == 1
+                && targets[0]["generation"] == 1
+                && targets[0]["snapshot"]["name"] == "zbm_fixture/nixos@known-good",
+            "Wrong snapshot generation: {targets:?}"
+        );
+        ensure!(
+            state["state"]["rejected_generations"][0]["generation"] == 3,
+            "Missing snapshot-generation diagnostic: {state}"
+        );
+        Ok(())
+    })
+}
+fn prepared_clone(run: &Path) -> Result<String> {
+    vm::key(run, "c")?;
+    wait_for(20, None, || {
+        let state = vm::screen(run)?;
+        ensure!(
+            state["event"] == "snapshot-prepared",
+            "Waiting for clone preparation: {state}"
+        );
+        let plan: serde_json::Value =
+            serde_json::from_str(&vm::ssh(run, "cat /run/zbm-rs/boot-plan.json")?)?;
+        let clone = plan["target"]["dataset"].as_str().unwrap().to_owned();
+        ensure!(
+            clone.starts_with("zbm_fixture/zbm-rs-")
+                && clone
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"/_-".contains(&b)),
+            "Invalid clone name"
+        );
+        ensure!(
+            plan["cmdline"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|arg| arg == &format!("root={clone}")),
+            "Missing clone root argument"
+        );
+        Ok(clone)
+    })
+}
+fn snapshot_boot(
+    run: &Path,
+    owned: &mut OwnedVm,
+    expected: &str,
+    original_boot: &str,
+) -> Result<()> {
+    snapshot_generations(run)?;
+    // Do not let clone preparation upgrade a read-only pool import.
+    vm::ssh(
+        run,
+        r#"set -eu; for path in $(awk 'index($5,"/run/zbm-rs/snapshots/")==1 {print $5}' /proc/self/mountinfo); do umount "$path"; done; for path in $(awk 'index($5,"/run/zbm-rs/roots/")==1 {print $5}' /proc/self/mountinfo); do umount "$path"; done; zpool export zbm_fixture; zpool import -N -o cachefile=none -o readonly=on zbm_fixture"#,
+    )?;
+    vm::key(run, "c")?;
+    snapshot_error(run, "read-only")?;
+    vm::ssh(
+        run,
+        "zpool export zbm_fixture; zpool import -N -o cachefile=none zbm_fixture",
+    )?;
+    vm::key(run, "r")?;
+    wait_for(20, None, || {
+        ensure!(vm::screen(run)?["event"] == "ready", "Waiting for rescan");
+        Ok(())
+    })?;
+    vm::key(run, "ret")?;
+    environments(run)?;
+    snapshot_generations(run)?;
+    vm::ssh(run, "zpool set org.zfsbootmenu:readonly=on zbm_fixture")?;
+    vm::key(run, "c")?;
+    snapshot_error(run, "org.zfsbootmenu:readonly")?;
+    vm::ssh(run, "zpool set org.zfsbootmenu:readonly=off zbm_fixture")?;
+    let first_clone = prepared_clone(run)?;
+    vm::key(run, "f3")?;
+    wait_for(10, None, || {
+        ensure!(
+            vm::screen(run)?["ui"]["panel"] == "Details",
+            "Waiting for snapshot details"
+        );
+        Ok(())
+    })?;
+    let details = vm::console(run)?;
+    ensure!(
+        details.contains(&first_clone) && details.contains("Prepared cmdline"),
+        "Missing real prepared clone inputs"
+    );
+    vm::screenshot(run, &run.join("ui-snapshot-details.png"))?;
+    vm::key(run, "esc")?;
+    vm::key(run, "d")?;
+    wait_for(10, None, || {
+        ensure!(
+            vm::screen(run)?["event"] == "discard-confirmation",
+            "Waiting for cancellable discard"
+        );
+        Ok(())
+    })?;
+    vm::screenshot(run, &run.join("ui-discard-confirmation.png"))?;
+    vm::key(run, "esc")?;
+    wait_for(10, None, || {
+        ensure!(
+            vm::screen(run)?["ui"]["panel"] == "None",
+            "Waiting for discard cancellation"
+        );
+        Ok(())
+    })?;
+    vm::ssh(run, &format!("zfs list -H '{first_clone}'"))?;
+    // Non-recursive discard must refuse a foreign child dataset.
+    vm::ssh(
+        run,
+        &format!("zfs create -o mountpoint=none '{first_clone}/foreign-child'"),
+    )?;
+    discard(run)?;
+    snapshot_error(run, "")?;
+    vm::ssh(
+        run,
+        &format!(
+            "zfs list -H '{first_clone}/foreign-child'; zfs destroy '{first_clone}/foreign-child'"
+        ),
+    )?;
+    discard(run)?;
+    wait_for(10, None, || {
+        ensure!(
+            vm::screen(run)?["event"] == "snapshot-discarded",
+            "Waiting for explicit discard"
+        );
+        Ok(())
+    })?;
+    let clone = prepared_clone(run)?;
+    ensure!(clone != first_clone, "Discarded clone was reused");
+    let token = vm::ssh(
+        run,
+        &format!("zfs get -H -o value org.zbm-rs:owner '{clone}'"),
+    )?
+    .trim()
+    .to_owned();
+    ensure!(
+        token.len() == 32 && token.bytes().all(|b| b.is_ascii_hexdigit()),
+        "Invalid clone token"
+    );
+    vm::ssh(run, &format!("zfs set org.zbm-rs:owner=foreign '{clone}'"))?;
+    vm::key(run, "c")?;
+    wait_for(10, None, || {
+        let state = vm::screen(run)?;
+        ensure!(
+            state["event"] == "snapshot-error"
+                && state["state"]["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("ownership")),
+            "Foreign clone was not rejected: {state}"
+        );
+        Ok(())
+    })?;
+    vm::ssh(run, &format!("zfs set org.zbm-rs:owner={token} '{clone}'"))?;
+    let old = manager_pid(run)?;
+    vm::ssh(run, &format!("kill -ABRT {old}"))?;
+    wait_for(20, None, || new_manager(run, old, 1))?;
+    vm::key(run, "ret")?;
+    environments(run)?;
+    snapshot_generations(run)?;
+    ensure!(
+        prepared_clone(run)? == clone,
+        "Manager restart created another clone"
+    );
+    vm::ssh(
+        run,
+        &format!(
+            "test \"$(zfs get -H -o value origin '{clone}')\" = zbm_fixture/nixos@known-good; test \"$(zfs get -H -o value org.zbm-rs:state '{clone}')\" = prepared; test \"$(zfs list -H -r -o name zbm_fixture | awk 'index($0,\"zbm_fixture/zbm-rs-\")==1 {{n++}} END {{print n}}')\" = 1"
+        ),
+    )?;
+    vm::screenshot(run, &run.join("snapshot-prepared.png"))?;
+    fs::write(run.join("snapshot-prepared.txt"), vm::console(run)?)?;
+    vm::key(run, "ret")?;
+    let proof = wait_for(180, None, || {
+        let log = fs::read_to_string(run.join("serial.log"))?;
+        let line = log
+            .lines()
+            .find(|line| line.starts_with("ZBM_BOOT_SUCCESS generation=1 "))
+            .ok_or_else(|| anyhow::anyhow!("Waiting for snapshot OS boot proof"))?;
+        ensure!(
+            line.contains(&format!("system={expected}")) && line.contains(&format!("root={clone}")),
+            "Wrong snapshot boot: {line}"
+        );
+        ensure!(
+            !line.contains(&format!("boot_id={original_boot}")),
+            "Boot ID did not change"
+        );
+        Ok(line.to_owned())
+    })?;
+    wait_for(120, None, || {
+        ensure!(
+            owned.0.try_wait()?.is_some_and(|status| status.success()),
+            "Waiting for snapshot OS poweroff"
+        );
+        Ok(())
+    })?;
+    fs::write(
+        run.join("snapshot-report.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "passed":true,"clone":clone,"source":"zbm_fixture/nixos@known-good","generation":1,"proof":proof,
+            "checks":["snapshot-generation-discovery","explicit-clone","foreign-owner-rejection","abort-reconciliation","no-duplicate-clone","systemd-root-override","original-and-snapshot-unchanged","writable-clone","exact-generation-kexec","guest-poweroff"]
+        }))?,
+    )?;
+    println!("Snapshot clone boot acceptance passed");
+    Ok(())
+}
+
+fn snapshot_error(run: &Path, message: &str) -> Result<()> {
+    wait_for(15, None, || {
+        let state = vm::screen(run)?;
+        ensure!(
+            state["event"] == "snapshot-error"
+                && state["state"]["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains(message)),
+            "Waiting for snapshot rejection: {state}"
+        );
+        Ok(())
+    })
+}
+
+fn discard(run: &Path) -> Result<()> {
+    vm::key(run, "d")?;
+    wait_for(10, None, || {
+        ensure!(
+            vm::screen(run)?["event"] == "discard-confirmation",
+            "Waiting for clone discard confirmation"
+        );
+        Ok(())
+    })?;
+    vm::key(run, "ret")?;
+    Ok(())
 }

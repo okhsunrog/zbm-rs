@@ -9,11 +9,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: zbm-rs
-      - uses: actions/checkout@v4
-        with:
-          repository: okhsunrog/zfskit
-          ref: 6389c1be98b7721eec9858cc4916cb866d09d5c2
-          path: zfskit
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -28,6 +23,8 @@ jobs:
         working-directory: zbm-rs
       - run: nix develop -c uv run --no-project nix/check-runtime-audit.py
         working-directory: zbm-rs
+      - run: nix build .#checks.x86_64-linux.hardware-probe --out-link result-hardware-probe
+        working-directory: zbm-rs
       - run: nix build .#zbm-rs-efi .#checks.x86_64-linux.image-size --out-link result
         working-directory: zbm-rs
       - run: nix build .#checks.x86_64-linux.module-config --out-link result-module-config
@@ -35,11 +32,19 @@ jobs:
       - run: nix build .#zbm-rs-efi-test --out-link result-test
         working-directory: zbm-rs
       - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf
-      - run: cargo xtask smoke --run target/vm/ci-lifecycle --tcg --lifecycle
+      - run: cargo xtask smoke --run target/vm/ci-lifecycle --tcg --lifecycle --failures
+        working-directory: zbm-rs
+      - run: nix build .#zbm-rs-efi-test-host-only-scsi --out-link result-scsi
+        working-directory: zbm-rs
+      - run: cargo xtask smoke --image result-scsi --run target/vm/ci-host-only-scsi --port 2231 --tcg --scsi
         working-directory: zbm-rs
       - run: nix build .#zbm-rs-boot-fixture --out-link result-fixture
         working-directory: zbm-rs
       - run: cargo xtask boot-smoke --image result-test --fixture result-fixture --run target/vm/ci-nixos-boot --tcg
+        working-directory: zbm-rs
+      - run: nix build .#zbm-rs-efi-test-snapshot --out-link result-snapshot
+        working-directory: zbm-rs
+      - run: cargo xtask boot-smoke --snapshot --image result-snapshot --fixture result-fixture --run target/vm/ci-snapshot-boot --tcg
         working-directory: zbm-rs
       - uses: actions/upload-artifact@v4
         if: always()
@@ -50,3 +55,6 @@ jobs:
             zbm-rs/result-test/sizes.json
             zbm-rs/target/vm/ci-lifecycle
             zbm-rs/target/vm/ci-nixos-boot
+            zbm-rs/target/vm/ci-snapshot-boot
+            zbm-rs/target/vm/ci-host-only-scsi
+            zbm-rs/result-snapshot/sizes.json

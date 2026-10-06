@@ -1,6 +1,9 @@
 //! Boot-domain state. Discovery never imports, mounts or modifies a pool.
 pub mod boot;
 pub mod boot_zfs;
+pub mod environment;
+mod initrd;
+pub mod linux;
 use serde::Serialize;
 use std::time::Duration;
 pub use zfskit::Zfs;
@@ -29,15 +32,29 @@ pub struct State {
     pub pools: Vec<Pool>,
     pub selected: usize,
     pub scanning: bool,
+    pub operation: Option<String>,
+    pub requires_restart: bool,
     pub error: Option<String>,
     pub scans: u64,
     pub targets: Vec<boot::BootTarget>,
+    pub rejected_generations: Vec<boot::GenerationIssue>,
     pub selected_target: usize,
+    pub environments: Vec<environment::BootEnvironment>,
+    pub selected_environment: usize,
+    pub snapshots: Vec<boot_zfs::Snapshot>,
+    pub selected_snapshot: usize,
+    pub snapshot_view: bool,
 }
 
 impl State {
     pub fn apply_scan(&mut self, result: Result<Vec<Pool>, String>) {
         self.targets.clear();
+        self.rejected_generations.clear();
+        self.environments.clear();
+        self.snapshots.clear();
+        self.selected_snapshot = 0;
+        self.snapshot_view = false;
+        self.selected_environment = 0;
         self.selected_target = 0;
         self.scanning = false;
         self.scans += 1;
