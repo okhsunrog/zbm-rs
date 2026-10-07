@@ -4,12 +4,13 @@ pub mod boot_zfs;
 pub mod environment;
 mod initrd;
 pub mod linux;
-use serde::Serialize;
+pub mod security;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 pub use zfskit::Zfs;
 use zfskit::pool::DiscoveredPool;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Pool {
     pub name: String,
     pub guid: u64,

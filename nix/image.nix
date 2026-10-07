@@ -38,6 +38,8 @@ let
     version = "0.1.0";
     src = rustSource;
     cargoLock.lockFile = rustSource + "/Cargo.lock";
+    nativeBuildInputs = [ runtimePkgs.pkg-config ];
+    buildInputs = [ runtimePkgs.openssl ];
     cargoBuildFlags = [ "-p" "zbm-rs" ];
     cargoTestFlags = [ "-p" "zbm-rs" "-p" "zbm-core" ];
     buildFeatures = lib.optional testProfile "vm-test";
