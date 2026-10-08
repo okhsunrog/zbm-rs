@@ -196,8 +196,8 @@ and the trust model's build pipeline. The selected OS kernel remains an external
 produced authorized artifact, not something the boot manager rebuilds at runtime.
 
 TPM startup only probes TPM2 and reads SHA-256 PCR15 through sysfs. The loader
-never prepares SRK/NvPCRs or extends OS phases in PCR11. Those belong to the target
-initramfs, which retains its native TPM services and NvPCR definitions.
+never prepares SRK/NvPCRs or extends OS phases in PCR11. The target OS retains
+its native initramfs/userspace TPM services and NvPCR definitions.
 A bounded `systemd-pcrextend` helper from the ordinary Nix systemd package records
 a target-prepared event in PCR15 after native verified loading succeeds. This
 hashes the exact verified final plan and records an attempt, not successful OS
@@ -205,8 +205,8 @@ execution. Required TPM failures stop startup/handoff; optional failures never
 weaken boot-input verification. The independent firmware/userspace replay test
 checks unchanged PCR11, exact PCR15 and no loader NV/persistent allocation.
 Transport of the loader's PCR15 log into the target initramfs remains separate
-work. See [the trust model](secure-boot-model.md) and
-[the VM workflow](security-testing.md).
+work. See [the TPM ownership/evidence guide](tpm.md),
+[the trust model](secure-boot-model.md) and [the VM workflow](security-testing.md).
 
 Production has no VM fault hooks. The test image is opt-in and compiles vm-test,
 adds SSH and disposable fixture credentials (public Nix-store test data, never

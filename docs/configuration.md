@@ -109,9 +109,10 @@ Nix certificate paths are materialized as public trust-store resources; runtime 
 paths/identities and snake_case names such as `security.target_authorities`.
 No production private key is a Nix option/path input or stored in that JSON.
 TPM policy does not initialize SRK or NvPCRs or extend PCR11 phases. The selected
-OS initramfs owns these operations. Former loader options `settings.security.tpm.nvpcrs`,
-`settings.security.tpm.requiredNvpcrs` and `image.pcrPublicKey` are removed; old configurations must
-be updated and rebuilt, rather than silently retaining or ignoring those settings.
+OS's native initramfs/userspace services own these operations. Former loader
+options `settings.security.tpm.nvpcrs`, `settings.security.tpm.requiredNvpcrs`
+and `image.pcrPublicKey` are removed; old configurations must be updated and
+rebuilt, rather than silently retaining or ignoring those settings.
 
 Example (public certificates and their signing-chain trust must match):
 
@@ -146,7 +147,9 @@ or unknown firmware state never silently select `off`.
 embedded `ima-ca.pem` trust. The PCR15 measurement helper uses the ordinary Nix
 systemd package; no separate v262 setup provider is needed. This helper currently
 supports the glibc image profile; TPM-enabled musl packaging is rejected explicitly.
-See [owner signing and TPM tests](security-testing.md).
+See [the TPM guide](tpm.md#loader-policy) for policy behavior, ownership,
+removed-option migration and runtime evidence; see
+[owner signing and TPM tests](security-testing.md) for reproduction.
 
 There are no independent `skipInitramfs`, `skipCommandLine` or legacy-kexec fallback
 options. `settings.kernelArgs` must fit the signed target authorization. Protected

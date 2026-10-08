@@ -5,7 +5,7 @@ intended to make verified boot a first-class zbm-rs feature for both generic Lin
 and NixOS, while keeping the existing Linux/initramfs architecture. Configuration
 names below include implemented API; see [configuration](configuration.md). Implementation
 work and deferred features are tracked in [the roadmap](roadmap.md), and acceptance
-requirements in [verification](verification.md#planned-secure-boot-acceptance).
+requirements in [verification](verification.md#secure-boot-acceptance-matrix).
 
 ## Current implementation
 
@@ -53,7 +53,7 @@ Real NixOS ZFS-root and authorized snapshot-clone boot also pass through the men
 and privileged broker. Generic-Linux, encrypted-root and physical acceptance are
 still pending; the selected root's ordinary runtime integrity is not authenticated.
 TPM startup is read-only; verified prepared-target measurements use PCR15.
-SRK/NvPCR setup and PCR11 OS phases belong to the selected OS initramfs. The
+SRK/NvPCR setup and PCR11 OS phases belong to the selected OS. The
 persistent swtpm harness checks PCR replay and no loader NV/persistent allocation;
 OS policy integration, across-kexec log transport and physical acceptance remain
 pending. All published default images
@@ -350,6 +350,10 @@ Production artifacts exclude test SSH, fault hooks and test private keys.
 
 ## Hardware lessons and TPM integration
 
+The [TPM guide](tpm.md) documents configuration, startup evidence, OS ownership
+and the across-kexec log boundary. The requirements below explain their security
+constraints.
+
 The Framework deployment exposed failures that the image pipeline and harness
 must reproduce instead of relying on unsigned boot success:
 
@@ -403,9 +407,9 @@ ordinary Nix systemd package; no v262-specific setup provider or service manager
 runs beneath PID1. The event records a prepared attempt, not successful OS execution.
 
 Kexec preserves TPM PCR/NV state but does not execute the target EFI stub or
-transfer `/.extra` resources automatically. The target initramfs owns SRK, NvPCR
-initialization, its PCR11 phases and subsequent OS measurements. For a target
-using signed-policy NvPCRs, owner tooling must package the public policy key and
+transfer `/.extra` resources automatically. The target OS owns SRK/NvPCR
+initialization and its initramfs/userspace phase sequence and measurements.
+For a target using signed-policy NvPCRs, owner tooling must package the public policy key and
 signature in that target initramfs and authorize the actual loader UKI plus the
 OS's phase sequence. Updating the loader requires updating that policy as well.
 The loader publisher does not produce or embed `.pcrpkey`/`.pcrsig`; old

@@ -6,7 +6,9 @@ The initramfs contains one main ELF: /bin/zbm-rs, with /init -> /bin/zbm-rs.
 PID 1 runs a synchronous std/libc supervisor. It starts the same executable as a
 manager child; the manager owns Tokio, zfskit and Ratatui. Manager failure never
 terminates PID 1. The parent restores the console, restarts once after a rapid
-failure, then uses emergency recovery instead of an unlimited crash loop.
+failure, then enters recovery instead of an unlimited crash loop. Policy `off`
+allows an emergency shell; `enforce` restricts recovery to diagnostics, restart,
+reboot and poweroff.
 
 The installed-OS paths discover ordinary Linux kernels/initramfs and NixOS
 Bootspec generations on selected ZFS filesystems, then boot through
@@ -198,15 +200,35 @@ a trusted signature is deferred.
 
 Read [the complete design](docs/secure-boot-model.md),
 [configuration](docs/configuration.md#secure-boot-configuration),
-[acceptance requirements](docs/verification.md#planned-secure-boot-acceptance) and
+[acceptance requirements](docs/verification.md#secure-boot-acceptance-matrix) and
 [implementation roadmap](docs/roadmap.md). The JSON schema accepts the documented
-foundation fields and corresponding Nix module options. TPM startup is a read-only
-TPM2/PCR15 probe; the loader measures the exact verified prepared target in PCR15.
-SRK, NvPCR initialization and PCR11 OS phases belong to the selected OS initramfs.
-The loader does not allocate NV indices or create persistent TPM objects. Captured
-PCR replay, required missing TPM and optional absence are covered by swtpm;
-across-kexec log transport and physical acceptance remain pending. See
-[owner signing and test workflow](docs/security-testing.md).
+foundation fields and corresponding Nix module options. See
+[owner signing and test workflow](docs/security-testing.md) for reproducible
+protected-image and installed-OS tests.
+
+## TPM and measured boot
+
+TPM policy is independent of verified boot and defaults to `off`. An enabled
+profile performs a read-only TPM2/PCR15 readiness probe. On the enforced verified
+path, the broker records the exact prepared kernel/initramfs and final arguments,
+including the selected root or clone, in PCR15 after native input loading succeeds.
+This records a prepared attempt; successful OS boot needs separate evidence.
+
+| Loader operation | Selected OS operation |
+| --- | --- |
+| Read TPM2/SHA-256 PCR15 readiness and apply `off`, `optional` or `required`. | Prepare SRK and NvPCRs using its own initramfs/userspace services and policy. |
+| Verify and measure the prepared target in PCR15. | Extend its own PCR11 phase sequence and subsequent OS measurements. |
+
+The loader leaves PCR11 at the UKI measurement made by systemd-stub when available,
+and allocates no NV indices or persistent TPM objects. The NixOS VM tests boot
+both a real ZFS root and an authorized snapshot clone with native target TPM
+services and unmasked NvPCR definitions. The OS creates its own SRK and initializes
+its native NvPCRs; the loader adds no conflicting setup policy.
+
+See [TPM configuration, ownership and log transport](docs/tpm.md) for the complete
+flow. Captured PCR replay and missing-TPM behavior pass the swtpm harness. OS-owned
+v262 signed-policy integration, PCR15 log transport across kexec and physical
+Framework acceptance remain pending. TPM-based ZFS unlock is not implemented.
 
 ## Build
 
@@ -332,8 +354,9 @@ Use --tcg without KVM, --direct to skip EFI during Linux iteration, --image to
 select another Nix result, and --port to change the loopback SSH port (2228).
 SSH commands have a 30-second guest and 35-second host deadline.
 
-R rescans, S asks PID 1 for a shell, N requests a clean restart, P asks PID 1 to
-power off. Exiting the supervised shell starts a fresh manager with coherent ZFS
+R rescans, N requests a clean manager restart and P asks PID 1 to power off.
+In `off`, S asks PID 1 for a shell; enforced images refuse that administrative
+shell request. Exiting the supervised shell starts a fresh manager with coherent ZFS
 state. Q exits manager; without an intent PID 1 treats that as unexpected exit.
 Outside supervision S runs a local shell and Q exits normally.
 Boot operations run individually while recovery keys remain available. A

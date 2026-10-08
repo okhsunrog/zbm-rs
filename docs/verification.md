@@ -40,6 +40,14 @@ PCR15 event-log transport across kexec, generic-Linux and encrypted-root accepta
 and physical Framework Secure Boot/recovery. Prepared-target measurements are
 not proof of OS execution, remote attestation or rollback resistance.
 
+## Historical reports
+
+The dated reports below preserve earlier implementation states and failures.
+Statements such as "unimplemented" or loader-owned NvPCR setup describe that
+report's date; use the current matrix above and [TPM guide](tpm.md) for today's
+behavior. The [full acceptance matrix](#secure-boot-acceptance-matrix) includes
+remaining gates as well as boundaries already exercised.
+
 # Earlier broker-authorized NixOS and trusted snapshot boot — 2026-10-08
 
 The persistent `boot-smoke` harness now supports enrolled OVMF variables and an
@@ -529,11 +537,12 @@ subsequent full run completed without target mount or shutdown errors. Failed
 runs are preserved. Rust tests, formatting and Clippy passed; Nix module-config
 evaluation also passed. These are VM checks, not physical/Secure Boot acceptance.
 
-## Planned Secure Boot acceptance
+## Secure Boot acceptance matrix
 
-This is a future acceptance plan for [the accepted design](secure-boot-model.md),
-not an executed report. Current unsigned boot/lifecycle tests remain useful but
-cannot establish the signed chain, IMA appraisal or protected recovery.
+This is the full matrix for [the accepted design](secure-boot-model.md). The
+current reports above record the exercised boundaries; this table also includes
+remaining negative, deployment and physical gates. Ordinary unsigned boot/lifecycle
+tests alone cannot establish the signed chain, IMA appraisal or protected recovery.
 
 Use fresh disposable OVMF variable stores with enrolled **fixture** keys and actual
 Secure Boot enforcement. Build through the canonical image pipeline, then sign
@@ -558,6 +567,9 @@ firmware state, startup enforcement evidence, serial/UI logs and target boot IDs
 | Failure / recovery | Manager panic/abort, PID-1 failure/last-ditch recovery, failed appraisal and returned kexec before/after unlock offer no unrestricted shell. Diagnostics/restart/reboot/poweroff remain usable. |
 | Lifecycle / cleanup | Cancelled or failed preparation unloads the owned kernel and cleans owned mounts/imports/clones only; IPC closure, overlapping requests and manager restart do not retain stale authorization. |
 | Deployment / rotation | Deployed bytes match signed outputs. Exercise certificate overlap, unknown/revoked authorities and a trusted recovery target without assuming a new loader revokes older signed loader images. |
+| TPM ownership / readiness | Read-only TPM2/PCR15 probe; required absence refuses startup, optional absence preserves target checks; loader creates no SRK/NV indices and no target masks are needed. |
+| Prepared-target measurement | PCR11 replays from stub measurements without loader phases; exact verified plan/arguments replay in PCR15; rejected inputs and manager recovery do not advance PCR11 or allocate TPM objects. |
+| OS TPM / log transport | OS creates/reuses its own SRK and initializes its own NvPCRs. Native v261 compatibility passes; target v262 signed-policy authorization and across-kexec PCR15 event/plan transport need separate acceptance. |
 | UI evidence | Firmware state, policy, authorization, kernel acceptance and initramfs appraisal are distinct. No claim that the selected root's contents are attested. |
 
 Positive boot acceptance must reach the selected OS, not stop at a loader “PASS”

@@ -45,6 +45,9 @@ Private fixture signing keys remain outside the guest and Git.
 
 ## TPM ownership
 
+See [the TPM guide](tpm.md) for the boot sequence, exact policy behavior,
+evidence files and OS-owned signed-policy requirements.
+
 The loader publisher signs boot artifacts and IMA policy. It does not sign or
 embed an NvPCR initialization policy and does not require a PCR signing key.
 Images built with the former loader-owned `image.pcrPublicKey` option must be

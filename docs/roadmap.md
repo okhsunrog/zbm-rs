@@ -22,9 +22,12 @@ acceptance distinct in reports.
 
 ## Secure Boot and TPM milestone (in progress)
 
+TPM responsibilities and integration limits are documented in
+[TPM and measured boot](tpm.md).
+
 The specification is [Secure Boot and verified boot](secure-boot-model.md), with
 [configuration](configuration.md#secure-boot-configuration) and
-[acceptance gates](verification.md#planned-secure-boot-acceptance).
+[acceptance gates](verification.md#secure-boot-acceptance-matrix).
 
 - Implemented foundation: immutable `off`/`enforce` schema with compiled image
   mode, independent firmware requirement and incomplete-config rejection.
