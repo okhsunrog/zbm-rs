@@ -119,6 +119,20 @@ missing ordinary TPM capability have separate recorded states.
 
 ## Recorded scope and remaining gates
 
+For installed-OS acceptance, `nix/boot-fixture.nix` accepts a separate
+`kernelPackages` and `extraNixosModules`. The default fixture is unchanged.
+The protected fixture must use the tested configured kernel with matching ZFS,
+and explicitly retain `ima` and `lockdown` in NixOS `security.lsm`: the ordinary
+NixOS default otherwise emits a narrower `lsm=` argument despite the kernel's
+configured default. Fixture preparation is not target capability approval.
+
+`target/security-nixos-profile-unsigned` contains two NixOS generations using
+the exact tested loader kernel bytes and the required LSM list. This is currently
+an **unsigned target-root archive**, not a boot acceptance result. Before running
+the real broker/menu scenario, owner tooling must sign target modules and final
+initramfs/kernel, then create BootAuthorization for each exact ordered plan.
+Signing must happen outside Nix, without rewriting the original Nix store.
+
 `target/vm/verified-004/security-report.json` passed under OVMF Secure Boot using
 Linux 6.18.55 and matching ZFS. This confirmed IMA appraisal of sealed, read-only
 memfd inputs and actual file-based kexec. The earlier `verified-001` preserved

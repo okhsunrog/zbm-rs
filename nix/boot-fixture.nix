@@ -1,5 +1,6 @@
 # Disposable NixOS roots for exact-generation kexec acceptance.
-{ pkgs, nixpkgs, system }:
+{ pkgs, nixpkgs, system, kernelPackages ? pkgs.linuxPackages
+, extraNixosModules ? [] }:
 let
   generation = number: nixpkgs.lib.nixosSystem {
     inherit system;
@@ -9,7 +10,7 @@ let
       networking.hostName = "zbm-fixture";
       networking.hostId = "01020304";
       networking.useDHCP = false;
-      boot.kernelPackages = pkgs.linuxPackages;
+      boot.kernelPackages = kernelPackages;
       boot.loader.grub.enable = false;
       boot.supportedFilesystems = [ "zfs" ];
       boot.zfs.forceImportRoot = false;
@@ -71,7 +72,7 @@ let
         '';
         path = [ pkgs.util-linux pkgs.coreutils ];
       };
-    }) ];
+    }) ] ++ extraNixosModules;
   };
   first = (generation 1).config.system.build.toplevel;
   second = (generation 2).config.system.build.toplevel;
