@@ -100,7 +100,8 @@ The shell behavior above applies only to `off`. The implemented enforced branch
 replaces shell recovery, including last-ditch errors, with restart (only after
 successful early security setup), reboot and poweroff. A failed setup does not
 enter an automatic reboot loop. The signed OVMF synthetic-handoff scenario
-checks these paths; installed-OS and physical acceptance remain outstanding.
+checks these paths. Menu/broker NixOS ZFS-root and trusted snapshot-clone tests also
+pass; generic-Linux and physical acceptance remain outstanding.
 
 ## Private lifecycle protocol
 
@@ -135,7 +136,8 @@ The first path does not create clones or change dataset properties.
 
 The complete accepted design is in [Secure Boot and verified boot](secure-boot-model.md).
 The core verifier, broker, protected lifecycle and owner signing pipeline are
-implemented and passed a signed OVMF synthetic-handoff scenario. Linux and
+implemented and passed signed OVMF synthetic-handoff, real NixOS ZFS-root and
+trusted snapshot-clone scenarios. Linux and
 NixOS discovery produce untrusted candidates; a signed BootAuthorization binds
 kernel/initramfs bytes, arguments and permitted dataset/snapshot-clone selection.
 

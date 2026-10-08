@@ -1,6 +1,6 @@
 //! Actual signed OVMF boot, native verified-input syscall and bounded recovery.
 use crate::{
-    smoke::{OwnedVm, wait_for},
+    smoke::{OwnedVm, Swtpm, wait_for},
     vm,
 };
 use anyhow::{Result, ensure};
@@ -30,36 +30,7 @@ pub fn run(
     expected: Option<TpmExpected>,
 ) -> Result<()> {
     crate::smoke::install_interrupt()?;
-    let tpm_state = vm::absolute(run)?.with_extension("tpm");
-    let mut owned_tpm = if tpm {
-        fs::create_dir(&tpm_state)?;
-        let log = fs::File::create(tpm_state.join("swtpm.log"))?;
-        Some(OwnedVm(
-            Command::new("swtpm")
-                .args(["socket", "--tpm2", "--flags", "not-need-init"])
-                .arg("--tpmstate")
-                .arg(format!("dir={}", tpm_state.display()))
-                .arg("--ctrl")
-                .arg(format!(
-                    "type=unixio,path={}",
-                    tpm_state.join("control.sock").display()
-                ))
-                .stdout(log.try_clone()?)
-                .stderr(log)
-                .spawn()?,
-        ))
-    } else {
-        None
-    };
-    if let Some(process) = owned_tpm.as_mut() {
-        wait_for(10, Some(&mut process.0), || {
-            ensure!(
-                tpm_state.join("control.sock").exists(),
-                "Waiting for disposable TPM"
-            );
-            Ok(())
-        })?;
-    }
+    let owned_tpm = tpm.then(|| Swtpm::start(run)).transpose()?;
     let mut command = Command::new("/proc/self/exe");
     command
         .args(["vm", "--run"])
@@ -72,10 +43,8 @@ pub fn run(
     if tcg {
         command.arg("--tcg");
     }
-    if tpm {
-        command
-            .arg("--tpm-socket")
-            .arg(tpm_state.join("control.sock"));
+    if let Some(tpm) = &owned_tpm {
+        command.arg("--tpm-socket").arg(&tpm.socket);
     }
     let mut owned = OwnedVm(command.stdout(Stdio::null()).spawn()?);
     let result = (|| -> Result<()> {

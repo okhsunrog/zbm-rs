@@ -88,7 +88,8 @@ remain separate. Features select code such as vm-test, never ordinary values.
 
 The Rust JSON fields and Nix module options below are implemented. The protected
 loader and synthetic target handoff have signed OVMF acceptance; production
-installed-OS and physical acceptance remain pending. See [the full trust model](secure-boot-model.md) for enforcement,
+generic-Linux and physical acceptance remain pending; real NixOS ZFS-root and
+trusted snapshot-clone acceptance pass. See [the full trust model](secure-boot-model.md) for enforcement,
 recovery, key roles and limitations. Ordinary policy stays in Nix-generated,
 shared-schema-validated immutable JSON; it does not become Cargo features.
 

@@ -117,21 +117,88 @@ Optional TPM failure must still pass the boot-input rejection and actual-handoff
 checks; it never selects weaker verification. A missing optional NvPCR and a
 missing ordinary TPM capability have separate recorded states.
 
+## Installed NixOS and snapshot scenarios
+
+`xtask/fixtures/authorize_nixos.py` publishes a fresh disposable copy of a generated
+NixOS root archive. It rejects traversal, devices, hardlinks and symlink ancestors,
+never follows guest absolute symlinks on the host, signs/verifies all target module
+files, signs the kernel and final initramfs, and uses `nix/authorize-boot.py` for
+each ordered plan. Keys are passed only to signing tools; the original Nix store
+is never rewritten. This helper packages test roots, not an installed-system updater.
+
+Authorize the exact NixOS systemd-root plan, with no global snapshot-test argument:
+the target proof identifies ordinary or snapshot-clone root from the actual ZFS
+mount. Each generation has its own argument ID beneath the shared artifact ID.
+The indexed root value stays variable while all other tokens and their order are
+fixed. JSON/CMS signatures still enforce source dataset and owned-clone permission.
+
+```sh
+cargo xtask boot-smoke --image deployment-protected-loader \
+  --fixture deployment-authorized-nixos --secure-vars /disposable/OVMF_VARS.fd \
+  --swtpm --run target/vm/verified-nixos-new
+
+cargo xtask boot-smoke --snapshot --image deployment-protected-loader \
+  --fixture deployment-authorized-nixos --secure-vars /disposable/OVMF_VARS.fd \
+  --swtpm --run target/vm/verified-snapshot-new
+```
+
+These extend the existing harness, including QMP keyboard/PNG observations,
+SSH provisioning on disposable disks, manager-restart/ownership checks and the
+selected OS's multi-user proof. `boot-smoke` owns/reaps QEMU and swtpm, using the
+same shared swtpm lifetime helper as `secure-smoke`. The ordinary protected case
+adds a syntactically valid generation with unauthorized parameters and requires
+the broker to refuse it with an empty kexec slot before explicitly selecting the
+trusted older generation. The snapshot case exercises authorized clone preparation,
+foreign-owner refusal, explicit discard, restart reconciliation and actual clone boot.
+
+The ordinary target TPM gate requires a ready SRK service and persisted public SRK
+after kexec, not just loader readiness. These test roots include `tpm_crb` in their
+preboot module list. The v261 target's vendor `.nvpcr` definitions must be masked
+with empty `/etc/nvpcr/{hardware,login,cryptsetup,verity}.nvpcr` files when testing
+ordinary TPM only. The loader v262 already owns its selected hardware NvPCR;
+letting the older target provider allocate all default indices causes an existing
+index/policy conflict and unwanted allocations. Masking those definitions does
+not disable ordinary TPM/SRK or delete an index. Target NvPCR consumers and event
+log handoff need the separate versioned integration contract, still pending.
+
+The target proof always captures early/late TPM setup journals when a device is
+available, then requires `ZBM_TARGET_TPM_SRK_READY` before publishing boot success.
+
+`lib.mkProtectedBootFixture { kernelPackages = configuredLoaderKernelPackages; }`
+is the canonical Nix profile for those target masks and required LSMs. Supply the
+same configured kernel/ZFS set as the protected loader. Build the unsigned archive,
+then publish a fresh outside-store copy with `authorize_nixos.py`:
+
+```sh
+uv run --no-project python xtask/fixtures/authorize_nixos.py \
+  result-protected-fixture deployment-authorized-nixos \
+  --kernel-key /private/kernel.key --kernel-cert /public/kernel.pem \
+  --module-key /private/module.key --module-cert /public/module.pem \
+  --ima-key /private/ima.key --ima-cert /public/ima.pem \
+  --authority-key /private/authorization.key --authority-cert /public/authorization.pem \
+  --sign-file /matching-kernel-dev/lib/modules/VERSION/build/scripts/sign-file \
+  --evmctl /path/to/evmctl
+```
+
 ## Recorded scope and remaining gates
 
 For installed-OS acceptance, `nix/boot-fixture.nix` accepts a separate
-`kernelPackages` and `extraNixosModules`. The default fixture is unchanged.
+`kernelPackages` and `extraNixosModules`. The default fixture still uses the stock
+kernel; the protected profile is explicitly selected.
 The protected fixture must use the tested configured kernel with matching ZFS,
 and explicitly retain `ima` and `lockdown` in NixOS `security.lsm`: the ordinary
 NixOS default otherwise emits a narrower `lsm=` argument despite the kernel's
 configured default. Fixture preparation is not target capability approval.
 
-`target/security-nixos-profile-unsigned` contains two NixOS generations using
-the exact tested loader kernel bytes and the required LSM list. This is currently
-an **unsigned target-root archive**, not a boot acceptance result. Before running
-the real broker/menu scenario, owner tooling must sign target modules and final
-initramfs/kernel, then create BootAuthorization for each exact ordered plan.
-Signing must happen outside Nix, without rewriting the original Nix store.
+`target/security-fixtures/nixos-signed-001` contains two authorized NixOS
+generations sharing one image pair but distinct argument indexes. Owner publishing
+signed 7297 installed-root modules, the preboot modules, kernel and final initramfs
+outside Nix. `verified-nixos-002` passes real ZFS-root boot through the broker/menu;
+`verified-nixos-snapshot-001` passes writable trusted clone boot with source and
+snapshot preserved. Their actual selection/prepared-clone PNGs were inspected.
+The final SRK-scoped target fixture additionally passes ordinary and snapshot
+boot in `verified-nixos-srk-001` / `verified-nixos-snapshot-srk-001`, including
+early/late target SRK reuse and public-key persistence without extra NvPCR allocation.
 
 `target/vm/verified-004/security-report.json` passed under OVMF Secure Boot using
 Linux 6.18.55 and matching ZFS. This confirmed IMA appraisal of sealed, read-only
@@ -142,8 +209,8 @@ stable screenshots and resumes only if it was running.
 
 Initial TPM successes/refusals and final source regression are recorded in
 [verification](verification.md#tpm-and-signed-policy-nvpcr-acceptance).
-Before production: verify the broker's real installed Linux/NixOS catalog and
-snapshot selection, encrypted-root passphrase UI, expected embedded kernel
+Before production: verify generic-Linux authorization, encrypted-root passphrase
+UI, expected embedded kernel
 certificates, algorithm/profile restrictions, full-NV/stale-index/interruption
 cases and log transport
 across kexec, target-initrd consumption and physical Framework recovery. Insyde

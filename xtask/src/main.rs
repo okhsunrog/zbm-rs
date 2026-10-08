@@ -65,6 +65,10 @@ enum Task {
         port: u16,
         #[arg(long)]
         snapshot: bool,
+        #[arg(long)]
+        secure_vars: Option<PathBuf>,
+        #[arg(long)]
+        swtpm: bool,
     },
     Image {
         #[arg(long)]
@@ -253,7 +257,20 @@ fn main() -> Result<()> {
             tcg,
             port,
             snapshot,
-        } => boot_smoke::run(&run, &image, &fixture, tcg, port, snapshot)?,
+            secure_vars,
+            swtpm,
+        } => boot_smoke::run(
+            &run,
+            &image,
+            &fixture,
+            boot_smoke::Options {
+                tcg,
+                port,
+                snapshot,
+                secure_vars: secure_vars.as_deref(),
+                swtpm,
+            },
+        )?,
     }
     Ok(())
 }

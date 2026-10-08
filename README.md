@@ -10,8 +10,8 @@ failure, then uses emergency recovery instead of an unlimited crash loop.
 
 The installed-OS paths discover ordinary Linux kernels/initramfs and NixOS
 Bootspec generations on selected ZFS filesystems, then boot through
-kexec_file_load. Encryption unlock UX, specialisations and complete installed-OS
-Secure Boot acceptance remain roadmap work.
+kexec_file_load. Encryption unlock UX, specialisations, generic-Linux verified
+boot and physical Secure Boot acceptance remain roadmap work.
 
 ## Why this project exists
 
@@ -36,7 +36,8 @@ humans and automation operate the same VM through keys, screens, logs and SSH.
 - Make verified boot a first-class feature: authorize kernel/initramfs bytes and
   arguments, preserve trusted snapshot selection, and keep protected recovery
   within that policy. The protected loader and synthetic target handoff have
-  signed OVMF acceptance; production and physical acceptance remain pending.
+  signed OVMF acceptance, including real NixOS ZFS-root and trusted snapshot-clone
+  boot; production and physical acceptance remain pending.
 - Produce an immutable EFI image through one Nix build, with a matching kernel/ZFS pair,
   portable and explicit-manifest host-only profiles, and measurable image size.
 - Grow deterministic process, UI and ZFS integration tests alongside every boot feature.
@@ -176,8 +177,9 @@ broker with unprivileged UI, early IMA setup and restricted recovery. The signed
 image publisher signs IMA policy, verifies all staged module signatures and signs
 the final UKI outside Nix. Signed OVMF tests verify the protected loader, native
 kernel/initramfs rejection, sealed inputs, UI privilege dropping, crash recovery
-and an actual signed synthetic target handoff. Full installed-OS, snapshot and
-physical acceptance remain pending; this is not a production-ready replacement.
+and actual signed target handoff. Real NixOS ZFS-root and trusted snapshot-clone
+boot also pass through the menu/broker. Generic Linux, encryption and physical
+acceptance remain pending; this is not a production-ready replacement.
 
 The accepted design uses image policy `off` or `enforce`. An enforced loader checks
 signed kernel/initramfs authorization and allowed arguments even when firmware

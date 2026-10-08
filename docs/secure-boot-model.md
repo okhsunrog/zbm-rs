@@ -28,8 +28,16 @@ Core now verifies detached binary CMS signatures against explicit X.509 pins.
 It ignores embedded signer certificates and has no implicit CA store. Authorization
 binds sizes/SHA-256, exact ordered arguments, one typed ZFS root slot, source
 dataset and snapshot-clone permission. Read-only OS roots carry
-`/boot/zbm-rs/authorizations/<artifact-id>.json` and the matching `.cms`; the ID is
-SHA-256 of `kernel-sha256:initramfs-sha256` in lowercase hexadecimal. The signed
+`/boot/zbm-rs/authorizations/<artifact-id>/<argument-id>.json` and the matching
+`.cms`. The artifact ID is SHA-256 of `kernel-sha256:initramfs-sha256` in lowercase
+hexadecimal. The argument ID hashes ordered tokens with UTF-8 byte lengths
+(u32 big-endian), after `zbm-rs:arguments:v1` plus NUL. Only the single root value
+is replaced by its typed prefix; the position and all other arguments stay in
+the index. Different generations can share image bytes, and authorized clone
+selection retains the same index. This is a lookup rule, not authorization:
+signature, exact arguments and signed source/clone rules still must pass. The
+earlier flat layout is replaced; owner tooling must republish authorizations.
+The signed
 JSON also carries the detached `security.ima` signature for the initramfs.
 Authorization precedes persistent clone creation and is repeated against the
 actual owned clone before handoff. An opaque plan holds copied/sealed, read-only
@@ -41,7 +49,9 @@ signs a fresh final UKI. A configured Linux 6.18.55 loader with matching ZFS pas
 signed OVMF acceptance, including actual IMA appraisal of sealed read-only memfds
 and a file-based handoff to a signed synthetic second kernel. Unsigned kernels,
 bad IMA signatures, altered CMS/content/arguments and legacy kexec are rejected.
-This proves the tested mechanism, not installed-OS, snapshot or physical acceptance.
+Real NixOS ZFS-root and authorized snapshot-clone boot also pass through the menu
+and privileged broker. Generic-Linux, encrypted-root and physical acceptance are
+still pending; the selected root's ordinary runtime integrity is not authenticated.
 TPM startup and target-prepared measurements are implemented with a separate v262
 provider. Initial swtpm acceptance covers successful setup/PCR replay, missing or
 invalid signed policy, required missing TPM and optional degradation/unavailability;

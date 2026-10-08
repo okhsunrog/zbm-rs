@@ -15,6 +15,8 @@
       testing = mkImage { testProfile = true; };
     in {
       lib.mkImage = mkImage;
+      lib.mkProtectedBootFixture = args: import ./nix/protected-boot-fixture.nix
+        ({ inherit pkgs nixpkgs system; } // args);
       packages.${system} = {
         default = production;
         zbm-rs-efi = production;

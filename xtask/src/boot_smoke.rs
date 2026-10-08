@@ -1,6 +1,6 @@
 //! Exact-generation NixOS kexec acceptance on a disposable ZFS root.
 use crate::{
-    smoke::{OwnedVm, manager_pid, new_manager, wait_for},
+    smoke::{OwnedVm, Swtpm, manager_pid, new_manager, wait_for},
     vm,
 };
 use anyhow::{Result, ensure};
@@ -9,15 +9,23 @@ use std::{
     path::Path,
     process::{Command, Stdio},
 };
-pub fn run(
-    run: &Path,
-    image: &Path,
-    fixture: &Path,
-    tcg: bool,
-    port: u16,
-    snapshot: bool,
-) -> Result<()> {
+pub struct Options<'a> {
+    pub tcg: bool,
+    pub port: u16,
+    pub snapshot: bool,
+    pub secure_vars: Option<&'a Path>,
+    pub swtpm: bool,
+}
+pub fn run(run: &Path, image: &Path, fixture: &Path, options: Options<'_>) -> Result<()> {
+    let Options {
+        tcg,
+        port,
+        snapshot,
+        secure_vars,
+        swtpm,
+    } = options;
     crate::smoke::install_interrupt()?;
+    let owned_tpm = swtpm.then(|| Swtpm::start(run)).transpose()?;
     let expected = fs::read_to_string(fixture.join("generation-1"))?
         .trim()
         .to_owned();
@@ -32,6 +40,12 @@ pub fn run(
     if tcg {
         command.arg("--tcg");
     }
+    if let Some(vars) = secure_vars {
+        command.arg("--secure-vars").arg(vars);
+    }
+    if let Some(tpm) = &owned_tpm {
+        command.arg("--tpm-socket").arg(&tpm.socket);
+    }
     let mut owned = OwnedVm(command.stdout(Stdio::null()).spawn()?);
     let result = (|| {
         wait_for(90, Some(&mut owned.0), || {
@@ -40,12 +54,37 @@ pub fn run(
             Ok(())
         })?;
         let original_boot = vm::ssh(run, "cat /proc/sys/kernel/random/boot_id")?;
+        if secure_vars.is_some() {
+            let readiness = vm::ssh(run, "cat /run/zbm-rs/security.json")?;
+            let evidence: serde_json::Value = serde_json::from_str(&readiness)?;
+            ensure!(
+                evidence["firmware"] == "enabled"
+                    && evidence["mode"] == "enforce"
+                    && evidence["ima_policy_loaded"] == true,
+                "Verified loader readiness missing"
+            );
+            if swtpm {
+                ensure!(
+                    evidence["tpm"]["state"] == "ready",
+                    "TPM not ready: {evidence}"
+                );
+            }
+            fs::write(run.join("security-readiness.json"), readiness)?;
+        }
         println!("Loader ready; installing generated NixOS fixture on disposable /dev/vda");
         vm::ssh(
             run,
             "set -eu; zpool create -o cachefile=none -O compression=lz4 -O mountpoint=none zbm_fixture /dev/vda; zfs create -o mountpoint=legacy -o org.zfsbootmenu:active=on zbm_fixture/nixos; zfs create -o mountpoint=legacy -o org.zfsbootmenu:active=on zbm_fixture/inspect; zpool set bootfs=zbm_fixture/nixos zbm_fixture; mkdir -p /fixture-root; mount -t zfs zbm_fixture/nixos /fixture-root",
         )?;
         vm::ssh_timeout(run, "tar -xf /dev/vdb -C /fixture-root", 900)?;
+        if secure_vars.is_some() && !snapshot {
+            // A valid-looking Bootspec with changed arguments must never become
+            // authorization, even though it uses the same signed image pair.
+            vm::ssh(
+                run,
+                "set -eu; fake=/nix/store/zbm-unauthorized-generation; mkdir -p /fixture-root$fake; system=$(readlink /fixture-root/nix/var/nix/profiles/system-2-link); sed \"s|$system|$fake|g; s/\\\"zbm.fixture=2\\\"/\\\"zbm.fixture=unauthorized\\\"/\" /fixture-root$system/boot.json > /fixture-root$fake/boot.json; ln -s $system/init /fixture-root$fake/init; ln -s $system/etc /fixture-root$fake/etc; ln -s $fake /fixture-root/nix/var/nix/profiles/system-4-link",
+            )?;
+        }
         // A malformed peer must not hide either real NixOS generation, including
         // when their profiles are later browsed inside the source snapshot.
         vm::ssh(
@@ -74,10 +113,33 @@ pub fn run(
         vm::key(run, "ret")?;
         environments(run)?;
         if snapshot {
-            return snapshot_boot(run, &mut owned, &expected, original_boot.trim());
+            return snapshot_boot(
+                run,
+                &mut owned,
+                &expected,
+                original_boot.trim(),
+                secure_vars.is_some(),
+                swtpm,
+            );
         }
         vm::key(run, "ret")?;
-        targets(run)?;
+        targets(run, secure_vars.is_some())?;
+        if secure_vars.is_some() {
+            vm::key(run, "ret")?;
+            wait_for(15, None, || {
+                let state = vm::screen(run)?;
+                ensure!(
+                    state["event"] == "boot-error" && state["state"]["error"].is_string(),
+                    "Unauthorized plan was not rejected"
+                );
+                vm::ssh(run, "test \"$(cat /sys/kernel/kexec_loaded)\" = 0")?;
+                fs::write(
+                    run.join("unauthorized-plan.json"),
+                    serde_json::to_vec_pretty(&state)?,
+                )?;
+                Ok(())
+            })?;
+        }
         vm::screenshot(run, &run.join("generations.png"))?;
         let old = manager_pid(run)?;
         vm::key(run, "n")?;
@@ -85,15 +147,8 @@ pub fn run(
         vm::key(run, "ret")?;
         environments(run)?;
         vm::key(run, "ret")?;
-        targets(run)?;
-        vm::key(run, "down")?;
-        wait_for(5, None, || {
-            ensure!(
-                vm::screen(run)?["state"]["selected_target"] == 1,
-                "Waiting for older generation selection"
-            );
-            Ok(())
-        })?;
+        targets(run, secure_vars.is_some())?;
+        select_generation(run, 1)?;
         vm::screenshot(run, &run.join("selected-generation.png"))?;
         // A foreign dataset replacing an owned mount must survive preparation.
         let mountinfo = vm::ssh(run, "cat /proc/self/mountinfo")?;
@@ -176,6 +231,12 @@ pub fn run(
                 !log.contains("kexec-returned"),
                 "Supervisor classified kexec as failed"
             );
+            if swtpm {
+                ensure!(
+                    log.contains("ZBM_TARGET_TPM_SRK_READY"),
+                    "Target TPM SRK acceptance missing"
+                );
+            }
             Ok(line.to_owned())
         })?;
         wait_for(30, None, || {
@@ -188,7 +249,10 @@ pub fn run(
         fs::write(
             run.join("boot-report.json"),
             serde_json::to_vec_pretty(
-                &serde_json::json!({"passed":true,"generation":1,"toplevel":expected,"loader_boot_id":original_boot.trim(),"proof":proof,"checks":["UEFI-loader","ZFS-root","Bootspec","non-default-generation","manager-restart-reconciliation","foreign-mount-protection","kexec_file_load","NixOS-multi-user","guest-poweroff"]}),
+                &serde_json::json!({"passed":true,"generation":1,"toplevel":expected,"loader_boot_id":original_boot.trim(),"proof":proof,
+                    "firmware_secure_boot":secure_vars.is_some(),"swtpm":swtpm,"unauthorized_parameters_rejected":secure_vars.is_some(),
+                    "scope":"selected OS boot and loader protection; target TPM consumer integration has separate gates",
+                    "checks":["UEFI-loader","ZFS-root","Bootspec","non-default-generation","manager-restart-reconciliation","foreign-mount-protection","kexec_file_load","NixOS-multi-user","guest-poweroff"]}),
             )?,
         )?;
         println!("NixOS boot acceptance passed");
@@ -203,7 +267,32 @@ pub fn run(
     }
     result
 }
-fn targets(run: &Path) -> Result<()> {
+fn select_generation(run: &Path, generation: u64) -> Result<()> {
+    // Rejected generations are inspectable rows too. A fixed number of Down
+    // keys can select a different target as the catalog grows.
+    for _ in 0..8 {
+        let state = vm::screen(run)?;
+        let row = state["ui"]["selected_row"].clone();
+        if row["Generation"] == generation {
+            let selected = state["state"]["selected_target"].as_u64().unwrap() as usize;
+            ensure!(
+                state["state"]["targets"][selected]["generation"] == generation,
+                "UI/domain generation mismatch"
+            );
+            return Ok(());
+        }
+        vm::key(run, "down")?;
+        wait_for(5, None, || {
+            ensure!(
+                vm::screen(run)?["ui"]["selected_row"] != row,
+                "Waiting for selection acknowledgment"
+            );
+            Ok(())
+        })?;
+    }
+    anyhow::bail!("Generation {generation} not reachable in visible rows")
+}
+fn targets(run: &Path, secure: bool) -> Result<()> {
     wait_for(30, None, || {
         let state = vm::screen(run)?;
         ensure!(
@@ -218,7 +307,14 @@ fn targets(run: &Path) -> Result<()> {
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("Missing targets"))?;
         ensure!(
-            targets.len() == 2 && targets[0]["generation"] == 2 && targets[1]["generation"] == 1,
+            if secure {
+                targets.len() == 3
+                    && targets[0]["generation"] == 4
+                    && targets[1]["generation"] == 2
+                    && targets[2]["generation"] == 1
+            } else {
+                targets.len() == 2 && targets[0]["generation"] == 2 && targets[1]["generation"] == 1
+            },
             "Wrong generations: {targets:?}"
         );
         ensure!(
@@ -316,6 +412,8 @@ fn snapshot_boot(
     owned: &mut OwnedVm,
     expected: &str,
     original_boot: &str,
+    secure: bool,
+    swtpm: bool,
 ) -> Result<()> {
     snapshot_generations(run)?;
     // Do not let clone preparation upgrade a read-only pool import.
@@ -455,6 +553,12 @@ fn snapshot_boot(
             !line.contains(&format!("boot_id={original_boot}")),
             "Boot ID did not change"
         );
+        if swtpm {
+            ensure!(
+                log.contains("ZBM_TARGET_TPM_SRK_READY"),
+                "Snapshot target TPM SRK acceptance missing"
+            );
+        }
         Ok(line.to_owned())
     })?;
     wait_for(120, None, || {
@@ -468,6 +572,8 @@ fn snapshot_boot(
         run.join("snapshot-report.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
             "passed":true,"clone":clone,"source":"zbm_fixture/nixos@known-good","generation":1,"proof":proof,
+            "firmware_secure_boot":secure,"swtpm":swtpm,
+            "scope":"authorized snapshot clone boot; target TPM consumer integration has separate gates",
             "checks":["snapshot-generation-discovery","explicit-clone","foreign-owner-rejection","abort-reconciliation","no-duplicate-clone","systemd-root-override","original-and-snapshot-unchanged","writable-clone","exact-generation-kexec","guest-poweroff"]
         }))?,
     )?;

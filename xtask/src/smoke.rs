@@ -1,6 +1,6 @@
 //! Reusable full boot scenario. Drop always terminates and reaps the owned VM.
 use crate::vm;
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use std::{
     fs,
@@ -20,6 +20,39 @@ impl Drop for OwnedVm {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+pub(crate) struct Swtpm {
+    pub socket: std::path::PathBuf,
+    _process: OwnedVm,
+}
+impl Swtpm {
+    pub fn start(run: &Path) -> Result<Self> {
+        let state = vm::absolute(run)?.with_extension("tpm");
+        fs::create_dir_all(state.parent().context("TPM state needs a parent")?)?;
+        fs::create_dir(&state)?;
+        let log = fs::File::create(state.join("swtpm.log"))?;
+        let socket = state.join("control.sock");
+        let mut process = OwnedVm(
+            Command::new("swtpm")
+                .args(["socket", "--tpm2", "--flags", "not-need-init"])
+                .arg("--tpmstate")
+                .arg(format!("dir={}", state.display()))
+                .arg("--ctrl")
+                .arg(format!("type=unixio,path={}", socket.display()))
+                .stdout(log.try_clone()?)
+                .stderr(log)
+                .spawn()?,
+        );
+        wait_for(10, Some(&mut process.0), || {
+            ensure!(socket.exists(), "Waiting for disposable TPM");
+            Ok(())
+        })?;
+        Ok(Self {
+            socket,
+            _process: process,
+        })
     }
 }
 

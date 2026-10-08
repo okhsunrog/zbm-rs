@@ -181,11 +181,11 @@ def verify_module(file, cert):
                  "-out", os.devnull])
 
 
-def sign_modules(root, key, cert, sign_file):
+def sign_modules(root, key, cert, sign_file, directory=None):
     signed = []
     with tempfile.TemporaryDirectory(prefix="zbm-module-sign-") as temporary:
         raw = Path(temporary) / "module.ko"
-        for file in sorted((root / "usr/lib/modules").rglob("*")):
+        for file in sorted((directory or root / "usr/lib/modules").rglob("*")):
             if not any(file.name.endswith(suffix) for suffix in (".ko", ".ko.gz", ".ko.xz", ".ko.zst")):
                 continue
             if file.is_symlink() or not file.resolve().is_relative_to(root.resolve()):

@@ -1,4 +1,51 @@
-# Signed OVMF Secure Boot acceptance — 2026-10-08
+# Broker-authorized NixOS and trusted snapshot boot — 2026-10-08
+
+The persistent `boot-smoke` harness now supports enrolled OVMF variables and an
+owned disposable swtpm, using the same lifetime helper as `secure-smoke`.
+It provisions a real ZFS root, navigates the actual TUI, and invokes the root
+broker rather than the synthetic executor probe. Owner publishing signs 7297
+target-root modules, the preboot modules, kernel and final IMA initramfs outside
+Nix. Two generations share image bytes but have distinct signed argument indexes.
+
+Passed under OVMF/KVM Secure Boot:
+
+- `verified-nixos-002`: rejects a valid-looking generation with unauthorized
+  arguments and leaves the kexec slot empty; manager restart and foreign-mount
+  protection pass; the explicitly selected older generation boots its exact
+  NixOS toplevel on `zbm_fixture/nixos` and reaches multi-user with a new boot ID.
+- `verified-nixos-snapshot-001`: read-only snapshot discovery, authorized clone
+  preparation, discard cancellation/foreign-child refusal, foreign-owner refusal,
+  abort/restart reconciliation and actual writable clone boot pass. The original
+  dataset and source snapshot remain unchanged.
+- The selection and prepared-clone PNGs from both runs were inspected.
+- `verified-arguments-v2-001`: the complete signed synthetic input/rejection,
+  privilege/recovery, TPM/PCR replay and real handoff scenario passes under TCG
+  using the new argument-index layout.
+- `verified-root-off-regression-001`: ordinary `off` OVMF/TCG smoke and full
+  PID-1 lifecycle pass. Nix default/bounds/legacy configuration parity passes.
+- `nixos-row-off-regression-001`: ordinary unsigned-loader NixOS boot with the
+  updated fixture proof and row-identity selection still passes.
+- 36 workspace tests, formatting, warnings-denied all-targets/all-features Clippy
+  and five owner-tool boundary tests pass.
+
+The initial `verified-nixos-001` refused the unauthorized target correctly but
+exposed the harness's fixed Down-key count skipping over an inspectable rejected
+generation. Selection now waits for the real UI row identity and confirms the
+domain generation. Failed artifacts remain preserved.
+
+`verified-nixos-diag-001` captured a distinct target TPM failure: ordinary SRK
+load/persistence succeed, then target systemd v261 attempts an incompatible
+anchor-secret initialization over the loader v262 hardware NvPCR and allocates
+three unwanted default NvPCRs. The ordinary-target TPM fixture masks those
+definitions, retains SRK services and now requires an explicit target SRK marker
+before boot success. `verified-nixos-srk-001` and
+`verified-nixos-snapshot-srk-001` pass that final gate: early and late target setup
+reuse the resident SRK, persist its public part, and report no NvPCR conflict or
+extra allocation. The required TPM driver is in the signed target initramfs.
+Target NvPCR consumers/log transfer remain separate gates;
+root boot acceptance is not proof of that integration or physical Framework boot.
+
+# Earlier signed OVMF mechanism acceptance — 2026-10-08
 
 `target/vm/verified-004/security-report.json` records a passing signed OVMF/TCG
 scenario with the separately configured Linux 6.18.55 loader and matching ZFS.

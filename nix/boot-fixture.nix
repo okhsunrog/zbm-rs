@@ -14,7 +14,7 @@ let
       boot.loader.grub.enable = false;
       boot.supportedFilesystems = [ "zfs" ];
       boot.zfs.forceImportRoot = false;
-      boot.initrd.availableKernelModules = [ "virtio_pci" "virtio_blk" ];
+      boot.initrd.availableKernelModules = [ "virtio_pci" "virtio_blk" "tpm_crb" ];
       boot.initrd.systemd.services.zbm-failure-diagnostics = {
         wantedBy = [ "emergency.target" ];
         unitConfig.DefaultDependencies = false;
@@ -48,9 +48,8 @@ let
           ${pkgs.systemd}/bin/systemctl is-active --quiet multi-user.target
           test "$(findmnt -n -o FSTYPE /)" = zfs
           actual_root="$(findmnt -n -o SOURCE /)"
-          case " $(cat /proc/cmdline) " in
-            *" zbm.snapshot-test=1 "*)
-              case "$actual_root" in zbm_fixture/zbm-rs-*) ;; *) exit 1 ;; esac
+          case "$actual_root" in
+            zbm_fixture/zbm-rs-*)
               test "$(cat /snapshot-proof)" = snapshot-original
               echo clone-write > /snapshot-proof
               test "$(cat /snapshot-proof)" = clone-write
@@ -61,12 +60,21 @@ let
               test "$(cat /run/source-snapshot/snapshot-proof)" = snapshot-original
               umount /run/source-snapshot /run/original-root
               ;;
-            *) test "$actual_root" = zbm_fixture/nixos ;;
+            zbm_fixture/nixos) ;;
+            *) exit 1 ;;
           esac
           case " $(cat /proc/cmdline) " in
             *" zbm.fixture=${toString number} "*) ;;
             *) exit 1 ;;
           esac
+          if test -e /dev/tpmrm0; then
+            echo ZBM_TARGET_TPM_DIAGNOSTICS > /dev/ttyS0
+            ${pkgs.systemd}/bin/journalctl -b --no-pager \
+              -u systemd-tpm2-setup-early.service -u systemd-tpm2-setup.service > /dev/ttyS0
+            ${pkgs.systemd}/bin/systemctl is-active --quiet systemd-tpm2-setup.service
+            test -s /var/lib/systemd/tpm2-srk-public-key.pem
+            echo ZBM_TARGET_TPM_SRK_READY > /dev/ttyS0
+          fi
           echo "ZBM_BOOT_SUCCESS generation=${toString number} system=$(readlink -f /run/current-system) root=$actual_root boot_id=$(cat /proc/sys/kernel/random/boot_id)" > /dev/ttyS0
           ${pkgs.systemd}/bin/systemctl poweroff
         '';

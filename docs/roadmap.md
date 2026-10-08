@@ -46,9 +46,11 @@ The specification is [Secure Boot and verified boot](secure-boot-model.md), with
   implemented. Initial swtpm success/PCR replay, bad/missing policy, no-TPM and
   optional degradation tests pass; scarce NV/stale-index/interruption tests and
   event-log handoff remain in progress.
-- Passed: negative/positive signed OVMF synthetic-input scenario. Next: actual
-  broker catalog with installed Linux/NixOS roots, authorized snapshot clones,
-  encrypted-root passphrase UX and physical Secure Boot/recovery acceptance.
+- Passed: negative/positive signed OVMF synthetic-input scenario, actual broker
+  catalog with installed NixOS ZFS root and authorized snapshot clones, including
+  unauthorized arguments, foreign mounts/owners and restart reconciliation.
+  Next: target TPM consumer/handoff contract, generic Linux, encrypted-root
+  passphrase UX and physical Secure Boot/recovery acceptance.
 
 Deferred: UI action “Boot without a trusted signature”, owner-authenticated
 administrative recovery, optional development-image packaging, TPM automatic

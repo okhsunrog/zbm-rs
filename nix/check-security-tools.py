@@ -2,6 +2,8 @@
 import importlib.util
 from pathlib import Path
 import tempfile
+import tarfile
+import io
 import unittest
 
 
@@ -14,6 +16,10 @@ def load(name):
 
 kernel = load("check-security-kernel")
 publisher = load("publish-loader")
+authorizer = load("authorize-boot")
+spec = importlib.util.spec_from_file_location("nixos", Path(__file__).parents[1] / "xtask/fixtures/authorize_nixos.py")
+nixos = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(nixos)
 
 
 def record(name, mode, body=b"", links=1):
@@ -25,6 +31,44 @@ def record(name, mode, body=b"", links=1):
 
 
 class Boundaries(unittest.TestCase):
+    def test_authorization_index_has_shared_rust_vector_and_keeps_clone_root_variable(self):
+        args = ["init=/nix/store/system/init", "root=zbm_fixture/nixos", "rootfstype=zfs", "rw"]
+        self.assertEqual(authorizer.argument_id(args), "6cab784c1c6b1032495306942cd53286481046b8e61a47cdd220dd405e63702d")
+        self.assertEqual(authorizer.argument_id(args), authorizer.argument_id([args[0], "root=zbm_fixture/clone", *args[2:]]))
+        self.assertNotEqual(authorizer.argument_id(args), authorizer.argument_id(["init=/another", *args[1:]]))
+        with self.assertRaises(ValueError):
+            authorizer.argument_id(args + ["root=another"])
+
+    def test_target_tar_never_follows_a_guest_symlink_or_extracts_devices(self):
+        for names in [[("../outside", tarfile.REGTYPE, "")],
+                      [("link", tarfile.SYMTYPE, "/tmp"), ("link/file", tarfile.REGTYPE, "")],
+                      [("device", tarfile.CHRTYPE, "")],
+                      [("hardlink", tarfile.LNKTYPE, "file")]]:
+            with tempfile.TemporaryDirectory() as temporary:
+                temporary = Path(temporary)
+                file = temporary / "root.tar"
+                with tarfile.open(file, "w") as tar:
+                    for name, kind, link in names:
+                        entry = tarfile.TarInfo(name)
+                        entry.type, entry.linkname = kind, link
+                        tar.addfile(entry)
+                with self.assertRaises(ValueError):
+                    nixos.unpack_tar(file, temporary / "root")
+                self.assertFalse((temporary / "outside").exists())
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary = Path(temporary)
+            file = temporary / "root.tar"
+            with tarfile.open(file, "w") as tar:
+                entry = tarfile.TarInfo("file")
+                entry.size = 4
+                tar.addfile(entry, io.BytesIO(b"safe"))
+                link = tarfile.TarInfo("guest")
+                link.type, link.linkname = tarfile.SYMTYPE, "/file"
+                tar.addfile(link)
+            nixos.unpack_tar(file, temporary / "root")
+            self.assertEqual((temporary / "root/file").read_bytes(), b"safe")
+            self.assertEqual((temporary / "root/guest").readlink(), Path("/file"))
+
     def test_kernel_requires_actual_enforcement_and_correct_lsm(self):
         config = "\n".join(f"CONFIG_{name}=y" for name in kernel.REQUIRED) + '\nCONFIG_LSM="ima,lockdown"\n'
         kernel.validate(config)
