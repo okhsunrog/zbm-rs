@@ -1,6 +1,6 @@
 //! ZFSBootMenu-compatible visibility policy; no imports or mounts here.
 use crate::boot::{BootTarget, GenerationIssue};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io;
 use zfskit::models::PropertyMap;
 
@@ -14,7 +14,7 @@ pub const PROPERTIES: &[&str] = &[
     "org.zfsbootmenu:rootprefix",
 ];
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootEnvironment {
     pub dataset: String,
     pub is_default: bool,
@@ -25,7 +25,7 @@ pub struct BootEnvironment {
     pub root: Option<std::path::PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootProperties {
     pub mountpoint: String,
     pub canmount: String,

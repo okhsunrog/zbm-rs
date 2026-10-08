@@ -614,7 +614,7 @@ pub async fn release_owned(zfs: &Zfs, selected: &Pool) -> io::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub source: boot::SnapshotSource,
     pub creation: u64,
@@ -893,6 +893,34 @@ pub async fn prepare_snapshot(
 }
 
 /// Keep any booted clone: its writable state belongs to the target OS/user.
+pub async fn validate_handoff_clone(
+    zfs: &Zfs,
+    pool: &Pool,
+    plan: &boot::BootPlan,
+) -> io::Result<bool> {
+    if plan.target.snapshot.is_none() {
+        return Ok(false);
+    }
+    let lease = load(pool)?;
+    let clone = lease
+        .clones
+        .iter()
+        .find(|c| c.dataset == plan.target.dataset)
+        .ok_or_else(|| failure("Handoff clone is not owned by the boot broker"))?;
+    if plan
+        .target
+        .snapshot
+        .as_ref()
+        .is_none_or(|s| s.name != clone.source.name || s.guid != clone.source.guid)
+    {
+        return Err(failure(
+            "Handoff snapshot identity differs from clone ownership",
+        ));
+    }
+    validate_clone(zfs, clone).await?;
+    Ok(true)
+}
+
 pub async fn retain_snapshot_clone(
     zfs: &Zfs,
     pool: &Pool,

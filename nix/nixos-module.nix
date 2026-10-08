@@ -10,9 +10,23 @@ let
       zfs.import_policy = cfg.settings.zfs.importPolicy;
       nixos.generation_limit = cfg.settings.nixos.generationLimit;
       kernel_args = cfg.settings.kernelArgs;
+      security = {
+        mode = cfg.settings.security.mode;
+        require_firmware_secure_boot = cfg.settings.security.requireFirmwareSecureBoot;
+        tpm = {
+          policy = cfg.settings.security.tpm.policy;
+          nvpcrs = cfg.settings.security.tpm.nvpcrs;
+          required_nvpcrs = cfg.settings.security.tpm.requiredNvpcrs;
+        };
+      };
     };
     source = self;
-    kernelPackages = config.boot.kernelPackages;
+    kernelPackages = cfg.image.kernelPackages;
+    kernelPolicy = cfg.image.kernelPolicy;
+    kernelTrustedCertificates = cfg.image.kernelTrustedCertificates;
+    targetAuthorities = cfg.settings.security.targetAuthorities;
+    imaCertificate = cfg.image.imaCertificate;
+    pcrPublicKey = cfg.image.pcrPublicKey;
     zfsUserspace = (import ./lean-userspace.nix { inherit pkgs; }).mkZfs config.boot.zfs.package;
     profile = cfg.image.profile;
     hardwareManifest = cfg.image.hardwareManifest;
@@ -44,6 +58,17 @@ in {
     enable = lib.mkEnableOption "build a standalone zbm-rs EFI boot manager";
     image.profile = lib.mkOption { type = lib.types.enum [ "portable" "host-only" ]; default = "portable"; };
     image.hardwareManifest = lib.mkOption { type = lib.types.nullOr lib.types.path; default = null; };
+    image.kernelPackages = lib.mkOption { type = lib.types.raw; default = config.boot.kernelPackages; description = "Separate loader kernel/ZFS package set; does not change the installed OS kernel."; };
+    image.kernelPolicy = lib.mkOption { type = lib.types.enum [ "validate" "configure" ]; default = "validate"; };
+    image.kernelTrustedCertificates = lib.mkOption { type = lib.types.listOf lib.types.path; default = []; description = "Public X.509 trust for separately configured loader kernel."; };
+    image.imaCertificate = lib.mkOption { type = lib.types.nullOr lib.types.path; default = null; description = "Public non-CA IMA signing certificate with digitalSignature usage."; };
+    image.pcrPublicKey = lib.mkOption { type = lib.types.nullOr lib.types.path; default = null; description = "Public key authorizing signed PCR 11 policy for NvPCR initialization."; };
+    settings.security.mode = lib.mkOption { type = lib.types.enum [ "off" "enforce" ]; default = "off"; };
+    settings.security.requireFirmwareSecureBoot = lib.mkOption { type = lib.types.bool; default = false; };
+    settings.security.targetAuthorities = lib.mkOption { type = lib.types.listOf lib.types.path; default = []; description = "Public certificates pinned for boot authorization."; };
+    settings.security.tpm.policy = lib.mkOption { type = lib.types.enum [ "off" "optional" "required" ]; default = "off"; };
+    settings.security.tpm.nvpcrs = lib.mkOption { type = lib.types.listOf (lib.types.enum [ "hardware" "login" "cryptsetup" "verity" ]); default = []; };
+    settings.security.tpm.requiredNvpcrs = lib.mkOption { type = lib.types.listOf (lib.types.enum [ "hardware" "login" "cryptsetup" "verity" ]); default = []; };
   };
   config = lib.mkIf cfg.enable {
     system.build.zbm-rs-efi = image;

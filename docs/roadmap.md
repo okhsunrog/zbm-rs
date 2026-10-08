@@ -20,30 +20,40 @@ Each step adds deterministic core checks and a reusable real VM scenario. Keep
 serial state, screenshots, SSH results, boot handshake and physical-device
 acceptance distinct in reports.
 
-## Secure Boot milestone (accepted design; not implemented)
+## Secure Boot and TPM milestone (in progress)
 
 The specification is [Secure Boot and verified boot](secure-boot-model.md), with
-[planned configuration](configuration.md#planned-secure-boot-configuration) and
+[configuration](configuration.md#secure-boot-configuration) and
 [acceptance gates](verification.md#planned-secure-boot-acceptance).
 
-- Add immutable `off`/`enforce` policy and independent firmware requirement to the
-  shared configuration schema; reject incomplete enforced configuration.
-- Validate or separately configure the loader kernel and matching ZFS; check final
-  capabilities, certificate trust and all preboot module signatures.
-- Add authenticated early IMA setup and separate owner UKI signing/deployment;
+- Implemented foundation: immutable `off`/`enforce` schema with compiled image
+  mode, independent firmware requirement and incomplete-config rejection.
+- Implemented: validate or separately configure the loader kernel and matching
+  ZFS; inspect final configuration and independently verify staged signatures.
+  Pre-deployment embedded certificate inventory remains to be automated.
+- Implemented: authenticated early IMA setup and separate owner UKI signing/deployment;
   keep production private keys out of Nix and fixture artifacts.
-- Implement common signed BootAuthorization for Linux/NixOS and typed command-line
-  rules, including authorized snapshot/clone root selection.
-- Introduce a privileged broker and unprivileged manager within the existing ELF;
-  use opaque verified plans and immutable prepared inputs through file-based kexec.
-- Restrict every PID-1/recovery/failure path; no automatic root shell or weaker
-  fallback in `enforce`. Show separate firmware/authorization/appraisal evidence.
-- Pass negative and positive signed OVMF scenarios before separate physical Secure
-  Boot and recovery acceptance. Existing unsigned tests do not satisfy this gate.
+- Implemented foundation: pinned CMS BootAuthorization, exact arguments/typed ZFS
+  roots, snapshot-source permission, opaque sealed input plans, a privileged broker
+  and UI privilege dropping. Enforced Linux 6.18.55 IMA/memfd interoperability and
+  actual synthetic handoff passed; NixOS typed-root authorization requires systemd initrd.
+- Implemented foundation: restricted PID-1/recovery/failure paths, no enforced
+  root shell or automatic reboot loop; separate firmware/authorization evidence.
+- Add selected off/optional/required TPM capabilities, ordinary measurements and
+  signed-policy NvPCR setup. Handle scarce NV capacity independently of kernel
+  verification. Define measured-target/event-log handoff across kexec; no TPM
+  disk unlock. SRK, phase/PCR15 measurement and v262 signed-policy NvPCR paths are
+  implemented. Initial swtpm success/PCR replay, bad/missing policy, no-TPM and
+  optional degradation tests pass; scarce NV/stale-index/interruption tests and
+  event-log handoff remain in progress.
+- Passed: negative/positive signed OVMF synthetic-input scenario. Next: actual
+  broker catalog with installed Linux/NixOS roots, authorized snapshot clones,
+  encrypted-root passphrase UX and physical Secure Boot/recovery acceptance.
 
 Deferred: UI action “Boot without a trusted signature”, owner-authenticated
-administrative recovery, optional development-image packaging, TPM measured
-boot/automatic unlock/rollback-resistant state, whole-root integrity and shim/MOK.
+administrative recovery, optional development-image packaging, TPM automatic
+unlock/rollback-resistant state, whole-root integrity and shim/MOK.
 There is no automatic policy downgrade when firmware Secure Boot is disabled and
 no requirement to ship two images. Signature encoding, broker sandbox/IPC and
-IMA-compatible immutable staging still need implementation choices and experiments.
+IMA staging passed the configured-kernel VM experiment. TPM measurement and
+NvPCR support are now part of the active milestone, not the deferred unlock work.

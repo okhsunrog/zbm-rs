@@ -365,6 +365,22 @@ impl Ui {
         serde_json::json!({"view":View::of(state),"filter":self.screens.get(&self.key).map(|s|s.query.as_str()).unwrap_or(""),"searching":self.searching,"panel":self.panel,"selected_row":self.selected(state).map(|r|r.id)})
     }
     pub fn reason(&self, command: Command, state: &State, options: &Options) -> Option<String> {
+        if options.config.security.mode == crate::config::SecurityMode::Enforce
+            && matches!(
+                command,
+                Command::Rollback | Command::Clone | Command::ClonePromote
+            )
+        {
+            return Some(
+                "Protected mode requires separate owner authorization for administrative mutations"
+                    .into(),
+            );
+        }
+        if command == Command::Shell
+            && options.config.security.mode == crate::config::SecurityMode::Enforce
+        {
+            return Some("Protected recovery does not allow an administrative shell".into());
+        }
         if matches!(
             command,
             Command::Help | Command::Actions | Command::Details | Command::Exit | Command::Shell
@@ -375,13 +391,11 @@ impl Ui {
             return (!options.supervised).then(|| "Requires the PID 1 supervisor".into());
         }
         if state.requires_restart {
-            return Some(
-                "Restart manager or use Shell to reconcile the timed-out operation".into(),
-            );
+            return Some("Restart manager to reconcile the timed-out operation".into());
         }
         if state.operation.is_some() || state.scanning {
             return Some(
-                "An operation is in progress; Shell, Restart and Power off remain available".into(),
+                "An operation is in progress; Restart and Power off remain available".into(),
             );
         }
         if matches!(command, Command::Search | Command::Back | Command::Rescan) {
@@ -937,7 +951,9 @@ impl Ui {
         if !state.environments.is_empty() && options.config.ui.show_snapshots {
             local.push_str("  [T] Snapshots");
         }
-        if state.snapshot_view {
+        if state.snapshot_view
+            && options.config.security.mode != crate::config::SecurityMode::Enforce
+        {
             local.push_str("  [O] Clone BE  [M] Clone/promote  [U] Rollback");
         }
         if state.snapshot_view && matches!(View::of(state), View::Generations | View::Kernels) {
@@ -949,7 +965,12 @@ impl Ui {
                 .style(Style::default().fg(Color::Cyan)),
             regions[3],
         );
-        let global = if area.width >= 110 {
+        let protected = options.config.security.mode == crate::config::SecurityMode::Enforce;
+        let global = if protected && area.width >= 110 {
+            "[enforce] [F1] Help  [F2] Actions  [I] Details  [R/F5] Rescan  [N/F6] Restart manager  [P/F10] Power off"
+        } else if protected {
+            "[enforce] F1 Help  F2 Actions  I Details  R Rescan  N Restart  P Power off"
+        } else if area.width >= 110 {
             "[F1] Help  [F2] Actions  [I] Details  [R/F5] Rescan  [S/F4] Shell  [N/F6] Restart manager  [P/F10] Power off"
         } else {
             "F1 Help  F2 Actions  I Details  R Rescan  S Shell  N Restart  P Power off"
@@ -1020,10 +1041,31 @@ impl Ui {
                         let mut lines: Vec<_> = ALL
                             .into_iter()
                             .map(|command| {
-                                Line::raw(format!("{:12} {}", command.keys(), command.label()))
+                                let annotation = if protected
+                                    && matches!(
+                                        command,
+                                        Command::Shell
+                                            | Command::Rollback
+                                            | Command::Clone
+                                            | Command::ClonePromote
+                                    ) {
+                                    " (disabled in enforce)"
+                                } else {
+                                    ""
+                                };
+                                Line::raw(format!(
+                                    "{:12} {}{annotation}",
+                                    command.keys(),
+                                    command.label()
+                                ))
                             })
                             .collect();
-                        lines.extend([Line::raw(""),Line::raw("Arrow / Home / End / PgUp / PgDn: select / scroll"),Line::raw("Search: Enter keeps filter; Esc clears filter. Typing never runs commands."),Line::raw("F4 Shell, F6 Restart manager, F10 Power off work during search and operations."),Line::raw("Snapshot: Enter inspects boot targets; O clones BE; M clones/promotes; U rolls back."),Line::raw("Q exits the manager; PID 1 decides recovery. N restarts only the manager.")]);
+                        let recovery = if protected {
+                            "F6 Restart manager and F10 Power off work during search and operations."
+                        } else {
+                            "F4 Shell, F6 Restart manager, F10 Power off work during search and operations."
+                        };
+                        lines.extend([Line::raw(""),Line::raw("Arrow / Home / End / PgUp / PgDn: select / scroll"),Line::raw("Search: Enter keeps filter; Esc clears filter. Typing never runs commands."),Line::raw(recovery),Line::raw("Snapshot: Enter inspects boot targets; administrative mutations need authorization."),Line::raw("Q exits the manager; PID 1 decides recovery. N restarts only the manager.")]);
                         lines
                     }
                     Panel::Details => self.details(state, options),

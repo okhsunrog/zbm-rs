@@ -6,7 +6,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootTarget {
     pub dataset: String,
     pub generation: Option<u64>,
@@ -22,7 +22,7 @@ pub struct BootTarget {
     pub inputs: BootInputs,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootInputs {
     pub kernel: PathBuf,
     pub initrd: Option<PathBuf>,
@@ -52,7 +52,7 @@ impl BootInputs {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Backend {
     Nixos,
@@ -68,19 +68,19 @@ pub struct SnapshotSource {
     pub guid: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerationIssue {
     pub generation: u64,
     pub error: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TargetDiscovery {
     pub targets: Vec<BootTarget>,
     pub rejected: Vec<GenerationIssue>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootPlan {
     pub target: BootTarget,
     pub kernel: PathBuf,
@@ -269,6 +269,16 @@ pub fn discover_generations(root: &Path, dataset: &str, limit: u32) -> io::Resul
 }
 
 impl BootPlan {
+    /// A verified NixOS target needs an explicit typed ZFS root instead of an
+    /// indirect fstab selector. Existing initrd checks forbid unsupported rewrites.
+    pub fn resolve_verified(target: &BootTarget, extra_args: &[String]) -> io::Result<Self> {
+        if matches!(target.backend, Backend::Linux { .. }) {
+            Self::resolve(target, extra_args)
+        } else {
+            Self::resolve_nixos(target, extra_args, Some(&target.dataset))
+        }
+    }
+
     pub fn resolve(target: &BootTarget, extra_args: &[String]) -> io::Result<Self> {
         if matches!(target.backend, Backend::Linux { .. }) {
             return crate::linux::resolve(target, &target.dataset, extra_args);

@@ -13,6 +13,8 @@ use zbm_core::{
 
 const DEADLINE: Duration = Duration::from_secs(30);
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Action {
     Rollback {
         pool: Pool,
@@ -96,7 +98,36 @@ impl Action {
     }
 
     async fn run(self) -> Result<Outcome> {
+        if crate::broker::enabled() {
+            return crate::broker::perform(self).await;
+        }
+        self.run_local().await
+    }
+
+    pub(crate) async fn run_local(self) -> Result<Outcome> {
         let zfs = Zfs::new();
+        if crate::config::image_enforced()
+            && let Self::Prepare { target, args, .. } | Self::Boot { target, args, .. } = &self
+        {
+            let target = target.clone();
+            let args = args.clone();
+            let config = crate::config::load(true)?;
+            // Authorize immutable snapshot inputs before any persistent clone
+            // intent or ZFS mutation. Handoff repeats this against the final clone.
+            tokio::task::spawn_blocking(move || {
+                let plan = if target.snapshot.is_some() {
+                    BootPlan::for_snapshot(&target, &target.dataset, &args)?
+                } else {
+                    BootPlan::resolve_verified(&target, &args)?
+                };
+                let authorization = zbm_core::security::Authorization::load_for_plan(
+                    &plan,
+                    &config.security.target_authorities,
+                )?;
+                authorization.policy().matches_selection(&plan)
+            })
+            .await??;
+        }
         Ok(match self {
             Self::Rollback {
                 pool,
@@ -151,11 +182,25 @@ impl Action {
                 let plan = if target.snapshot.is_some() {
                     boot_zfs::prepare_snapshot(&zfs, &pool, &target, &args).await?
                 } else {
-                    tokio::task::spawn_blocking(move || BootPlan::resolve(&target, &args)).await??
+                    tokio::task::spawn_blocking(move || {
+                        if crate::config::image_enforced() {
+                            BootPlan::resolve_verified(&target, &args)
+                        } else {
+                            BootPlan::resolve(&target, &args)
+                        }
+                    })
+                    .await??
                 };
                 let load_plan = plan.clone();
-                let loaded =
-                    tokio::task::spawn_blocking(move || LoadedKernel::load(&load_plan)).await??;
+                let owned_clone = boot_zfs::validate_handoff_clone(&zfs, &pool, &plan).await?;
+                let loaded = tokio::task::spawn_blocking(move || {
+                    if crate::config::image_enforced() {
+                        LoadedKernel::load_verified(&load_plan, owned_clone)
+                    } else {
+                        LoadedKernel::load(&load_plan)
+                    }
+                })
+                .await??;
                 boot_zfs::retain_snapshot_clone(&zfs, &pool, &plan).await?;
                 boot_zfs::release_owned(&zfs, &pool).await?;
                 Outcome::Boot(plan, loaded)

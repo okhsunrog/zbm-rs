@@ -1,7 +1,10 @@
+mod broker;
 mod config;
 mod manager;
+mod security;
 mod session;
 mod supervisor;
+mod tpm;
 #[cfg(feature = "vm-test")]
 mod vm_test;
 
@@ -16,6 +19,10 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--broker") {
+        anyhow::ensure!(args.len() == 1, "Invalid broker arguments");
+        return broker::run();
+    }
     if args.first().is_some_and(|arg| arg == "--validate-config") {
         anyhow::ensure!(args.len() == 2, "usage: zbm-rs --validate-config PATH");
         let input = std::fs::read_to_string(&args[1])?;

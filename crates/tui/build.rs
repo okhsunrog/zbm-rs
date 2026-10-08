@@ -13,6 +13,13 @@ fn main() {
         let input = std::fs::read_to_string(&path)?;
         let config: schema::Config = serde_json::from_str(&input)?;
         config.validate()?;
+        println!(
+            "cargo::rustc-env=ZBM_IMAGE_SECURITY_MODE={}",
+            match config.security.mode {
+                schema::SecurityMode::Off => "off",
+                schema::SecurityMode::Enforce => "enforce",
+            }
+        );
         Ok(())
     })();
     if let Err(error) = result {

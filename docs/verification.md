@@ -1,3 +1,86 @@
+# Signed OVMF Secure Boot acceptance — 2026-10-08
+
+`target/vm/verified-004/security-report.json` records a passing signed OVMF/TCG
+scenario with the separately configured Linux 6.18.55 loader and matching ZFS.
+The owner publisher signs IMA policy, independently verifies staged module
+signatures and signs the final UKI outside Nix. Disposable fixture keys never
+enter Git, Nix derivations or the guest. The default image remains `off`.
+
+Passed: actual firmware Secure Boot, forced module/kexec signatures and lockdown,
+restricted IMA certificate/policy loading, pinned CMS authorization, sealed
+read-only memfd appraisal, unsigned-kernel/bad-IMA/changed-CMS/changed-content/
+extra-argument rejection and legacy-kexec refusal. The UI has all IDs 65534,
+zero effective/permitted/inheritable/ambient capabilities and `NO_NEW_PRIVS`.
+Shell refusal, manager crash/restart, bounded protected recovery and retry pass.
+The signed synthetic target actually boots with a new boot ID, final expected
+arguments and `SecureBoot=1`, then powers off cleanly.
+
+This tests the loader and native synthetic executor inputs, not the real broker
+catalog, installed Linux/NixOS roots, snapshot clones or a physical Framework.
+TPM capability setup, owner PCR signing and a reusable swtpm path passed this
+initial matrix; NV exhaustion, stale indices and interrupted setup remain pending.
+No TPM disk unlock, remote
+attestation or across-kexec event-log transport is claimed. Reproduction and
+remaining gates are in [the signing/test workflow](security-testing.md).
+
+Source checks pass: 35 workspace tests, formatting, all-targets/all-features
+warnings-denied Clippy and three build-tool boundary tests. The earlier unsigned
+regression `security-foundation-off-001` passed real ZFS and full lifecycle.
+
+## TPM and signed-policy NvPCR acceptance
+
+All runs below use disposable OVMF trust and fresh swtpm state when present.
+`systemd-tpm2-setup`, `systemd-pcrextend` and owner `systemd-measure` come from a
+separate v262 provider; the host systemd and host TPM are not used.
+
+| Run under `target/vm/` | Result |
+| --- | --- |
+| `verified-tpm-002` | OVMF/TCG Secure Boot; SRK, signed-policy hardware NvPCR, product identity, PCR15 prepared plan; complete verification/recovery/handoff scenario |
+| `verified-tpm-replay-002` | OVMF/KVM; same scenario plus independent firmware/userspace replay matching actual SHA-256 PCR11 and PCR15; 14 firmware PCR11 events and one enter-initrd |
+| `verified-tpm-missing-002` | Required hardware NvPCR with absent PCR signature: no manager, protected recovery, clean poweroff; SRK/ordinary phase still succeed |
+| `verified-tpm-invalid-002` | Required hardware NvPCR with invalid signed policy: same refusal; EFI signing and measured section bytes remain valid |
+| `verified-tpm-absent-002` | Required TPM without a TPM device: no manager, protected recovery, clean poweroff |
+| `verified-tpm-optional-absent-001` | Optional TPM without a device: unavailable evidence; all boot-input rejection/recovery checks and actual verified handoff still pass |
+| `verified-tpm-optional-invalid-001` | Optional NvPCR with invalid policy: degraded evidence; kernel/initramfs/CMS/argument checks stay mandatory and actual handoff passes |
+| `verified-tpm-final-001` | Final source OVMF/TCG image: full verified handoff, TPM/PCR replay and protected recovery; updated menu/recovery PNGs inspected |
+
+The final ordinary `off` image also passes fresh OVMF/TCG regression in
+`security-off-final-002`, including real ZFS, visibility, local-key encryption,
+input/shell/poweroff and the complete PID-1 fault/lifecycle suite. Nix module
+default/bounds/legacy-option JSON parity still passes.
+
+Initial `verified-tpm-001` exposed `ukify --join-pcrsig` not adding an absent
+section. The publisher now builds and verifies that section explicitly before
+EFI signing. Initial KVM negative/replay runs exposed the harness reaching SSH
+before the test NIC's first link-up; transport readiness is now awaited separately.
+All failed run artifacts remain available. Firmware/target proofs and PCR replay
+are independent observations; the prepared PCR15 event is not proof of execution.
+
+# Earlier Secure Boot implementation foundation — 2026-10-07
+
+Local source checks pass: formatting, 35 workspace tests with all features,
+warnings-denied all-targets/all-features Clippy and whitespace checks. Coverage
+includes pinned CMS acceptance/rejection, changed signed payload, foreign signer,
+trailing DER, ambiguous JSON, typed-root/argument/source binding, missing owned
+snapshot-clone evidence, immutable sealed bytes, malformed broker frames and
+existing-kernel IMA keyring lookup. These tests do not invoke privileged kexec or
+prove IMA appraisal under the configured loader kernel.
+
+The first updated unsigned portable test image builds and passes the size policy:
+EFI 26,373,120 bytes, initramfs 12,356,310 bytes, kernel 13,840,896 bytes. A rebuild
+with the final source changes succeeds (EFI 26,374,656 bytes). A fresh ordinary
+OVMF/TCG regression passes in `target/vm/security-foundation-off-001`: real ZFS,
+discovery/visibility, local-key native encryption, keyboard/rendering, shell return,
+poweroff and the complete PID-1 lifecycle/fault scenario. `report.json` and
+`lifecycle.json` both record success. The actual help/compact PNGs were inspected.
+The separate enforced-kernel configuration evaluates using a generated disposable
+public fixture certificate; its effective configuration has forced kexec/module
+signatures, early integrity lockdown, signed IMA policy, built-in efivarfs and the
+`ima` LSM. Its full kernel build is running. No production key or host boot setting
+is used. The new protected broker, enforced IMA/memfd handoff and TPM profiles have
+no signed OVMF acceptance yet. TPM profile execution is unimplemented and refuses
+startup when requested. No physical zbm-rs Secure Boot result is claimed.
+
 # Linux/ZBM compatibility and snapshot operations — 2026-10-07
 
 Ordinary Linux kernel/initramfs pairs are now boot targets alongside NixOS

@@ -3,3 +3,4 @@
 !AGENTS.md
 
 /result*
+__pycache__/

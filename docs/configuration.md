@@ -34,8 +34,10 @@ cargo run -p zbm-rs -- --print-config
 uv run --no-project nix/check-config.py
 
 ZBM_RS_CONFIG participates in Cargo validation as well as local runtime loading.
-It does not bake alternate values into the ELF: packaging the JSON supplies those
-values. --print-config normalizes defaults; --validate-config prints validated JSON.
+Packaging the JSON supplies ordinary values. The security mode is additionally
+compiled into the ELF and must match supervised runtime JSON; removing that JSON
+section cannot downgrade an enforced binary. --print-config normalizes defaults;
+--validate-config prints validated JSON.
 Missing or invalid explicit files fail instead of silently choosing defaults.
 
 ## Schema
@@ -49,6 +51,13 @@ Missing or invalid explicit files fail instead of silently choosing defaults.
 | zfs.import_policy | host-id | host-id or read-only; explicit import only, never force |
 | nixos.generation_limit | 20 | 1..512; maximum generations per root or snapshot |
 | kernel_args | [] | <=64 strings, <=4096 bytes each, no NUL; future target kernel |
+| security.mode | off | off/enforce; compiled image mode must agree at runtime |
+| security.require_firmware_secure_boot | false | enforced mode only; enabled firmware must be positively observed |
+| security.target_authorities | [] | <=32 image-owned public certificate paths; nonempty for enforce |
+| security.ima_certificate | null | image-owned public DER certificate path; required for enforce |
+| security.tpm.policy | off | off/optional/required; required SRK and ordinary measurement failures stop startup/handoff |
+| security.tpm.nvpcrs | [] | hardware/login/cryptsetup/verity allocation; <=4, no duplicates; initialization is not automatic use by the installed OS |
+| security.tpm.required_nvpcrs | [] | required subset; failed required allocation/initial hardware measurement stops startup |
 
 A threshold of 2 restarts on the first rapid failure and enters recovery on the
 second. Values 0 and 1 enter recovery on the first failure. Controlled restarts
@@ -75,16 +84,17 @@ base configuration; it has not been implemented. It must not weaken the signed
 security policy of an enforced image. Dynamic pools/Bootspec state
 remain separate. Features select code such as vm-test, never ordinary values.
 
-## Planned Secure Boot configuration
+## Secure Boot configuration
 
-These options are accepted design, **not implemented options or valid current
-configuration**. See [the full trust model](secure-boot-model.md) for enforcement,
+The Rust JSON fields and Nix module options below are implemented. The protected
+loader and synthetic target handoff have signed OVMF acceptance; production
+installed-OS and physical acceptance remain pending. See [the full trust model](secure-boot-model.md) for enforcement,
 recovery, key roles and limitations. Ordinary policy stays in Nix-generated,
 shared-schema-validated immutable JSON; it does not become Cargo features.
 
 All paths below are relative to `programs.zbm-rs`:
 
-| Planned Nix option | Default / requirement | Meaning |
+| Nix option | Default / requirement | Meaning |
 | --- | --- | --- |
 | `settings.security.mode` | `off`; `off` or `enforce` | Image policy; `enforce` requires the complete target verification chain. |
 | `settings.security.requireFirmwareSecureBoot` | `false` | Also require confirmed enabled firmware Secure Boot before OS handoff. Does not control target verification. |
@@ -93,6 +103,10 @@ All paths below are relative to `programs.zbm-rs`:
 | `image.kernelPackages` | Module defaults to `boot.kernelPackages` | Explicit loader kernel/ZFS package set; independent override does not change the host kernel. |
 | `image.kernelTrustedCertificates` | Public certificate list, sufficient for selected policy | Required target-kernel/module/IMA certificate trust; validate actual kernel integration. |
 | `image.imaCertificate` | Public certificate required for initial `enforce` profile | Authenticated certificate used for target-initramfs appraisal. |
+| `settings.security.tpm.policy` | `off`; `optional` or `required` | Separate TPM availability/measurement policy; never weakens verified boot. |
+| `settings.security.tpm.nvpcrs` | `[]` | Allocate only selected hardware/login/cryptsetup/verity NvPCRs. |
+| `settings.security.tpm.requiredNvpcrs` | `[]`; subset of selection | Refuse startup when one of these capabilities fails. |
+| `image.pcrPublicKey` | Public PEM key when NvPCRs are selected | Authorizes initializing writes using an owner-signed PCR11 policy. |
 
 The last four are build inputs, not arbitrary boot-time overrides. Nix certificate
 paths are materialized as public trust-store resources; runtime JSON uses packaged
@@ -100,7 +114,7 @@ paths/identities and snake_case names such as `security.target_authorities`.
 No production private key is a Nix option/path input or stored in that JSON.
 The exact serialized authority representation will be finalized with the verifier.
 
-Planned example (will not evaluate with today's module):
+Example (public certificates and their signing-chain trust must match):
 
 ```nix
 programs.zbm-rs = {
@@ -111,7 +125,7 @@ programs.zbm-rs = {
     kernelTrustedCertificates = [
       ./kernel-signing.pem
       ./module-signing.pem
-      ./ima-signing.pem
+      ./ima-ca.pem
     ];
     imaCertificate = ./ima-signing.pem;
   };
@@ -128,6 +142,13 @@ UKI signing are separate owner deployment operations. An enforced image keeps
 verifying targets when firmware Secure Boot is disabled; setting the requirement
 to true additionally refuses that handoff. Missing checks, invalid configuration
 or unknown firmware state never silently select `off`.
+
+`ima-signing.pem` is a non-CA leaf with digitalSignature usage, issued by the
+embedded `ima-ca.pem` trust. `image.pcrPublicKey` is an ordinary public key PEM,
+not an X.509 certificate. Its private half is supplied only to the owner publisher,
+which adds the signed PCR policy before EFI signing. The current TPM provider
+supports the glibc image profile; TPM-enabled musl packaging is rejected explicitly.
+See [owner signing and TPM tests](security-testing.md).
 
 There are no independent `skipInitramfs`, `skipCommandLine` or legacy-kexec fallback
 options. `settings.kernelArgs` must fit the signed target authorization. Protected

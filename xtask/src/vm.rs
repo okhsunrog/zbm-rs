@@ -23,6 +23,8 @@ pub struct BootOptions<'a> {
     pub direct: bool,
     pub fixture: Option<&'a Path>,
     pub scsi: bool,
+    pub secure_vars: Option<&'a Path>,
+    pub tpm_socket: Option<&'a Path>,
 }
 
 pub fn boot(run: &Path, options: BootOptions<'_>) -> Result<()> {
@@ -33,6 +35,8 @@ pub fn boot(run: &Path, options: BootOptions<'_>) -> Result<()> {
         direct,
         fixture,
         scsi,
+        secure_vars,
+        tpm_socket,
     } = options;
     let run = absolute(run)?;
     let image = image
@@ -52,8 +56,36 @@ pub fn boot(run: &Path, options: BootOptions<'_>) -> Result<()> {
         !run.to_string_lossy().contains(','),
         "Run path cannot contain a QEMU option separator"
     );
-    let (ovmf_code, ovmf_vars) = firmware()?;
-    fs::copy(ovmf_vars, run.join("OVMF_VARS.fd"))?;
+    let (ordinary_code, ovmf_vars) = firmware()?;
+    ensure!(
+        !direct || secure_vars.is_none(),
+        "Secure Boot requires the EFI boot path"
+    );
+    let ovmf_code = if secure_vars.is_some() {
+        [
+            "/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd",
+            "/usr/share/OVMF/OVMF_CODE_4M.secboot.fd",
+        ]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        .ok_or_else(|| anyhow::anyhow!("No supported 4M Secure Boot firmware found"))?
+    } else {
+        ordinary_code
+    };
+    ensure!(
+        Path::new(ovmf_code).is_file(),
+        "Matching Secure Boot firmware is unavailable"
+    );
+    if let Some(vars) = secure_vars {
+        ensure!(
+            fs::metadata(vars)?.len() == fs::metadata(ovmf_vars)?.len(),
+            "Secure OVMF CODE/VARS size mismatch"
+        );
+    }
+    fs::copy(
+        secure_vars.unwrap_or(Path::new(ovmf_vars)),
+        run.join("OVMF_VARS.fd"),
+    )?;
     fs::copy(image.join("manifest.json"), run.join("image-manifest.json"))?;
     let manifest: Value = serde_json::from_slice(&fs::read(image.join("manifest.json"))?)?;
     if manifest["test_ssh"] == true {
@@ -79,7 +111,11 @@ pub fn boot(run: &Path, options: BootOptions<'_>) -> Result<()> {
     let mut cmd = Command::new("qemu-system-x86_64");
     cmd.args([
         "-machine",
-        if tcg {
+        if tcg && secure_vars.is_some() {
+            "q35,accel=tcg,smm=on"
+        } else if !tcg && secure_vars.is_some() {
+            "q35,accel=kvm,smm=on"
+        } else if tcg {
             "q35,accel=tcg"
         } else {
             "q35,accel=kvm"
@@ -105,6 +141,27 @@ pub fn boot(run: &Path, options: BootOptions<'_>) -> Result<()> {
             run.join("disk.qcow2").display()
         ),
     ]);
+    if secure_vars.is_some() {
+        cmd.args(["-global", "driver=cfi.pflash01,property=secure,value=on"]);
+    }
+    if let Some(socket) = tpm_socket {
+        let socket = socket.canonicalize()?;
+        ensure!(
+            !socket.to_string_lossy().contains(','),
+            "Invalid TPM socket path"
+        );
+        cmd.args([
+            "-chardev",
+            &format!("socket,id=zbm-tpm,path={}", socket.display()),
+            "-tpmdev",
+            "emulator,id=zbm-tpmdev,chardev=zbm-tpm",
+            "-device",
+            "tpm-crb,tpmdev=zbm-tpmdev",
+            // Disposable SMBIOS identity for deterministic hardware measurements.
+            "-uuid",
+            "01234567-89ab-cdef-0123-456789abcdef",
+        ]);
+    }
     if scsi {
         cmd.args([
             "-device",
@@ -226,13 +283,30 @@ pub fn screenshot(run: &Path, output: &Path) -> Result<()> {
     let output = absolute(output)?;
     fs::create_dir_all(output.parent().context("Screenshot needs parent")?)?;
     let mut qmp = qmp(run)?;
+    // A blinking console cursor prevents pixel equality even on a settled page.
+    // Freeze guest updates for capture and restore only our own pause afterward.
+    let running = qmp.request("query-status", json!({}))?["running"] == true;
+    if running {
+        qmp.request("stop", json!({}))?;
+    }
+    let result = capture_screen(&mut qmp, &output);
+    let resume = if running {
+        qmp.request("cont", json!({})).map(|_| ())
+    } else {
+        Ok(())
+    };
+    result?;
+    resume
+}
+
+fn capture_screen(qmp: &mut Qmp, output: &Path) -> Result<()> {
     let mut previous = Vec::new();
     let mut stable = 0;
     // Guest console writes and VGA refresh are separate from serial readiness.
     // Capture a settled display rather than a partially updated surface.
     for _ in 0..12 {
         qmp.request("screendump", json!({"filename": output, "format": "png"}))?;
-        let current = fs::read(&output)?;
+        let current = fs::read(output)?;
         if current == previous {
             stable += 1;
         } else {
@@ -267,6 +341,9 @@ pub fn ssh(run: &Path, command: &str) -> Result<String> {
     ssh_timeout(run, command, 30)
 }
 pub fn ssh_timeout(run: &Path, command: &str, seconds: u32) -> Result<String> {
+    Ok(String::from_utf8(ssh_bytes(run, command, seconds)?)?)
+}
+pub fn ssh_bytes(run: &Path, command: &str, seconds: u32) -> Result<Vec<u8>> {
     let info: Value = serde_json::from_slice(&fs::read(run.join("connection.json"))?)?;
     if info["test_ssh"] != true {
         bail!("SSH unavailable: rebuild with cargo xtask image --test-ssh");
@@ -311,7 +388,7 @@ pub fn ssh_timeout(run: &Path, command: &str, seconds: u32) -> Result<String> {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    Ok(String::from_utf8(output.stdout)?)
+    Ok(output.stdout)
 }
 
 /// Read the actual Linux VT, independent of application instrumentation and GPU.

@@ -8,7 +8,7 @@ use crate::session::{self, Request};
 use console::Console;
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     os::{
         fd::AsRawFd,
         unix::{net::UnixDatagram, process::ExitStatusExt},
@@ -63,10 +63,12 @@ pub fn run() -> ! {
                     } else {
                         log("last-ditch panic caught");
                     }
-                    log("recovery unavailable; requesting reboot");
-                    unsafe {
-                        libc::sync();
-                        libc::reboot(libc::RB_AUTOBOOT);
+                    log("recovery unavailable; keeping PID 1 alive");
+                    if !crate::config::image_enforced() {
+                        unsafe {
+                            libc::sync();
+                            libc::reboot(libc::RB_AUTOBOOT);
+                        }
                     }
                     // If reboot is unavailable, keep PID 1 alive and retry recovery.
                     for _ in 0..10 {
@@ -98,6 +100,7 @@ fn last_ditch(recovery: &mut Recovery) -> io::Result<()> {
         }
         recovery.active = None;
     }
+    unload_owned_kernel()?;
     let _ = fs::remove_file("/run/zbm-rs/manager.pid");
     if recovery.console.is_none() {
         recovery.console = Some(Console::open()?);
@@ -112,6 +115,29 @@ fn last_ditch(recovery: &mut Recovery) -> io::Result<()> {
         &mut recovery.active,
         "zbm-rs emergency recovery: supervisor failed, PID 1 is alive (last-ditch recovery). Exit to restart the manager.",
     )
+}
+
+fn unload_owned_kernel() -> io::Result<()> {
+    if !crate::config::image_enforced() || !std::path::Path::new("/run/zbm-rs/kexec-owned").exists()
+    {
+        return Ok(());
+    }
+    // The broker can die by SIGKILL, without running LoadedKernel::drop. Only
+    // after the entire owned group is gone may PID 1 clear its global kexec slot.
+    if unsafe {
+        libc::syscall(
+            libc::SYS_kexec_file_load,
+            -1,
+            -1,
+            0usize,
+            std::ptr::null::<libc::c_char>(),
+            1 as libc::c_ulong,
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    fs::remove_file("/run/zbm-rs/kexec-owned")
 }
 
 struct CrashPolicy {
@@ -184,6 +210,7 @@ fn supervise(recovery: &mut Recovery) -> io::Result<()> {
             }
         }
     };
+    crate::security::prepare(&config)?;
     let executable = std::env::current_exe()?;
     let mut policy = CrashPolicy::new(config.manager.restart_limit);
     loop {
@@ -209,6 +236,7 @@ fn supervise(recovery: &mut Recovery) -> io::Result<()> {
         fs::write("/run/zbm-rs/manager.pid", pid.to_string())?;
         log(&format!("manager-start pid={pid}"));
         let (status, request) = wait(pid, Some(&parent), active)?;
+        unload_owned_kernel()?;
         let _ = fs::remove_file("/run/zbm-rs/manager.pid");
         console.restore()?;
         let restored = console.state()?;
@@ -346,6 +374,10 @@ fn emergency(console: &mut Console, active: &mut Option<i32>) -> io::Result<()> 
 
 fn recovery_shell(console: &mut Console, active: &mut Option<i32>, notice: &str) -> io::Result<()> {
     console.restore()?;
+    if crate::config::image_enforced() {
+        console.notice("zbm-rs protected recovery. PID 1 is alive.");
+        return protected_recovery(console);
+    }
     console.notice(notice);
     log("emergency-shell");
     let mut command = Command::new("/bin/sh");
@@ -359,6 +391,43 @@ fn recovery_shell(console: &mut Console, active: &mut Option<i32>, notice: &str)
     console.restore()?;
     log("emergency-return");
     Ok(())
+}
+
+fn protected_recovery(console: &mut Console) -> io::Result<()> {
+    log("protected-recovery; shell unavailable");
+    console.notice(
+        "Protected recovery: shell access is disabled. R + Enter: reboot; P + Enter: power off.",
+    );
+    if crate::security::ready() {
+        console.notice("M + Enter: restart the manager with the same protection.");
+    }
+    loop {
+        let mut input = [0u8; 1];
+        if console.file.read(&mut input)? == 0 {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+        match input[0].to_ascii_lowercase() {
+            b'm' if crate::security::ready() => return Ok(()),
+            b'r' | b'p' => {
+                let how = if input[0].eq_ignore_ascii_case(&b'r') {
+                    libc::RB_AUTOBOOT
+                } else {
+                    libc::RB_POWER_OFF
+                };
+                unsafe {
+                    libc::sync();
+                }
+                if unsafe { libc::reboot(how) } < 0 {
+                    log(&format!(
+                        "protected shutdown failed: {}",
+                        io::Error::last_os_error()
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]

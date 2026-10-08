@@ -40,5 +40,29 @@ pub fn setup() -> io::Result<()> {
     mount("devpts", "/dev/pts", libc::MS_NOSUID | libc::MS_NOEXEC)?;
     fs::create_dir_all("/run/zbm-rs")?;
     fs::create_dir_all("/root")?;
+    if std::path::Path::new("/sys/firmware/efi").exists() {
+        let result = mount(
+            "efivarfs",
+            "/sys/firmware/efi/efivars",
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        );
+        if let Err(error) = result {
+            // Stock development kernels may provide efivarfs only as a module.
+            // Missing firmware evidence is unknown, never "disabled". Protected
+            // images require the built-in filesystem before early trust setup.
+            if crate::config::image_enforced()
+                || !matches!(error.raw_os_error(), Some(libc::ENODEV | libc::EINVAL))
+            {
+                return Err(error);
+            }
+        }
+    }
+    if std::path::Path::new("/sys/kernel/security").exists() {
+        mount(
+            "securityfs",
+            "/sys/kernel/security",
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        )?;
+    }
     Ok(())
 }

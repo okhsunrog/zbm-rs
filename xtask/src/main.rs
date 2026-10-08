@@ -4,6 +4,7 @@ mod failures;
 mod interface;
 mod lifecycle;
 mod qmp;
+mod security_smoke;
 mod smoke;
 mod vm;
 
@@ -20,6 +21,22 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Task {
+    SecureSmoke {
+        #[arg(long)]
+        run: PathBuf,
+        #[arg(long)]
+        image: PathBuf,
+        #[arg(long)]
+        secure_vars: PathBuf,
+        #[arg(long)]
+        swtpm: bool,
+        #[arg(long, value_enum)]
+        expect_tpm: Option<security_smoke::TpmExpected>,
+        #[arg(long)]
+        tcg: bool,
+        #[arg(long, default_value_t = 2277)]
+        port: u16,
+    },
     /// Boot real Arch roots, snapshot clones and rolled-back datasets.
     ArchSmoke {
         #[arg(long)]
@@ -93,6 +110,12 @@ enum VmTask {
         fixture: Option<PathBuf>,
         #[arg(long)]
         scsi: bool,
+        /// Disposable enrolled OVMF variables; uses the matching Secure Boot firmware.
+        #[arg(long)]
+        secure_vars: Option<PathBuf>,
+        /// Unix control socket of an externally owned disposable swtpm.
+        #[arg(long)]
+        tpm_socket: Option<PathBuf>,
     },
     Screen {
         #[arg(long)]
@@ -119,6 +142,15 @@ fn main() -> Result<()> {
         .to_owned();
     std::env::set_current_dir(root)?;
     match Cli::parse().command {
+        Task::SecureSmoke {
+            run,
+            image,
+            secure_vars,
+            swtpm,
+            expect_tpm,
+            tcg,
+            port,
+        } => security_smoke::run(&run, &image, &secure_vars, port, tcg, swtpm, expect_tpm)?,
         Task::ArchSmoke {
             run,
             image,
@@ -158,6 +190,8 @@ fn main() -> Result<()> {
                 direct,
                 fixture,
                 scsi,
+                secure_vars,
+                tpm_socket,
             } => vm::boot(
                 &run,
                 vm::BootOptions {
@@ -167,6 +201,8 @@ fn main() -> Result<()> {
                     direct,
                     fixture: fixture.as_deref(),
                     scsi,
+                    secure_vars: secure_vars.as_deref(),
+                    tpm_socket: tpm_socket.as_deref(),
                 },
             )?,
             VmTask::Screen { text } => {

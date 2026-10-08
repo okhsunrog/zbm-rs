@@ -39,6 +39,63 @@ pub fn utility() -> io::Result<bool> {
     }
     allowed()?;
     match args.get(1).map(String::as_str) {
+        Some("--test-verified-load") => {
+            if args.len() != 3 && !(args.len() == 4 && args[3] == "--execute") {
+                return Err(io::Error::other("Expected PLAN.json [--execute]"));
+            }
+            let plan: zbm_core::boot::BootPlan = serde_json::from_slice(&fs::read(&args[2])?)?;
+            let loaded = crate::manager::executor::LoadedKernel::load_verified(&plan, false)?;
+            println!("ZBM_TEST_VERIFIED_LOAD_PASS");
+            if args.len() == 4 {
+                loaded.execute()?;
+            }
+        }
+        Some("--test-legacy-kexec") => {
+            #[repr(C)]
+            struct Segment {
+                buffer: *const u8,
+                buffer_size: usize,
+                destination: usize,
+                destination_size: usize,
+            }
+            let bytes = [0u8; 4096];
+            let segment = Segment {
+                buffer: bytes.as_ptr(),
+                buffer_size: bytes.len(),
+                destination: 0x1000000,
+                destination_size: bytes.len(),
+            };
+            let result = unsafe {
+                libc::syscall(
+                    libc::SYS_kexec_load,
+                    segment.destination,
+                    1usize,
+                    &segment as *const Segment,
+                    0 as libc::c_ulong,
+                )
+            };
+            if result >= 0 {
+                unsafe {
+                    libc::syscall(
+                        libc::SYS_kexec_load,
+                        0usize,
+                        0usize,
+                        std::ptr::null::<libc::c_void>(),
+                        0 as libc::c_ulong,
+                    );
+                }
+                return Err(io::Error::other(
+                    "Legacy kexec accepted an unsigned segment",
+                ));
+            }
+            let error = io::Error::last_os_error();
+            if !matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES)) {
+                return Err(io::Error::other(format!(
+                    "Legacy kexec did not reject via integrity policy: {error}"
+                )));
+            }
+            println!("ZBM_TEST_LEGACY_KEXEC_REJECTED");
+        }
         Some("--test-send") => {
             let action = args
                 .get(2)

@@ -1,26 +1,60 @@
 # Secure Boot and verified boot design
 
-This is the accepted design, not a claim that Secure Boot is implemented. It is
+This is the accepted design, not a claim of completed Secure Boot acceptance. It is
 intended to make verified boot a first-class zbm-rs feature for both generic Linux
 and NixOS, while keeping the existing Linux/initramfs architecture. Configuration
-names below are planned API; see [configuration](configuration.md). Implementation
+names below include implemented API; see [configuration](configuration.md). Implementation
 work and deferred features are tracked in [the roadmap](roadmap.md), and acceptance
 requirements in [verification](verification.md#planned-secure-boot-acceptance).
 
 ## Current implementation
 
-The canonical Nix artifact is an unsigned UKI. There is no signing service, key
-management, BootAuthorization verifier, IMA appraisal setup or protected recovery
-mode. The current privileged manager owns ZFS operations and kernel handoff; PID 1
-can start an unrestricted emergency shell. These are development capabilities,
-not the accepted boundary for an enforced image.
+Implementation has started. The shared schema provides `off`/`enforce`, a separate
+firmware requirement, public authority paths and explicit TPM capabilities. The image
+mode is also compiled into the ELF; runtime JSON cannot downgrade an enforced
+binary. PID 1 initializes restricted IMA policy before launching the manager and
+uses bounded protected recovery on every enforced failure path. Root shell,
+administrative rollback and persistent clone/promotion are unavailable in that mode.
+
+The root broker is a fresh role of the same ELF, in the manager's supervised
+process group. Before Tokio/UI startup the manager opens diagnostic descriptors,
+starts the broker, clears groups/capabilities, changes all IDs to 65534 and sets
+`NO_NEW_PRIVS`. The broker independently resolves pool GUIDs and boot candidates,
+ignores caller paths/import policy/extra arguments, and owns kexec. Its private
+stream uses bounded length-prefixed typed JSON; malformed or timed-out exchanges
+invalidate the connection. UI telemetry is not an authorization record.
+
+Core now verifies detached binary CMS signatures against explicit X.509 pins.
+It ignores embedded signer certificates and has no implicit CA store. Authorization
+binds sizes/SHA-256, exact ordered arguments, one typed ZFS root slot, source
+dataset and snapshot-clone permission. Read-only OS roots carry
+`/boot/zbm-rs/authorizations/<artifact-id>.json` and the matching `.cms`; the ID is
+SHA-256 of `kernel-sha256:initramfs-sha256` in lowercase hexadecimal. The signed
+JSON also carries the detached `security.ima` signature for the initramfs.
+Authorization precedes persistent clone creation and is repeated against the
+actual owned clone before handoff. An opaque plan holds copied/sealed, read-only
+memfd inputs and exact arguments. Source changes cannot alter those sealed bytes.
+
+The canonical Nix artifact remains an unsigned UKI. The separate owner publisher
+signs the IMA policy and modules, independently verifies their signatures, and
+signs a fresh final UKI. A configured Linux 6.18.55 loader with matching ZFS passed
+signed OVMF acceptance, including actual IMA appraisal of sealed read-only memfds
+and a file-based handoff to a signed synthetic second kernel. Unsigned kernels,
+bad IMA signatures, altered CMS/content/arguments and legacy kexec are rejected.
+This proves the tested mechanism, not installed-OS, snapshot or physical acceptance.
+TPM startup and target-prepared measurements are implemented with a separate v262
+provider. Initial swtpm acceptance covers successful setup/PCR replay, missing or
+invalid signed policy, required missing TPM and optional degradation/unavailability;
+scarcity, stale-index and interrupted-setup cases remain pending. All published default images
+remain `off`; do not install this work as a verified production loader yet.
 
 The executor uses `kexec_file_load` exclusively and does not silently fall back to
 `kexec_load`. It reports kernel verification/lockdown errors, unloads a prepared
 kernel on failure, unmounts its OS roots and exports only pools matched to import
 ownership records. `KexecStarting` distinguishes failed handoff from an ordinary
-manager crash. These safeguards do not authenticate Bootspec, initramfs or the
-command line. Current OVMF tests run without Secure Boot enforcement.
+manager crash. These safeguards alone do not authenticate Bootspec, initramfs or
+the command line; the new enforced broker supplies that authorization. Existing
+unsigned OVMF evidence remains separate from the signed synthetic-input scenario.
 
 Initial NixOS support uses `org.nixos.bootspec.v1`. Specialisations and extra
 initrd extensions remain outside the initial path; `initrdSecrets` execution is
@@ -250,7 +284,7 @@ silently rebuild or reconfigure the installed OS kernel.
 
 Nix selects `kernelPackages` and obtains the loader kernel from cache or builds it.
 The NixOS module currently inherits `boot.kernelPackages`; `lib.mkImage` already
-accepts a kernel package set. The planned `image.kernelPackages` override keeps
+accepts a kernel package set. The `image.kernelPackages` override keeps
 loader selection independent from the host. `image.kernelPolicy` has two values:
 
 - `validate` (default): inspect the supplied final kernel and fail the image build
@@ -303,6 +337,75 @@ an externally produced, signed and authorized artifact. Its module/DKMS trust an
 runtime IMA policy are separate from the loader's appraisal of the target initramfs.
 Production artifacts exclude test SSH, fault hooks and test private keys.
 
+## Hardware lessons and TPM integration
+
+The Framework deployment exposed failures that the image pipeline and harness
+must reproduce instead of relying on unsigned boot success:
+
+- A kernel requiring signed IMA policy rejects raw rule text written to securityfs.
+  The loader carries a policy and detached signature, restores `security.ima` on
+  the policy inode, then writes its absolute pathname to the policy interface.
+  It reads back the required `KEXEC_INITRAMFS_CHECK` appraisal rule. A certificate
+  file in the initramfs alone does not establish trusted `.ima` keyring membership.
+- Do not assume the distribution kernel includes forced kexec/module signatures,
+  forced lockdown, writable/readable IMA policy or the `ima` LSM. Inspect the final
+  `.config` and runtime enforcement. The pinned default Nix kernel lacks several
+  required controls; use validation or a separately configured loader variant.
+- Authentication attempts and BE discovery are separate state transitions. A
+  loaded ZFS key is not owner authorization for a shell. Failed unlock must remain
+  retryable without stale discovery state or endless password/error loops. Unlock
+  UI is still unimplemented; its tests belong to the recovery milestone.
+- Insyde firmware can lose EFI variable enumeration while known-variable reads
+  still work. An empty listing is not Secure Boot disabled. A compatibility
+  provider must be explicit, DMI-scoped, signed for the selected loader kernel,
+  and run before firmware evidence or TPM/EFI-dependent setup. Never change keys,
+  clear the TPM or relax verification automatically after an enumeration failure.
+- TPM NV space is limited. Ordinary TPM2/SRK operations can work while one NvPCR
+  allocation fails. Select only needed NvPCRs and allocate in declared priority
+  order; do not reserve every hardware/login/cryptsetup/verity index by default.
+  Required capabilities block handoff on failure; optional failures are reported
+  without weakening target authorization or reallocating unrelated owner indices.
+
+TPM support is now an active implementation requirement. It includes ordinary
+TPM2 capability evidence, measured loader/target transitions and optional native
+NvPCR integration with an owner-signed PCR policy. It does not unlock ZFS. Normal
+PCRs and NvPCRs have separate purposes; a corporate TPM consumer must not be
+assumed to need NvPCRs merely because it uses TPM2. The profile selects actual
+capabilities rather than exposing a single switch promising everything.
+
+Keep distinct public/private key roles for firmware enrollment/EFI signing,
+target-kernel and module signatures, IMA files/policy, BootAuthorization and PCR
+policy authorization. A signed PCR policy approves measured states for a TPM
+operation; it neither signs boot artifacts nor overrides failed verification.
+Owner keys stay outside Nix. Public keys and signed policies may be packaged;
+production key material is never reused in disposable TPM/OVMF fixtures.
+
+The loader UKI runs through systemd-stub once. `kexec_file_load` does not run the
+target EFI stub again or automatically transfer its `.pcrsig`, `.pcrpkey` and
+`.extra` resources. PCR11 loader-image/phase measurements alone do not identify
+the selected OS kernel/initramfs/arguments. Kernel-side kexec/IMA measurements,
+explicit selected-target events and target initialization need a defined event
+log/handoff contract. Phase ordering across the two initrds must match signed
+policy; never assume a policy for one `enter-initrd` applies after a loader phase
+transition and another initrd. A snapshot root must be represented by the actual
+final plan without treating an unrestricted dataset name as authenticated state.
+
+Before completing the profile, test PCR replay and signed-policy authorization
+with swtpm under real OVMF measured boot, including firmware off/unknown, no TPM,
+full NV space, stale indices and interrupted setup. The exact target-event PCR,
+log transport and target-initrd policy integration remain implementation work;
+there is no remote attestation or rollback-resistance claim from diagnostic logs.
+
+The implemented provider is systemd v262, built separately from host systemd.
+The earlier v261 anchor-secret NvPCR API is deliberately not a fallback. Startup
+extends `enter-initrd` in PCR11, then initializes selected NvPCRs with an
+owner-signed policy using `policyref=initrd`. Only afterward does it measure the
+SMBIOS product identity into a selected hardware NvPCR. Priorities allocate
+hardware, cryptsetup, login, then verity. Initializing login/cryptsetup/verity
+does not imply that those installed-OS consumers are integrated. Required
+capabilities stop startup on failure; optional failures produce degraded evidence.
+No helper clears the TPM or requests automatic deletion of foreign indices.
+
 ## User-visible evidence
 
 Show firmware state (`enabled`, `disabled`, `unknown`), configured loader mode,
@@ -325,10 +428,10 @@ The following are not required for the initial enforced image:
   such a toggle. There is no automatic permission merely because Secure Boot is off.
 - Owner-authenticated administrative shell/recovery and optional development-image
   packaging, without production-signing a bypass.
-- TPM measured boot, authenticated automatic ZFS unlock and rollback-resistant
-  state. Measurements/PCR logs alone are not attestation. Reading encrypted boot
-  inputs requires an explicit unlock/measurement ordering; public authenticated
-  metadata or a loader-bound unlock policy are future designs, not implicit support.
+- Authenticated automatic ZFS unlock and rollback-resistant state. TPM measured
+  boot and NvPCR support are active work above; measurements/PCR logs alone are
+  not attestation. Reading encrypted boot inputs still requires explicit normal
+  passphrase unlock, which must not authorize administrative recovery.
 - Whole-root integrity policy, target-wide IMA appraisal, and shim/MOK support.
 
 Signature encoding/backend, certificate rotation tooling, the exact broker IPC

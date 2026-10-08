@@ -10,8 +10,8 @@ failure, then uses emergency recovery instead of an unlimited crash loop.
 
 The installed-OS paths discover ordinary Linux kernels/initramfs and NixOS
 Bootspec generations on selected ZFS filesystems, then boot through
-kexec_file_load. Encryption unlock UX, specialisations and Secure Boot acceptance
-remain roadmap work.
+kexec_file_load. Encryption unlock UX, specialisations and complete installed-OS
+Secure Boot acceptance remain roadmap work.
 
 ## Why this project exists
 
@@ -35,7 +35,8 @@ humans and automation operate the same VM through keys, screens, logs and SSH.
 - Keep PID 1 alive when the manager fails, and restore a usable recovery console.
 - Make verified boot a first-class feature: authorize kernel/initramfs bytes and
   arguments, preserve trusted snapshot selection, and keep protected recovery
-  within that policy. This is accepted design, not current Secure Boot support.
+  within that policy. The protected loader and synthetic target handoff have
+  signed OVMF acceptance; production and physical acceptance remain pending.
 - Produce an immutable EFI image through one Nix build, with a matching kernel/ZFS pair,
   portable and explicit-manifest host-only profiles, and measurable image size.
 - Grow deterministic process, UI and ZFS integration tests alongside every boot feature.
@@ -169,9 +170,14 @@ trust and current security boundaries.
 
 ## Secure Boot design and status
 
-The current image is unsigned; target authorization, IMA appraisal, privilege
-separation and protected recovery are not implemented. Existing VM boots do not
-establish Secure Boot acceptance.
+The default image remains unsigned with policy `off`. Implementation now includes
+the enforced schema, pinned CMS authorization, immutable prepared inputs, a root
+broker with unprivileged UI, early IMA setup and restricted recovery. The signed
+image publisher signs IMA policy, verifies all staged module signatures and signs
+the final UKI outside Nix. Signed OVMF tests verify the protected loader, native
+kernel/initramfs rejection, sealed inputs, UI privilege dropping, crash recovery
+and an actual signed synthetic target handoff. Full installed-OS, snapshot and
+physical acceptance remain pending; this is not a production-ready replacement.
 
 The accepted design uses image policy `off` or `enforce`. An enforced loader checks
 signed kernel/initramfs authorization and allowed arguments even when firmware
@@ -182,17 +188,21 @@ kernel signatures and initramfs IMA signatures, and a privileged broker checks t
 signed argument/root-selection policy. This authenticates boot inputs, not every
 file in the selected root filesystem.
 
-Nix will validate the provided loader kernel or build a separately configured
+Nix validates the provided loader kernel or builds a separately configured
 loader kernel with matching ZFS; it will not silently change the host/target OS
 kernel. Production private keys stay outside Nix and signing is a deployment step.
 No mandatory second development image is required. UI permission to boot without
 a trusted signature is deferred.
 
 Read [the complete design](docs/secure-boot-model.md),
-[planned configuration](docs/configuration.md#planned-secure-boot-configuration),
+[configuration](docs/configuration.md#secure-boot-configuration),
 [acceptance requirements](docs/verification.md#planned-secure-boot-acceptance) and
-[implementation roadmap](docs/roadmap.md). Planned options are not accepted by the
-current module/schema.
+[implementation roadmap](docs/roadmap.md). The JSON schema accepts the documented
+foundation fields and corresponding Nix module options. TPM integration uses a
+separate v262 provider with signed PCR policies; its complete acceptance matrix
+is still in progress. Initial swtpm success/PCR replay, bad/missing policy,
+required missing TPM and optional degradation tests pass. See
+[owner signing and test workflow](docs/security-testing.md).
 
 ## Build
 

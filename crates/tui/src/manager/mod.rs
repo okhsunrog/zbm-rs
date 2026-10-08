@@ -3,16 +3,15 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::DefaultTerminal;
 use std::{
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
     io::Write,
-    path::PathBuf,
     process::Command,
     time::{Duration, Instant},
 };
 use zbm_core::{State, discover, preview};
 mod command;
-mod executor;
-mod operation;
+pub(crate) mod executor;
+pub(crate) mod operation;
 mod ui;
 use command::Command as UiCommand;
 use operation::{Action, Outcome, Pending};
@@ -21,13 +20,12 @@ use ui::{Input, Panel, Ui};
 struct Options {
     preview: bool,
     supervised: bool,
-    events: Option<PathBuf>,
+    events: Option<File>,
     config: crate::config::Config,
 }
 
 fn emit(options: &Options, event: &str, state: &State, ui: &Ui) -> Result<()> {
-    if let Some(path) = &options.events {
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    if let Some(mut file) = options.events.as_ref() {
         let value = serde_json::json!({"event": event, "state": state, "pid": std::process::id(), "terminal_size": crossterm::terminal::size().ok(), "config": options.config, "ui": ui.telemetry(state)});
         // Construct a complete record before touching the shared serial device.
         // The leading separator also recovers from another writer's partial line.
@@ -81,9 +79,8 @@ async fn tui(
     terminal: &mut DefaultTerminal,
     options: &Options,
     channel: Option<&Client>,
+    #[cfg(feature = "vm-test")] control: Option<&crate::vm_test::Control>,
 ) -> Result<()> {
-    #[cfg(feature = "vm-test")]
-    let control = crate::vm_test::Control::open()?;
     let mut state = State::default();
     let mut ui = Ui::default();
     ui.sync(&mut state);
@@ -93,7 +90,7 @@ async fn tui(
     let mut last_tick = Instant::now();
     loop {
         #[cfg(feature = "vm-test")]
-        if let Some(control) = &control
+        if let Some(control) = control
             && let Some(request) = control.poll(channel)?
         {
             channel
@@ -115,7 +112,11 @@ async fn tui(
                 } else if is_boot && !std::path::Path::new("/dev/zfs").exists() {
                     Err("ZFS device unavailable. Inspect the bootstrap log from the recovery shell.".into())
                 } else {
-                    discover(&zbm_core::Zfs::new()).await
+                    if crate::broker::enabled() {
+                        crate::broker::discover().await
+                    } else {
+                        discover(&zbm_core::Zfs::new()).await
+                    }
                 };
                 let _ = tx.send(result).await;
             });
@@ -391,7 +392,7 @@ async fn tui(
                 if let Some(action) = action {
                     let operation = Pending::start(action);
                     state.operation = Some(format!(
-                        "{}. Shell, Restart and Power off remain available.",
+                        "{}. Restart and Power off remain available.",
                         operation.description
                     ));
                     state.error = None;
@@ -423,11 +424,12 @@ pub fn run(channel: Option<Client>) -> Result<()> {
             "--preview" => options.preview = true,
             "--manager" => {}
             "--events" => {
-                options.events = Some(
-                    args.next()
-                        .ok_or_else(|| anyhow::anyhow!("--events requires a path"))?
-                        .into(),
-                )
+                let path = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--events requires a path"))?;
+                // Keep the output descriptor across privilege dropping; the UI
+                // never needs to reopen a root-owned serial device or directory.
+                options.events = Some(OpenOptions::new().create(true).append(true).open(path)?);
             }
             "--help" | "-h" => {
                 println!("zbm-rs [--manager] [--preview] [--events PATH]");
@@ -436,14 +438,26 @@ pub fn run(channel: Option<Client>) -> Result<()> {
             _ => anyhow::bail!("Unknown option: {arg}"),
         }
     }
+    #[cfg(feature = "vm-test")]
+    let control = crate::vm_test::Control::open()?;
     if options.supervised {
-        let _ = Command::new("/usr/bin/modprobe").arg("zfs").status()?;
+        let loaded = Command::new("/usr/bin/modprobe").arg("zfs").status()?;
+        if options.config.security.mode == crate::config::SecurityMode::Enforce {
+            anyhow::ensure!(loaded.success(), "Trusted ZFS module could not be loaded");
+            crate::broker::start()?;
+        }
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let mut terminal = ratatui::init();
-    let result = runtime.block_on(tui(&mut terminal, &options, channel.as_ref()));
+    let result = runtime.block_on(tui(
+        &mut terminal,
+        &options,
+        channel.as_ref(),
+        #[cfg(feature = "vm-test")]
+        control.as_ref(),
+    ));
     ratatui::restore();
     // A blocked filesystem read must not hold a requested recovery session open.
     runtime.shutdown_timeout(Duration::from_millis(100));

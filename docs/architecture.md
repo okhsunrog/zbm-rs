@@ -53,7 +53,7 @@ The UI requires exact `ROLLBACK` text; input cannot invoke bare letter shortcuts
 inside confirmation. Mutations rediscover BEs, invalidating stale targets. An interrupted marker/journal
 update may require manual recovery rather than risking reuse or data loss.
 
-## One ELF, two processes
+## One ELF, separate runtime roles
 
 The image contains /bin/zbm-rs and /init -> /bin/zbm-rs. main checks PID 1 before
 argument parsing, Tokio, Ratatui or ZFS initialization. PID 1 runs supervisor;
@@ -63,10 +63,18 @@ normal entry is manager; --manager --preview is explicit development mode.
 The supervisor lifecycle uses std/libc and the small private protocol. It also
 reads the image-owned typed JSON once through the shared config schema; it never
 initializes Tokio, Ratatui or ZFS application state.
-It mounts proc/sys/dev/run/tmp/devpts, runs the image's driver/udev bootstrap child,
+It mounts proc/sys/dev/run/tmp/devpts plus EFI/securityfs when available, runs the image's driver/udev bootstrap child,
 saves tty1 state and supervises managers and emergency shells. The manager owns
 ZFS initialization, Tokio, zfskit, pool discovery and the Ratatui event loop.
 There is no zbm-init artifact and no shell/systemd/getty underneath PID 1.
+In `enforce`, trusted IMA initialization precedes manager launch. The manager
+starts the same executable as a root broker through a private bounded stream,
+then drops all IDs/groups/capabilities before Tokio/UI startup. The broker stays
+in the owned manager process group; PID 1 terminates and reaps the whole group.
+Boot candidates received from the UI are re-resolved by the broker. UI-owned
+diagnostics cannot overwrite readiness, trust, clone ownership or authorization
+evidence. Diagnostic output and VM control descriptors are opened before the
+privilege drop. Production has no VM control socket.
 
 SIGCHLD, SIGTERM, SIGINT, SIGHUP and SIGQUIT have deliberate PID-1 handlers.
 Handlers only set a lock-free bit mask. The synchronous loop forwards the four
@@ -88,9 +96,11 @@ without remounting /run or duplicating the completed bootstrap. If recovery itse
 fails, PID 1 requests reboot; an unsuccessful reboot leaves a bounded-delay
 recovery retry loop. Production has no supervisor fault injection hooks.
 
-The shell behavior above describes the current development implementation. The
-accepted protected mode replaces unrestricted shell recovery on every failure
-path with diagnostics/restart/reboot/poweroff; see the planned trust boundary below.
+The shell behavior above applies only to `off`. The implemented enforced branch
+replaces shell recovery, including last-ditch errors, with restart (only after
+successful early security setup), reboot and poweroff. A failed setup does not
+enter an automatic reboot loop. The signed OVMF synthetic-handoff scenario
+checks these paths; installed-OS and physical acceptance remain outstanding.
 
 ## Private lifecycle protocol
 
@@ -121,15 +131,16 @@ or export a pool with a foreign mount. These ephemeral ownership records are
 runtime state, not mutable loader configuration or a persistent recovery journal.
 The first path does not create clones or change dataset properties.
 
-## Planned verified-boot boundary
+## Verified-boot boundary under implementation
 
 The complete accepted design is in [Secure Boot and verified boot](secure-boot-model.md).
-It is not implemented by the current executor or lifecycle protocol. Linux and
+The core verifier, broker, protected lifecycle and owner signing pipeline are
+implemented and passed a signed OVMF synthetic-handoff scenario. Linux and
 NixOS discovery produce untrusted candidates; a signed BootAuthorization binds
 kernel/initramfs bytes, arguments and permitted dataset/snapshot-clone selection.
 
-Keep one ELF but add a privileged broker role, supervised alongside an
-unprivileged manager. Core owns trust policy and opaque verified-plan types;
+One ELF now includes a privileged broker role alongside an unprivileged manager.
+Core owns trust policy and opaque verified-plan types;
 the manager submits typed target/operation requests and displays evidence. The
 broker independently resolves and authorizes inputs, owns privileged ZFS actions
 and passes the exact prepared immutable bytes to `kexec_file_load`. Generic ZFS
@@ -173,14 +184,25 @@ the controller/frontend distinction. The NixOS
 module reuses boot.kernelPackages, boot.zfs.package and both initrd module lists.
 The same derivation is used by local builds, CI, QEMU and system.build.zbm-rs-efi.
 
-Planned security integration adds explicit loader `image.kernelPackages` selection
+Security integration provides explicit loader `image.kernelPackages` selection
 and `image.kernelPolicy = validate | configure`. Validation is the default;
 configuration builds a separate loader variant and matching ZFS without changing
 the host kernel. Final kernel capabilities, embedded certificates and module
 signatures must be checked before packaging. Private signing keys stay outside
-Nix; owner deployment signs an output copy. See [planned options](configuration.md#planned-secure-boot-configuration)
+Nix; owner deployment signs an output copy. See [options](configuration.md#secure-boot-configuration)
 and the trust model's build pipeline. The selected OS kernel remains an externally
 produced authorized artifact, not something the boot manager rebuilds at runtime.
+
+TPM helpers come from a separate systemd v262 derivation; no systemd service
+manager runs beneath PID 1. Explicit selected TPM capability policy controls
+bounded helper invocations. SRK availability, ordinary PCR measurement and
+selected NvPCR readiness are separate evidence. NvPCR initialization uses the
+v262 signed-PCR-policy API, without an anchor-secret fallback. Owner deployment
+signs the exact final UKI section measurements with `policyref=initrd` and adds
+the unmeasured `.pcrsig` before the EFI signature. A target-prepared event extends
+PCR15 with the hash of the verified final plan; this records an attempt, not
+proof of target execution or remote attestation. Log transfer across kexec and
+target-initrd integration are still pending.
 
 Production has no VM fault hooks. The test image is opt-in and compiles vm-test,
 adds SSH and disposable fixture credentials (public Nix-store test data, never

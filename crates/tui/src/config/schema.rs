@@ -8,6 +8,7 @@ pub struct Config {
     pub manager: Manager,
     pub zfs: Zfs,
     pub nixos: Nixos,
+    pub security: Security,
     /// Additional target kernel arguments, validated again by the boot backend.
     pub kernel_args: Vec<String>,
 }
@@ -54,6 +55,43 @@ pub enum ImportPolicy {
 pub struct Nixos {
     pub generation_limit: u32,
 }
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SecurityMode {
+    #[default]
+    Off,
+    Enforce,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MeasurementPolicy {
+    #[default]
+    Off,
+    Optional,
+    Required,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Security {
+    pub mode: SecurityMode,
+    pub require_firmware_secure_boot: bool,
+    /// Image-owned public X.509 certificates, never private key paths.
+    pub target_authorities: Vec<String>,
+    pub ima_certificate: Option<String>,
+    pub tpm: Tpm,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Tpm {
+    pub policy: MeasurementPolicy,
+    /// NvPCR allocation is independent of ordinary PCR measurements.
+    pub nvpcrs: Vec<String>,
+    pub required_nvpcrs: Vec<String>,
+}
 impl Default for Nixos {
     fn default() -> Self {
         Self {
@@ -64,6 +102,7 @@ impl Default for Nixos {
 
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
+        self.security.validate()?;
         if self.ui.timeout_secs > 300 {
             return Err("ui.timeout_secs must be in 0..=300".into());
         }
@@ -90,6 +129,69 @@ impl Config {
             .is_some_and(|s| s.len() > 256 || s.chars().any(char::is_control))
         {
             return Err("ui.title must be <=256 bytes without control characters".into());
+        }
+        Ok(())
+    }
+}
+
+impl Security {
+    pub fn validate(&self) -> Result<(), String> {
+        let public_path = |value: &str| {
+            value.starts_with("/etc/zbm-rs/trust/")
+                && !value.contains("..")
+                && !value.chars().any(char::is_control)
+                && value.len() <= 512
+                && !value.ends_with('/')
+        };
+        if self.target_authorities.len() > 32
+            || self.target_authorities.iter().any(|p| !public_path(p))
+            || self
+                .ima_certificate
+                .as_ref()
+                .is_some_and(|p| !public_path(p))
+        {
+            return Err(
+                "security certificates must use image-owned /etc/zbm-rs/trust paths".into(),
+            );
+        }
+        if self.mode == SecurityMode::Enforce
+            && (self.target_authorities.is_empty() || self.ima_certificate.is_none())
+        {
+            return Err(
+                "security.mode=enforce requires target authorities and an IMA certificate".into(),
+            );
+        }
+        if self.require_firmware_secure_boot && self.mode != SecurityMode::Enforce {
+            return Err("firmware Secure Boot requirement needs security.mode=enforce".into());
+        }
+        if self.tpm.nvpcrs.len() > 4
+            || self.tpm.required_nvpcrs.len() > 4
+            || self
+                .tpm
+                .nvpcrs
+                .iter()
+                .any(|n| !matches!(n.as_str(), "hardware" | "login" | "cryptsetup" | "verity"))
+            || self
+                .tpm
+                .required_nvpcrs
+                .iter()
+                .any(|n| !self.tpm.nvpcrs.contains(n))
+        {
+            return Err(
+                "security.tpm NvPCRs must be supported names; required names must be selected"
+                    .into(),
+            );
+        }
+        for names in [&self.tpm.nvpcrs, &self.tpm.required_nvpcrs] {
+            let mut unique = std::collections::BTreeSet::new();
+            if names.iter().any(|n| !unique.insert(n)) {
+                return Err("security.tpm NvPCR names must be unique".into());
+            }
+        }
+        if self.tpm.policy == MeasurementPolicy::Off
+            && (!self.tpm.nvpcrs.is_empty() || !self.tpm.required_nvpcrs.is_empty())
+        {
+            return Err("security.tpm NvPCRs require enabled measurements".into());
         }
         Ok(())
     }
