@@ -15,8 +15,6 @@ let
         require_firmware_secure_boot = cfg.settings.security.requireFirmwareSecureBoot;
         tpm = {
           policy = cfg.settings.security.tpm.policy;
-          nvpcrs = cfg.settings.security.tpm.nvpcrs;
-          required_nvpcrs = cfg.settings.security.tpm.requiredNvpcrs;
         };
       };
     };
@@ -26,7 +24,6 @@ let
     kernelTrustedCertificates = cfg.image.kernelTrustedCertificates;
     targetAuthorities = cfg.settings.security.targetAuthorities;
     imaCertificate = cfg.image.imaCertificate;
-    pcrPublicKey = cfg.image.pcrPublicKey;
     zfsUserspace = (import ./lean-userspace.nix { inherit pkgs; }).mkZfs config.boot.zfs.package;
     profile = cfg.image.profile;
     hardwareManifest = cfg.image.hardwareManifest;
@@ -62,13 +59,10 @@ in {
     image.kernelPolicy = lib.mkOption { type = lib.types.enum [ "validate" "configure" ]; default = "validate"; };
     image.kernelTrustedCertificates = lib.mkOption { type = lib.types.listOf lib.types.path; default = []; description = "Public X.509 trust for separately configured loader kernel."; };
     image.imaCertificate = lib.mkOption { type = lib.types.nullOr lib.types.path; default = null; description = "Public non-CA IMA signing certificate with digitalSignature usage."; };
-    image.pcrPublicKey = lib.mkOption { type = lib.types.nullOr lib.types.path; default = null; description = "Public key authorizing signed PCR 11 policy for NvPCR initialization."; };
     settings.security.mode = lib.mkOption { type = lib.types.enum [ "off" "enforce" ]; default = "off"; };
     settings.security.requireFirmwareSecureBoot = lib.mkOption { type = lib.types.bool; default = false; };
     settings.security.targetAuthorities = lib.mkOption { type = lib.types.listOf lib.types.path; default = []; description = "Public certificates pinned for boot authorization."; };
     settings.security.tpm.policy = lib.mkOption { type = lib.types.enum [ "off" "optional" "required" ]; default = "off"; };
-    settings.security.tpm.nvpcrs = lib.mkOption { type = lib.types.listOf (lib.types.enum [ "hardware" "login" "cryptsetup" "verity" ]); default = []; };
-    settings.security.tpm.requiredNvpcrs = lib.mkOption { type = lib.types.listOf (lib.types.enum [ "hardware" "login" "cryptsetup" "verity" ]); default = []; };
   };
   config = lib.mkIf cfg.enable {
     system.build.zbm-rs-efi = image;

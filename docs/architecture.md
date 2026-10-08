@@ -195,16 +195,18 @@ Nix; owner deployment signs an output copy. See [options](configuration.md#secur
 and the trust model's build pipeline. The selected OS kernel remains an externally
 produced authorized artifact, not something the boot manager rebuilds at runtime.
 
-TPM helpers come from a separate systemd v262 derivation; no systemd service
-manager runs beneath PID 1. Explicit selected TPM capability policy controls
-bounded helper invocations. SRK availability, ordinary PCR measurement and
-selected NvPCR readiness are separate evidence. NvPCR initialization uses the
-v262 signed-PCR-policy API, without an anchor-secret fallback. Owner deployment
-signs the exact final UKI section measurements with `policyref=initrd` and adds
-the unmeasured `.pcrsig` before the EFI signature. A target-prepared event extends
-PCR15 with the hash of the verified final plan; this records an attempt, not
-proof of target execution or remote attestation. Log transfer across kexec and
-target-initrd integration are still pending.
+TPM startup only probes TPM2 and reads SHA-256 PCR15 through sysfs. The loader
+never prepares SRK/NvPCRs or extends OS phases in PCR11. Those belong to the target
+initramfs, which retains its native TPM services and NvPCR definitions.
+A bounded `systemd-pcrextend` helper from the ordinary Nix systemd package records
+a target-prepared event in PCR15 after native verified loading succeeds. This
+hashes the exact verified final plan and records an attempt, not successful OS
+execution. Required TPM failures stop startup/handoff; optional failures never
+weaken boot-input verification. The independent firmware/userspace replay test
+checks unchanged PCR11, exact PCR15 and no loader NV/persistent allocation.
+Transport of the loader's PCR15 log into the target initramfs remains separate
+work. See [the trust model](secure-boot-model.md) and
+[the VM workflow](security-testing.md).
 
 Production has no VM fault hooks. The test image is opt-in and compiles vm-test,
 adds SSH and disposable fixture credentials (public Nix-store test data, never

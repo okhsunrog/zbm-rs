@@ -72,9 +72,7 @@ pub fn prepare(config: &Config) -> io::Result<Evidence> {
         ima_policy_loaded: false,
         tpm: crate::tpm::Evidence {
             state: "disabled",
-            srk_ready: false,
-            enter_initrd_measured: false,
-            initialized_nvpcrs: Vec::new(),
+            pcr15_initial: None,
             errors: Vec::new(),
         },
     };

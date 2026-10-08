@@ -67,25 +67,10 @@ pub fn run(
                 evidence["state"] != "ready",
                 "Required TPM failure was accepted"
             );
-            if tpm {
-                ensure!(
-                    evidence["srk_ready"] == true
-                        && evidence["enter_initrd_measured"] == true
-                        && evidence["initialized_nvpcrs"]
-                            .as_array()
-                            .is_some_and(Vec::is_empty),
-                    "Expected isolated signed-policy failure: {evidence}"
-                );
-                fs::write(
-                    run.join("tpm-rejection.log"),
-                    vm::ssh(run, "cat /run/zbm-rs/tpm-setup.log")?,
-                )?;
-            } else {
-                ensure!(
-                    evidence["state"] == "unavailable" && evidence["srk_ready"] == false,
-                    "Expected missing TPM: {evidence}"
-                );
-            }
+            ensure!(
+                evidence["pcr15_initial"].is_null(),
+                "Required TPM rejection unexpectedly has readiness evidence: {evidence}"
+            );
             fs::write(run.join("tpm-rejected.json"), record)?;
             ensure!(
                 vm::ssh(
@@ -140,16 +125,18 @@ pub fn run(
         if matches!(expected, Some(TpmExpected::Ready)) {
             ensure!(
                 evidence["tpm"]["state"] == "ready"
-                    && evidence["tpm"]["srk_ready"] == true
-                    && evidence["tpm"]["enter_initrd_measured"] == true,
-                "TPM/NvPCR readiness failed: {}",
+                    && evidence["tpm"]["pcr15_initial"]
+                        .as_str()
+                        .is_some_and(|value| value.len() == 64),
+                "TPM PCR-read readiness failed: {}",
                 evidence["tpm"]
             );
             let log = vm::ssh(
                 run,
-                "cat /run/zbm-rs/tpm.json; cat /run/zbm-rs/tpm-setup.log; cat /run/log/systemd/tpm2-measure.log",
+                "cat /run/zbm-rs/tpm.json; test ! -e /run/log/systemd/tpm2-measure.log",
             )?;
             fs::write(run.join("tpm-startup.txt"), log)?;
+            assert_no_tpm_setup(run, "startup")?;
             fs::write(
                 run.join("tpm-firmware.bin"),
                 vm::ssh_bytes(
@@ -313,6 +300,14 @@ pub fn run(
             vm::ssh(run, "test -f /run/zbm-rs/manager.pid")?;
             Ok(())
         })?;
+        if matches!(expected, Some(TpmExpected::Ready)) {
+            assert_no_tpm_setup(run, "after-recovery")?;
+            ensure!(
+                vm::ssh(run, "cat /sys/class/tpm/tpm0/pcr-sha256/11")?.trim()
+                    == fs::read_to_string(run.join("tpm-pcr11.txt"))?.trim(),
+                "Loader advanced PCR11 during verification or manager recovery"
+            );
+        }
         let old_id = vm::ssh(run, "cat /proc/sys/kernel/random/boot_id")?;
         // Successful kexec intentionally closes the SSH transport.
         let handoff = vm::ssh(
@@ -362,4 +357,27 @@ pub fn run(
     // OwnedVm reaps on success, failure, panic and interruption.
     std::thread::sleep(Duration::from_millis(10));
     result
+}
+
+/// All queries use the disposable guest's explicitly selected resource manager.
+/// Empty NV/persistent handles prove the loader did not allocate NvPCRs or an SRK.
+pub(crate) fn assert_no_tpm_setup(run: &Path, stage: &str) -> Result<()> {
+    vm::ssh(
+        run,
+        "test ! -e /usr/lib/systemd/systemd-tpm2-setup && test ! -e /etc/nvpcr && test ! -e /run/systemd/nvpcr && test ! -e /run/systemd/tpm2-srk-public-key.pem",
+    )?;
+    for capability in ["handles-nv-index", "handles-persistent"] {
+        let handles = vm::ssh(
+            run,
+            &format!(
+                "LD_LIBRARY_PATH=/usr/lib /usr/bin/tpm2_getcap -T device:/dev/tpmrm0 {capability}"
+            ),
+        )?;
+        fs::write(run.join(format!("tpm-{stage}-{capability}.txt")), &handles)?;
+        ensure!(
+            handles.trim().is_empty(),
+            "Loader allocated TPM handles: {handles}"
+        );
+    }
+    Ok(())
 }

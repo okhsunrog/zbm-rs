@@ -9,14 +9,12 @@ use std::{
 };
 
 const EXTEND: &str = "/usr/lib/systemd/systemd-pcrextend";
-const SETUP: &str = "/usr/lib/systemd/systemd-tpm2-setup";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Evidence {
     pub state: &'static str,
-    pub srk_ready: bool,
-    pub enter_initrd_measured: bool,
-    pub initialized_nvpcrs: Vec<String>,
+    /// Read-only readiness probe; PCR11 phases, SRK and NvPCR belong to the OS.
+    pub pcr15_initial: Option<String>,
     pub errors: Vec<String>,
 }
 
@@ -31,8 +29,8 @@ fn helper(program: &str, args: &[&str], name: &str) -> io::Result<bool> {
         .env("LD_LIBRARY_PATH", "/usr/lib")
         .env("SYSTEMD_LOG_TARGET", "console")
         // Explicit image policy requests measurement even when firmware cannot
-        // expose the stub variable. This does not assert that the UKI was measured;
-        // the signed PCR policy must independently authorize the actual PCR state.
+        // expose the stub variable. This override does not prove UKI measurement
+        // or attestation; it only permits the explicit prepared-target extend.
         .env("SYSTEMD_FORCE_MEASURE", "1")
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
@@ -62,9 +60,7 @@ fn helper(program: &str, args: &[&str], name: &str) -> io::Result<bool> {
 pub fn prepare(config: &Tpm) -> io::Result<Evidence> {
     let mut evidence = Evidence {
         state: "disabled",
-        srk_ready: false,
-        enter_initrd_measured: false,
-        initialized_nvpcrs: Vec::new(),
+        pcr15_initial: None,
         errors: Vec::new(),
     };
     if config.policy == MeasurementPolicy::Off {
@@ -79,82 +75,26 @@ pub fn prepare(config: &Tpm) -> io::Result<Evidence> {
             .errors
             .push("TPM2 resource manager device is unavailable".into());
     } else {
-        let phase = helper(
-            EXTEND,
-            &[
-                "--bank=sha256",
-                "--pcr=11",
-                "--tpm2-device=/dev/tpmrm0",
-                "enter-initrd",
-            ],
-            "enter-initrd",
-        );
-        evidence.enter_initrd_measured = matches!(phase, Ok(true));
-        if !matches!(phase, Ok(true)) {
-            evidence
-                .errors
-                .push(format!("Cannot measure enter-initrd: {phase:?}"));
-        }
-        let setup = helper(
-            SETUP,
-            &["--early=yes", "--tpm2-device=/dev/tpmrm0"],
-            "setup",
-        );
-        evidence.srk_ready = Path::new("/run/systemd/tpm2-srk-public-key.pem").is_file();
-        if !matches!(setup, Ok(true)) || !evidence.srk_ready {
-            evidence.errors.push(format!(
-                "TPM setup reported failure: {setup:?}; SRK ready: {}",
-                evidence.srk_ready
-            ));
-        }
-        for name in &config.nvpcrs {
-            let auth = fs::read_to_string(format!("/run/systemd/nvpcr/{name}.auth"));
-            if auth.is_ok_and(|value| {
-                value.trim().len() == 64
-                    && value.trim().bytes().all(|byte| byte.is_ascii_hexdigit())
-            }) {
-                evidence.initialized_nvpcrs.push(name.clone());
-            } else {
+        // Reading this sysfs attribute performs TPM PCR_Read. Do not create a
+        // persistent SRK, allocate NV indices or advance the OS's PCR11 phases.
+        match fs::read_to_string("/sys/class/tpm/tpm0/pcr-sha256/15") {
+            Ok(value)
+                if value.trim().len() == 64
+                    && value.trim().bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+            {
+                evidence.pcr15_initial = Some(value.trim().to_ascii_lowercase());
+                evidence.state = "ready";
+            }
+            result => {
+                evidence.state = "degraded";
                 evidence
                     .errors
-                    .push(format!("Selected NvPCR '{name}' could not be initialized"));
+                    .push(format!("Cannot read SHA-256 PCR15: {result:?}"));
             }
         }
-        if evidence
-            .initialized_nvpcrs
-            .iter()
-            .any(|name| name == "hardware")
-            && !matches!(
-                helper(
-                    EXTEND,
-                    &["--tpm2-device=/dev/tpmrm0", "--product-id"],
-                    "hardware"
-                ),
-                Ok(true)
-            )
-        {
-            evidence
-                .errors
-                .push("Hardware identity measurement failed".into());
-            evidence
-                .initialized_nvpcrs
-                .retain(|name| name != "hardware");
-        }
-        evidence.state = if evidence.errors.is_empty() {
-            "ready"
-        } else {
-            "degraded"
-        };
     }
-    let required_nv_missing = config
-        .required_nvpcrs
-        .iter()
-        .any(|name| !evidence.initialized_nvpcrs.contains(name));
     fs::write("/run/zbm-rs/tpm.json", serde_json::to_vec(&evidence)?)?;
-    if required_nv_missing
-        || (config.policy == MeasurementPolicy::Required
-            && (!evidence.srk_ready || !evidence.enter_initrd_measured))
-    {
+    if config.policy == MeasurementPolicy::Required && evidence.pcr15_initial.is_none() {
         return Err(io::Error::other(format!(
             "Required TPM capability failed: {}",
             evidence.errors.join("; ")

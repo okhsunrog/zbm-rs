@@ -4,7 +4,7 @@
 , extraModules ? [], forcedModules ? [], loaderConfig ? null
 , kernelPolicy ? "validate", kernelTrustedCertificates ? []
 , targetAuthorities ? [], imaCertificate ? null
-, pcrPublicKey ? null, tpmProvider ? (import ./tpm-provider.nix { inherit pkgs; })
+, tpmProvider ? pkgs.systemd
 , initramfsCompression ? "zstd", rustProfile ? {}
 , udevPackage ? (import ./lean-userspace.nix { pkgs = runtimePkgs; }).udev }:
 let
@@ -16,14 +16,12 @@ let
   enforced = (security.mode or "off") == "enforce";
   tpmConfig = security.tpm or {};
   tpmEnabled = (tpmConfig.policy or "off") != "off";
-  nvpcrs = tpmConfig.nvpcrs or [];
   publicInput = path:
     let content = builtins.readFile path;
     in assert lib.assertMsg (builtins.stringLength content <= 65536 && !(lib.hasInfix "PRIVATE KEY" content))
       "Trust inputs must be bounded public certificates/keys, never private keys";
     path;
   publicImaCertificate = if imaCertificate == null then null else publicInput imaCertificate;
-  publicPcrKey = if pcrPublicKey == null then null else publicInput pcrPublicKey;
   selectedKernelPackages = if enforced && kernelPolicy == "configure" then
     import ./security-kernel.nix { inherit pkgs kernelPackages;
       trustedCertificates = map publicInput kernelTrustedCertificates; }
@@ -110,7 +108,6 @@ let
     { source = "${runtimePkgs.openssh}/libexec/sshd-session"; }
     { source = "${runtimePkgs.openssh}/libexec/sshd-auth"; }
   ] ++ lib.optionals tpmEnabled [
-    { source = "${tpmProvider}/lib/systemd/systemd-tpm2-setup"; target = "/usr/lib/systemd/systemd-tpm2-setup"; }
     { source = "${tpmProvider}/lib/systemd/systemd-pcrextend"; target = "/usr/lib/systemd/systemd-pcrextend"; }
     # systemd loads TSS libraries dynamically; DT_NEEDED scanning alone misses them.
     { source = "${lib.getLib pkgs.tpm2-tss}/lib/libtss2-esys.so.0"; link = "/usr/lib/libtss2-esys.so.0"; }
@@ -119,6 +116,10 @@ let
     { source = "${lib.getLib pkgs.tpm2-tss}/lib/libtss2-tcti-device.so.0"; link = "/usr/lib/libtss2-tcti-device.so.0"; }
     { source = "${lib.getLib pkgs.tpm2-tss}/lib/libtss2-tctildr.so.0"; link = "/usr/lib/libtss2-tctildr.so.0"; }
     { source = "${lib.getLib pkgs.openssl}/lib/libcrypto.so.3"; link = "/usr/lib/libcrypto.so.3"; }
+  ] ++ lib.optionals (testProfile && tpmEnabled) [
+    # Read-only NV/persistent handle observations belong to the VM test transport.
+    # Stage the ELF, not its Nix shell wrapper; dispatch uses argv[0].
+    { source = "${pkgs.tpm2-tools}/bin/.tpm2-wrapped"; target = "/usr/bin/tpm2_getcap"; }
   ];
   setup = pkgs.writeText "setup.sh" (lib.replaceStrings
     [ "# NIX_FORCED_MODULES" ]
@@ -139,19 +140,6 @@ let
     cp ${setup} root/etc/zbm-rs/setup.sh
     ${lib.optionalString tpmEnabled ''
       printf 'ID=zbm-rs\n' > root/etc/initrd-release
-      mkdir -p root/etc/nvpcr
-    ''}
-    ${lib.concatMapStringsSep "\n" (name: ''
-      uv run --offline --no-project --python ${pkgs.python3}/bin/python - \
-        ${tpmProvider}/lib/nvpcr/${name}.nvpcr root/etc/nvpcr/${name}.nvpcr ${name} <<'PY'
-    import json, sys
-    definition = json.load(open(sys.argv[1]))
-    definition["priority"] = {"hardware": 100, "cryptsetup": 200, "login": 300, "verity": 800}[sys.argv[3]]
-    json.dump(definition, open(sys.argv[2], "w"))
-    PY
-    '') nvpcrs}
-    ${lib.optionalString (pcrPublicKey != null) ''
-      install -Dm444 ${publicPcrKey} root/etc/systemd/tpm2-pcr-public-key.pem
     ''}
     install -Dm444 ${configJson} root${configJson}
     ln -s ${configJson} root/etc/zbm-rs/config.json
@@ -221,9 +209,6 @@ let
       cp ${pkgs.systemd}/lib/systemd/boot/efi/linuxx64.efi.stub $out/stub.efi
       cp ${osRelease} $out/os-release
     ''}
-    ${lib.optionalString (pcrPublicKey != null) ''
-      cp ${publicPcrKey} $out/pcr-public.pem
-    ''}
     echo ${lib.escapeShellArg cmdline} > $out/cmdline
     ukify build --linux $out/vmlinuz --initrd $out/initramfs.img \
       --uname ${lib.escapeShellArg kernel.modDirVersion} --cmdline @${pkgs.writeText "cmdline" cmdline} \
@@ -243,7 +228,6 @@ assert lib.assertMsg (builtins.elem initramfsCompression [ "gzip" "xz" "zstd" ])
 assert lib.assertMsg (builtins.elem profile [ "portable" "host-only" ]) "Unknown image profile";
 assert lib.assertMsg (builtins.elem kernelPolicy [ "validate" "configure" ]) "Unknown loader kernel policy";
 assert lib.assertMsg (!enforced || (targetAuthorities != [] && imaCertificate != null)) "Enforced image needs public authorization and IMA certificates";
-assert lib.assertMsg (nvpcrs == [] || (tpmEnabled && pcrPublicKey != null)) "NvPCR setup needs a public PCR policy key";
 assert lib.assertMsg (!tpmEnabled || runtimeLibc == "glibc") "Current TPM provider requires the glibc userspace profile";
 assert lib.assertMsg (profile != "host-only" || hardwareManifest != null || extraModules != [] || forcedModules != []) "Host-only requires an explicit manifest or NixOS module lists";
 assert lib.assertMsg (zfsModule.kernel.modDirVersion == kernel.modDirVersion) "ZFS kernel module ABI mismatch";

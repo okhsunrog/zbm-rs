@@ -72,15 +72,21 @@ mod tests {
     }
 
     #[test]
-    fn enforced_configuration_requires_trust_and_valid_tpm_selection() {
+    fn enforced_configuration_requires_trust_and_valid_tpm_policy() {
         assert!(parse(r#"{"security":{"mode":"enforce"}}"#).is_err());
         assert!(parse(r#"{"security":{"require_firmware_secure_boot":true}}"#).is_err());
-        let valid = r#"{"security":{"mode":"enforce","target_authorities":["/etc/zbm-rs/trust/owner.pem"],"ima_certificate":"/etc/zbm-rs/trust/ima.der","tpm":{"policy":"optional","nvpcrs":["hardware","login"],"required_nvpcrs":["hardware"]}}}"#;
+        let valid = r#"{"security":{"mode":"enforce","target_authorities":["/etc/zbm-rs/trust/owner.pem"],"ima_certificate":"/etc/zbm-rs/trust/ima.der","tpm":{"policy":"optional"}}}"#;
         assert!(parse(valid).is_ok());
         assert!(parse(&valid.replace("owner.pem", "../owner.pem")).is_err());
-        assert!(
-            parse(&valid.replace("\"hardware\",\"login\"", "\"hardware\",\"hardware\"")).is_err()
-        );
-        assert!(parse(&valid.replace("\"optional\"", "\"off\"")).is_err());
+        for policy in ["off", "optional", "required"] {
+            assert!(parse(&valid.replace("optional", policy)).is_ok());
+        }
+        assert!(parse(&valid.replace("optional", "unsupported")).is_err());
+        // Removed loader-owned NvPCR settings must fail explicitly, never be ignored.
+        for field in ["nvpcrs", "required_nvpcrs"] {
+            let mut value: serde_json::Value = serde_json::from_str(valid).unwrap();
+            value["security"]["tpm"][field] = serde_json::json!([]);
+            assert!(parse(&value.to_string()).is_err());
+        }
     }
 }

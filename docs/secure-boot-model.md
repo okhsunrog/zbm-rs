@@ -52,10 +52,11 @@ bad IMA signatures, altered CMS/content/arguments and legacy kexec are rejected.
 Real NixOS ZFS-root and authorized snapshot-clone boot also pass through the menu
 and privileged broker. Generic-Linux, encrypted-root and physical acceptance are
 still pending; the selected root's ordinary runtime integrity is not authenticated.
-TPM startup and target-prepared measurements are implemented with a separate v262
-provider. Initial swtpm acceptance covers successful setup/PCR replay, missing or
-invalid signed policy, required missing TPM and optional degradation/unavailability;
-scarcity, stale-index and interrupted-setup cases remain pending. All published default images
+TPM startup is read-only; verified prepared-target measurements use PCR15.
+SRK/NvPCR setup and PCR11 OS phases belong to the selected OS initramfs. The
+persistent swtpm harness checks PCR replay and no loader NV/persistent allocation;
+OS policy integration, across-kexec log transport and physical acceptance remain
+pending. All published default images
 remain `off`; do not install this work as a verified production loader yet.
 
 The executor uses `kexec_file_load` exclusively and does not silently fall back to
@@ -370,51 +371,60 @@ must reproduce instead of relying on unsigned boot success:
   provider must be explicit, DMI-scoped, signed for the selected loader kernel,
   and run before firmware evidence or TPM/EFI-dependent setup. Never change keys,
   clear the TPM or relax verification automatically after an enumeration failure.
-- TPM NV space is limited. Ordinary TPM2/SRK operations can work while one NvPCR
-  allocation fails. Select only needed NvPCRs and allocate in declared priority
-  order; do not reserve every hardware/login/cryptsetup/verity index by default.
-  Required capabilities block handoff on failure; optional failures are reported
-  without weakening target authorization or reallocating unrelated owner indices.
+- TPM NV space is limited. The installed OS chooses and initializes its NvPCRs
+  using its own policy and priorities. The loader never allocates NV indices,
+  creates a persistent SRK or reserves hardware/login/cryptsetup/verity indices.
+  Ordinary TPM availability and verified boot remain separate capabilities.
 
-TPM support is now an active implementation requirement. It includes ordinary
-TPM2 capability evidence, measured loader/target transitions and optional native
-NvPCR integration with an owner-signed PCR policy. It does not unlock ZFS. Normal
-PCRs and NvPCRs have separate purposes; a corporate TPM consumer must not be
-assumed to need NvPCRs merely because it uses TPM2. The profile selects actual
-capabilities rather than exposing a single switch promising everything.
+TPM support includes a read-only TPM2 readiness probe and measurement of the
+verified prepared target. The immutable `security.tpm.policy` is `off`, `optional`
+or `required`. An enabled profile reads SHA-256 PCR15 through the kernel's TPM
+sysfs interface; `required` refuses startup if this probe fails, and refuses a
+prepared handoff if its PCR15 extend fails. Optional failures produce diagnostic
+evidence without relaxing kernel, initramfs or BootAuthorization verification.
+The loader does not unlock ZFS or claim remote attestation or rollback resistance.
 
 Keep distinct public/private key roles for firmware enrollment/EFI signing,
-target-kernel and module signatures, IMA files/policy, BootAuthorization and PCR
-policy authorization. A signed PCR policy approves measured states for a TPM
-operation; it neither signs boot artifacts nor overrides failed verification.
-Owner keys stay outside Nix. Public keys and signed policies may be packaged;
-production key material is never reused in disposable TPM/OVMF fixtures.
+target-kernel and module signatures, IMA files/policy and BootAuthorization.
+Installed-OS signed PCR policies are a separate owner-managed integration: they
+authorize TPM operations, not boot artifacts. Owner private keys stay outside Nix.
 
-The loader UKI runs through systemd-stub once. `kexec_file_load` does not run the
-target EFI stub again or automatically transfer its `.pcrsig`, `.pcrpkey` and
-`.extra` resources. PCR11 loader-image/phase measurements alone do not identify
-the selected OS kernel/initramfs/arguments. Kernel-side kexec/IMA measurements,
-explicit selected-target events and target initialization need a defined event
-log/handoff contract. Phase ordering across the two initrds must match signed
-policy; never assume a policy for one `enter-initrd` applies after a loader phase
-transition and another initrd. A snapshot root must be represented by the actual
-final plan without treating an unrestricted dataset name as authenticated state.
+The loader UKI runs through systemd-stub once and is measured in PCR11 by the
+stub. The loader does not extend `enter-initrd`, `leave-initrd` or any other OS
+phase in PCR11. Its value is therefore left at the loader UKI measurement until
+the selected OS initramfs starts its own phase sequence. PCR11 alone does not
+identify the selected OS kernel/initramfs/arguments.
 
-Before completing the profile, test PCR replay and signed-policy authorization
-with swtpm under real OVMF measured boot, including firmware off/unknown, no TPM,
-full NV space, stale indices and interrupted setup. The exact target-event PCR,
-log transport and target-initrd policy integration remain implementation work;
-there is no remote attestation or rollback-resistance claim from diagnostic logs.
+After native verified input loading succeeds, zbm-rs records the exact final
+verified artifact evidence and ordered arguments, including the selected root,
+in `/run/zbm-rs/tpm-target.json`. A bounded `systemd-pcrextend` helper extends
+SHA-256 PCR15 with `zbm-rs:target-prepared:v1:<sha256-of-record>`. It comes from the
+ordinary Nix systemd package; no v262-specific setup provider or service manager
+runs beneath PID1. The event records a prepared attempt, not successful OS execution.
 
-The implemented provider is systemd v262, built separately from host systemd.
-The earlier v261 anchor-secret NvPCR API is deliberately not a fallback. Startup
-extends `enter-initrd` in PCR11, then initializes selected NvPCRs with an
-owner-signed policy using `policyref=initrd`. Only afterward does it measure the
-SMBIOS product identity into a selected hardware NvPCR. Priorities allocate
-hardware, cryptsetup, login, then verity. Initializing login/cryptsetup/verity
-does not imply that those installed-OS consumers are integrated. Required
-capabilities stop startup on failure; optional failures produce degraded evidence.
-No helper clears the TPM or requests automatic deletion of foreign indices.
+Kexec preserves TPM PCR/NV state but does not execute the target EFI stub or
+transfer `/.extra` resources automatically. The target initramfs owns SRK, NvPCR
+initialization, its PCR11 phases and subsequent OS measurements. For a target
+using signed-policy NvPCRs, owner tooling must package the public policy key and
+signature in that target initramfs and authorize the actual loader UKI plus the
+OS's phase sequence. Updating the loader requires updating that policy as well.
+The loader publisher does not produce or embed `.pcrpkey`/`.pcrsig`; old
+loader-owned NvPCR options fail explicitly. No NvPCR initialization metadata is
+created in the loader or needs transfer across kexec.
+
+The loader's userspace PCR15 event log still needs a defined transport into the
+selected OS initramfs for later replay/attestation. This is separate from NvPCR
+setup and remains implementation work; the current harness replays captured logs
+before handoff. A signed target initramfs is never rewritten at boot to carry
+mutable logs. Kernel-side IMA log preservation is a separate kernel capability.
+
+The persistent swtpm scenario verifies firmware PCR11 replay without loader phase
+extensions, exact prepared-plan PCR15 replay, no loader NV/persistent allocation,
+required missing TPM refusal and optional absence without weaker boot-input checks.
+The installed-OS fixture keeps its native TPM services and NvPCR definitions;
+loader startup must not create a conflicting NV policy or require target masks.
+Target-specific signed NvPCR policy/consumer acceptance, event-log transport and
+physical Framework acceptance remain separate work.
 
 ## User-visible evidence
 
@@ -439,8 +449,8 @@ The following are not required for the initial enforced image:
 - Owner-authenticated administrative shell/recovery and optional development-image
   packaging, without production-signing a bypass.
 - Authenticated automatic ZFS unlock and rollback-resistant state. TPM measured
-  boot and NvPCR support are active work above; measurements/PCR logs alone are
-  not attestation. Reading encrypted boot inputs still requires explicit normal
+  boot is active work above; installed-OS NvPCRs remain OS-owned. Measurements
+  and PCR logs alone are not attestation. Reading encrypted boot inputs still requires explicit normal
   passphrase unlock, which must not authorize administrative recovery.
 - Whole-root integrity policy, target-wide IMA appraisal, and shim/MOK support.
 

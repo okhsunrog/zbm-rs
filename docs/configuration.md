@@ -55,9 +55,7 @@ Missing or invalid explicit files fail instead of silently choosing defaults.
 | security.require_firmware_secure_boot | false | enforced mode only; enabled firmware must be positively observed |
 | security.target_authorities | [] | <=32 image-owned public certificate paths; nonempty for enforce |
 | security.ima_certificate | null | image-owned public DER certificate path; required for enforce |
-| security.tpm.policy | off | off/optional/required; required SRK and ordinary measurement failures stop startup/handoff |
-| security.tpm.nvpcrs | [] | hardware/login/cryptsetup/verity allocation; <=4, no duplicates; initialization is not automatic use by the installed OS |
-| security.tpm.required_nvpcrs | [] | required subset; failed required allocation/initial hardware measurement stops startup |
+| security.tpm.policy | off | off/optional/required; required TPM2/PCR15 read or prepared-target extend failures stop startup/handoff |
 
 A threshold of 2 restarts on the first rapid failure and enters recovery on the
 second. Values 0 and 1 enter recovery on the first failure. Controlled restarts
@@ -104,16 +102,16 @@ All paths below are relative to `programs.zbm-rs`:
 | `image.kernelPackages` | Module defaults to `boot.kernelPackages` | Explicit loader kernel/ZFS package set; independent override does not change the host kernel. |
 | `image.kernelTrustedCertificates` | Public certificate list, sufficient for selected policy | Required target-kernel/module/IMA certificate trust; validate actual kernel integration. |
 | `image.imaCertificate` | Public certificate required for initial `enforce` profile | Authenticated certificate used for target-initramfs appraisal. |
-| `settings.security.tpm.policy` | `off`; `optional` or `required` | Separate TPM availability/measurement policy; never weakens verified boot. |
-| `settings.security.tpm.nvpcrs` | `[]` | Allocate only selected hardware/login/cryptsetup/verity NvPCRs. |
-| `settings.security.tpm.requiredNvpcrs` | `[]`; subset of selection | Refuse startup when one of these capabilities fails. |
-| `image.pcrPublicKey` | Public PEM key when NvPCRs are selected | Authorizes initializing writes using an owner-signed PCR11 policy. |
+| `settings.security.tpm.policy` | `off`; `optional` or `required` | Read-only TPM2/PCR15 readiness and prepared-target measurement policy; never weakens verified boot. |
 
-The last four are build inputs, not arbitrary boot-time overrides. Nix certificate
-paths are materialized as public trust-store resources; runtime JSON uses packaged
+All these settings are immutable image inputs, not arbitrary boot-time overrides.
+Nix certificate paths are materialized as public trust-store resources; runtime JSON uses packaged
 paths/identities and snake_case names such as `security.target_authorities`.
 No production private key is a Nix option/path input or stored in that JSON.
-The exact serialized authority representation will be finalized with the verifier.
+TPM policy does not initialize SRK or NvPCRs or extend PCR11 phases. The selected
+OS initramfs owns these operations. Former loader options `settings.security.tpm.nvpcrs`,
+`settings.security.tpm.requiredNvpcrs` and `image.pcrPublicKey` are removed; old configurations must
+be updated and rebuilt, rather than silently retaining or ignoring those settings.
 
 Example (public certificates and their signing-chain trust must match):
 
@@ -145,9 +143,8 @@ to true additionally refuses that handoff. Missing checks, invalid configuration
 or unknown firmware state never silently select `off`.
 
 `ima-signing.pem` is a non-CA leaf with digitalSignature usage, issued by the
-embedded `ima-ca.pem` trust. `image.pcrPublicKey` is an ordinary public key PEM,
-not an X.509 certificate. Its private half is supplied only to the owner publisher,
-which adds the signed PCR policy before EFI signing. The current TPM provider
+embedded `ima-ca.pem` trust. The PCR15 measurement helper uses the ordinary Nix
+systemd package; no separate v262 setup provider is needed. This helper currently
 supports the glibc image profile; TPM-enabled musl packaging is rejected explicitly.
 See [owner signing and TPM tests](security-testing.md).
 

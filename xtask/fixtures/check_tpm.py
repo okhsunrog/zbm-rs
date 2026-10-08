@@ -51,8 +51,7 @@ def extend(value, digest):
     return hashlib.sha256(value + digest).digest()
 
 
-def main():
-    run = Path(sys.argv[1])
+def verify(run):
     pcr11 = bytes(32)
     events = list(firmware_events((run / "tpm-firmware.bin").read_bytes()))
     if not events:
@@ -61,35 +60,33 @@ def main():
         pcr11 = extend(pcr11, digest)
     pcr15 = bytes.fromhex((run / "tpm-pcr15-initial.txt").read_text().strip())
     prepared = []
-    phase_count = 0
     for record in (run / "tpm-userspace.jsonseq").read_text().split("\x1e"):
         if not record.strip():
             continue
         event = json.loads(record)
         pcr = event.get("pcr")
-        if pcr not in (11, 15):
-            continue
+        if pcr != 15:
+            raise ValueError("Loader must not extend PCR11 phases or NvPCRs")
         word = event["content"]["string"]
         digests = [d["digest"] for d in event["digests"] if d["hashAlg"] == "sha256"]
         if len(digests) != 1 or digests[0] != hashlib.sha256(word.encode()).hexdigest():
             raise ValueError("Event digest differs from recorded measurement")
         digest = bytes.fromhex(digests[0])
-        if pcr == 11:
-            if word != "enter-initrd":
-                raise ValueError("Unexpected loader phase")
-            phase_count += 1
-            pcr11 = extend(pcr11, digest)
-        else:
-            prepared.append(word)
-            pcr15 = extend(pcr15, digest)
-    if phase_count != 1 or pcr11.hex() != (run / "tpm-pcr11.txt").read_text().strip().lower():
-        raise ValueError("PCR11 does not replay from measured UKI and enter-initrd")
+        prepared.append(word)
+        pcr15 = extend(pcr15, digest)
+    if pcr11.hex() != (run / "tpm-pcr11.txt").read_text().strip().lower():
+        raise ValueError("PCR11 differs from measured UKI without loader phases")
     target = (run / "tpm-target.json").read_bytes()
     expected = "zbm-rs:target-prepared:v1:" + hashlib.sha256(target).hexdigest()
     if prepared != [expected] or pcr15.hex() != (run / "tpm-pcr15-prepared.txt").read_text().strip().lower():
         raise ValueError("PCR15 does not replay from the exact verified final plan")
-    print(json.dumps({"passed": True, "firmware_pcr11_events": len(events),
-                      "pcr11": pcr11.hex(), "pcr15": pcr15.hex(), "target_event": expected}))
+    return {"passed": True, "firmware_pcr11_events": len(events),
+            "loader_pcr11_events": 0, "pcr11": pcr11.hex(),
+            "pcr15": pcr15.hex(), "target_event": expected}
+
+
+def main():
+    print(json.dumps(verify(Path(sys.argv[1]))))
 
 
 if __name__ == "__main__":

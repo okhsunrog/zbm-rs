@@ -88,9 +88,6 @@ pub struct Security {
 #[serde(default, deny_unknown_fields)]
 pub struct Tpm {
     pub policy: MeasurementPolicy,
-    /// NvPCR allocation is independent of ordinary PCR measurements.
-    pub nvpcrs: Vec<String>,
-    pub required_nvpcrs: Vec<String>,
 }
 impl Default for Nixos {
     fn default() -> Self {
@@ -163,35 +160,6 @@ impl Security {
         }
         if self.require_firmware_secure_boot && self.mode != SecurityMode::Enforce {
             return Err("firmware Secure Boot requirement needs security.mode=enforce".into());
-        }
-        if self.tpm.nvpcrs.len() > 4
-            || self.tpm.required_nvpcrs.len() > 4
-            || self
-                .tpm
-                .nvpcrs
-                .iter()
-                .any(|n| !matches!(n.as_str(), "hardware" | "login" | "cryptsetup" | "verity"))
-            || self
-                .tpm
-                .required_nvpcrs
-                .iter()
-                .any(|n| !self.tpm.nvpcrs.contains(n))
-        {
-            return Err(
-                "security.tpm NvPCRs must be supported names; required names must be selected"
-                    .into(),
-            );
-        }
-        for names in [&self.tpm.nvpcrs, &self.tpm.required_nvpcrs] {
-            let mut unique = std::collections::BTreeSet::new();
-            if names.iter().any(|n| !unique.insert(n)) {
-                return Err("security.tpm NvPCR names must be unique".into());
-            }
-        }
-        if self.tpm.policy == MeasurementPolicy::Off
-            && (!self.tpm.nvpcrs.is_empty() || !self.tpm.required_nvpcrs.is_empty())
-        {
-            return Err("security.tpm NvPCRs require enabled measurements".into());
         }
         Ok(())
     }

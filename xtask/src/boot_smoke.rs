@@ -68,6 +68,7 @@ pub fn run(run: &Path, image: &Path, fixture: &Path, options: Options<'_>) -> Re
                     evidence["tpm"]["state"] == "ready",
                     "TPM not ready: {evidence}"
                 );
+                crate::security_smoke::assert_no_tpm_setup(run, "startup")?;
             }
             fs::write(run.join("security-readiness.json"), readiness)?;
         }

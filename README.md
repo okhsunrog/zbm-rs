@@ -200,10 +200,12 @@ Read [the complete design](docs/secure-boot-model.md),
 [configuration](docs/configuration.md#secure-boot-configuration),
 [acceptance requirements](docs/verification.md#planned-secure-boot-acceptance) and
 [implementation roadmap](docs/roadmap.md). The JSON schema accepts the documented
-foundation fields and corresponding Nix module options. TPM integration uses a
-separate v262 provider with signed PCR policies; its complete acceptance matrix
-is still in progress. Initial swtpm success/PCR replay, bad/missing policy,
-required missing TPM and optional degradation tests pass. See
+foundation fields and corresponding Nix module options. TPM startup is a read-only
+TPM2/PCR15 probe; the loader measures the exact verified prepared target in PCR15.
+SRK, NvPCR initialization and PCR11 OS phases belong to the selected OS initramfs.
+The loader does not allocate NV indices or create persistent TPM objects. Captured
+PCR replay, required missing TPM and optional absence are covered by swtpm;
+across-kexec log transport and physical acceptance remain pending. See
 [owner signing and test workflow](docs/security-testing.md).
 
 ## Build

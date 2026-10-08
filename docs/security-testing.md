@@ -43,32 +43,21 @@ explicitly pass `--allow-fixture`; `--fixture-directory` additionally inserts
 synthetic target inputs. Such an image is never a production recovery image.
 Private fixture signing keys remain outside the guest and Git.
 
-## Signed PCR policy
+## TPM ownership
 
-NvPCR selection requires `image.pcrPublicKey`. Publishing that image additionally
-requires `--pcr-key /private/pcr.key --systemd-measure /v262/lib/systemd/systemd-measure`.
-The publisher checks the key's derived public half against the packaged public
-key. It signs SHA-256 PCR11 policy for `enter-initrd` with `policyref=initrd`.
+The loader publisher signs boot artifacts and IMA policy. It does not sign or
+embed an NvPCR initialization policy and does not require a PCR signing key.
+Images built with the former loader-owned `image.pcrPublicKey` option must be
+rebuilt; the publisher rejects obsolete images containing `pcr-public.pem`.
 
-Order matters:
-
-1. Sign the IMA policy and all modules, then create the final compressed initramfs.
-2. Build the UKI with its `.pcrpkey` public key.
-3. Read the exact measured PE section bytes, including text termination and `.sbat`.
-4. Calculate and sign their PCR11 state plus `enter-initrd`.
-5. Add the unmeasured `.pcrsig` and verify that measured sections stayed identical.
-6. Sign and verify the complete EFI image.
-
-Putting `.pcrsig` into the measured initramfs would introduce a circular dependency.
-systemd-stub supplies it in the additional `/.extra` initramfs instead. Private
-PCR keys never enter the UKI. The v262 provider initializes selected NvPCRs using
-PolicyAuthorize; no legacy anchor-secret fallback is provided. This policy
-authorizes a TPM operation and does not replace boot-input verification.
-
-`ukify --join-pcrsig` fills an existing policy-digest section. It does not create
-that section when absent, even if the command succeeds. The publisher builds a
-fresh `.pcrsig` section and verifies its JSON plus unchanged measured sections.
-The initial missing-section failure is preserved in `verified-tpm-001`.
+TPM-enabled loader startup reads SHA-256 PCR15 through sysfs. It creates no
+persistent SRK/NV indices and leaves PCR11 at the systemd-stub UKI measurement.
+Only the verified target-prepared event extends PCR15, using the ordinary Nix
+systemd `systemd-pcrextend` helper. The selected OS owns SRK/NvPCR initialization
+and all PCR11 OS phase events. If it uses signed-policy NvPCRs, its owner must
+package the policy/public key in its own initramfs and authorize the actual loader
+UKI plus the OS's phase sequence; the target EFI stub is not rerun by kexec.
+No production private keys enter Nix or either initramfs.
 
 ## Persistent scenario
 
@@ -98,24 +87,27 @@ The scenario checks actual firmware Secure Boot, signed IMA readiness, native
 kernel/initramfs acceptance and rejection, exact CMS/argument/content checks,
 legacy-kexec refusal, zero UI capabilities and IDs 65534, shell refusal, protected
 crash recovery and a real second-kernel handoff. The optional swtpm path checks
-TPM/NvPCR readiness and the target-prepared PCR15 event. Startup and prepared
+read-only TPM readiness and the target-prepared PCR15 event. Startup and prepared
 measurement logs are retained; the prepared event is not an execution proof.
 Guest TPM state lives in the fresh sibling `<run>.tpm` directory.
 
 TPM-enabled scenarios capture the real firmware event log, systemd userspace
 event log, exact prepared-plan JSON and SHA-256 PCR11/PCR15 values. The independent
 `xtask/fixtures/check_tpm.py` replays the logs against those actual PCRs and checks
-the prepared event's digest against the exact final plan. A single `enter-initrd`
-event is required even after manager crash/restart. The VM test transport waits
-for NIC/SSH readiness separately from visible recovery or manager readiness.
+the prepared event's digest against the exact final plan. No loader PCR11 phase
+event is permitted, including after manager crash/restart. Read-only `tpm2_getcap`
+queries on the disposable guest explicitly use `/dev/tpmrm0` and require empty
+NV/persistent handle lists before loading and after protected recovery. The
+setup helper, NvPCR definitions and initialization files must be absent. The VM
+test transport waits for NIC/SSH readiness separately from visible recovery or
+manager readiness.
 
-`xtask/fixtures/tpm_policy.py` creates explicitly disposable, EFI-signed negative
-images with absent or invalid PCR policy while preserving every measured input.
-Use `secure-smoke --expect-tpm rejected` for required-profile failures;
-`--expect-tpm unavailable` and `--expect-tpm degraded` exercise optional profiles.
-Optional TPM failure must still pass the boot-input rejection and actual-handoff
-checks; it never selects weaker verification. A missing optional NvPCR and a
-missing ordinary TPM capability have separate recorded states.
+Use `secure-smoke --expect-tpm rejected` with a required-profile image and no
+`--swtpm` to verify missing-device refusal. With an optional-profile image and no
+TPM, use `--expect-tpm unavailable`: every boot-input rejection and actual verified
+handoff check must still pass. Optional read/extend failures remain diagnostics;
+they never select weaker boot verification. Bad/missing NvPCR signature tests
+belong to OS policy integration, not loader readiness.
 
 ## Installed NixOS and snapshot scenarios
 
@@ -153,20 +145,18 @@ foreign-owner refusal, explicit discard, restart reconciliation and actual clone
 
 The ordinary target TPM gate requires a ready SRK service and persisted public SRK
 after kexec, not just loader readiness. These test roots include `tpm_crb` in their
-preboot module list. The v261 target's vendor `.nvpcr` definitions must be masked
-with empty `/etc/nvpcr/{hardware,login,cryptsetup,verity}.nvpcr` files when testing
-ordinary TPM only. The loader v262 already owns its selected hardware NvPCR;
-letting the older target provider allocate all default indices causes an existing
-index/policy conflict and unwanted allocations. Masking those definitions does
-not disable ordinary TPM/SRK or delete an index. Target NvPCR consumers and event
-log handoff need the separate versioned integration contract, still pending.
+preboot module list and keep the target's native NvPCR definitions unmasked. The
+loader creates no SRK or NvPCR policy that could conflict with target setup.
+Target-specific signed NvPCR policy/consumer acceptance and PCR15 log handoff
+remain separate gates.
 
-The target proof always captures early/late TPM setup journals when a device is
+The target proof captures early/late TPM setup journals when a device is
 available, then requires `ZBM_TARGET_TPM_SRK_READY` before publishing boot success.
 
 `lib.mkProtectedBootFixture { kernelPackages = configuredLoaderKernelPackages; }`
-is the canonical Nix profile for those target masks and required LSMs. Supply the
-same configured kernel/ZFS set as the protected loader. Build the unsigned archive,
+is the canonical Nix profile retaining required LSMs and the target's ordinary TPM
+configuration. Supply the same configured kernel/ZFS set as the protected loader.
+Build the unsigned archive,
 then publish a fresh outside-store copy with `authorize_nixos.py`:
 
 ```sh
@@ -196,8 +186,8 @@ signed 7297 installed-root modules, the preboot modules, kernel and final initra
 outside Nix. `verified-nixos-002` passes real ZFS-root boot through the broker/menu;
 `verified-nixos-snapshot-001` passes writable trusted clone boot with source and
 snapshot preserved. Their actual selection/prepared-clone PNGs were inspected.
-The final SRK-scoped target fixture additionally passes ordinary and snapshot
-boot in `verified-nixos-srk-001` / `verified-nixos-snapshot-srk-001`, including
+Before removing loader-owned TPM setup, the SRK-scoped target fixture additionally
+passed ordinary and snapshot boot in `verified-nixos-srk-001` / `verified-nixos-snapshot-srk-001`, including
 early/late target SRK reuse and public-key persistence without extra NvPCR allocation.
 
 `target/vm/verified-004/security-report.json` passed under OVMF Secure Boot using
@@ -207,13 +197,14 @@ the CA-certificate rejection; `verified-003` preserved a screenshot stability
 failure caused by a blinking cursor. The harness now pauses QEMU while capturing
 stable screenshots and resumes only if it was running.
 
-Initial TPM successes/refusals and final source regression are recorded in
-[verification](verification.md#tpm-and-signed-policy-nvpcr-acceptance).
+The current OS-owned TPM matrix and earlier experiments are recorded in
+[verification](verification.md). The new ordinary and snapshot runs show the
+selected OS creating its own SRK and initializing its native v261 NvPCRs without
+target masks. Signed-policy v262 consumer acceptance remains a separate gate.
 Before production: verify generic-Linux authorization, encrypted-root passphrase
 UI, expected embedded kernel
-certificates, algorithm/profile restrictions, full-NV/stale-index/interruption
-cases and log transport
-across kexec, target-initrd consumption and physical Framework recovery. Insyde
+certificates, algorithm/profile restrictions, PCR15 log transport across kexec,
+OS-owned signed NvPCR policy/consumer integration and physical Framework recovery. Insyde
 EFI enumeration recovery is a separate DMI-scoped provider and remains pending
 here. No attestation, rollback-resistance or whole-root-integrity promise follows
 from this synthetic scenario.

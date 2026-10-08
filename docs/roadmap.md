@@ -39,23 +39,24 @@ The specification is [Secure Boot and verified boot](secure-boot-model.md), with
   actual synthetic handoff passed; NixOS typed-root authorization requires systemd initrd.
 - Implemented foundation: restricted PID-1/recovery/failure paths, no enforced
   root shell or automatic reboot loop; separate firmware/authorization evidence.
-- Add selected off/optional/required TPM capabilities, ordinary measurements and
-  signed-policy NvPCR setup. Handle scarce NV capacity independently of kernel
-  verification. Define measured-target/event-log handoff across kexec; no TPM
-  disk unlock. SRK, phase/PCR15 measurement and v262 signed-policy NvPCR paths are
-  implemented. Initial swtpm success/PCR replay, bad/missing policy, no-TPM and
-  optional degradation tests pass; scarce NV/stale-index/interruption tests and
-  event-log handoff remain in progress.
+- Implemented: off/optional/required TPM2/PCR15 readiness and verified prepared-target
+  measurement. SRK/NvPCR initialization and PCR11 phases belong to the OS; the
+  loader never allocates NV indices or persistent TPM objects. The swtpm harness
+  checks unchanged PCR11, exact prepared-plan replay, no loader allocation,
+  required absence and optional absence with complete boot-input enforcement.
+  Next: PCR15 event-log transport across kexec and OS-owned signed-policy
+  integration; no TPM disk unlock.
 - Passed: negative/positive signed OVMF synthetic-input scenario, actual broker
   catalog with installed NixOS ZFS root and authorized snapshot clones, including
   unauthorized arguments, foreign mounts/owners and restart reconciliation.
-  Next: target TPM consumer/handoff contract, generic Linux, encrypted-root
-  passphrase UX and physical Secure Boot/recovery acceptance.
+  Next: PCR15 event-log transport and OS-owned TPM policy integration, generic
+  Linux, encrypted-root passphrase UX and physical Secure Boot/recovery acceptance.
 
 Deferred: UI action “Boot without a trusted signature”, owner-authenticated
 administrative recovery, optional development-image packaging, TPM automatic
 unlock/rollback-resistant state, whole-root integrity and shim/MOK.
 There is no automatic policy downgrade when firmware Secure Boot is disabled and
 no requirement to ship two images. Signature encoding, broker sandbox/IPC and
-IMA staging passed the configured-kernel VM experiment. TPM measurement and
-NvPCR support are now part of the active milestone, not the deferred unlock work.
+IMA staging passed the configured-kernel VM experiment. Loader TPM measurement
+is part of the active milestone. SRK/NvPCR setup and PCR11 OS phases belong to the
+selected OS initramfs; zbm-rs does not own them.

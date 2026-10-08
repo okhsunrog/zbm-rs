@@ -5,6 +5,9 @@ import tempfile
 import tarfile
 import io
 import unittest
+import hashlib
+import json
+import struct
 
 
 def load(name):
@@ -20,6 +23,9 @@ authorizer = load("authorize-boot")
 spec = importlib.util.spec_from_file_location("nixos", Path(__file__).parents[1] / "xtask/fixtures/authorize_nixos.py")
 nixos = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(nixos)
+spec = importlib.util.spec_from_file_location("tpm_replay", Path(__file__).parents[1] / "xtask/fixtures/check_tpm.py")
+tpm_replay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tpm_replay)
 
 
 def record(name, mode, body=b"", links=1):
@@ -31,6 +37,36 @@ def record(name, mode, body=b"", links=1):
 
 
 class Boundaries(unittest.TestCase):
+    def test_tpm_replay_rejects_loader_phases_and_changed_target_records(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            spec = b"Spec ID Event03\0" + bytes(8) + struct.pack("<IHHB", 1, 0x000b, 32, 0)
+            digest = hashlib.sha256(b"measured-loader").digest()
+            firmware = struct.pack("<II", 0, 3) + bytes(20) + struct.pack("<I", len(spec)) + spec
+            firmware += struct.pack("<IIIH", 11, 0x80000001, 1, 0x000b) + digest + struct.pack("<I", 0)
+            (run / "tpm-firmware.bin").write_bytes(firmware)
+            (run / "tpm-pcr11.txt").write_text(tpm_replay.extend(bytes(32), digest).hex())
+            (run / "tpm-pcr15-initial.txt").write_text(bytes(32).hex())
+            target = b'{"version":1,"arguments":["root=ZFS=tank/root"]}\n'
+            (run / "tpm-target.json").write_bytes(target)
+            word = "zbm-rs:target-prepared:v1:" + hashlib.sha256(target).hexdigest()
+            digest = hashlib.sha256(word.encode()).digest()
+            event = {"pcr": 15, "digests": [{"hashAlg": "sha256", "digest": digest.hex()}],
+                     "content": {"string": word}}
+            log = "\x1e" + json.dumps(event)
+            (run / "tpm-userspace.jsonseq").write_text(log)
+            (run / "tpm-pcr15-prepared.txt").write_text(tpm_replay.extend(bytes(32), digest).hex())
+            self.assertTrue(tpm_replay.verify(run)["passed"])
+            phase = {"pcr": 11, "digests": [{"hashAlg": "sha256", "digest": hashlib.sha256(b"enter-initrd").hexdigest()}],
+                     "content": {"string": "enter-initrd"}}
+            (run / "tpm-userspace.jsonseq").write_text(log + "\x1e" + json.dumps(phase))
+            with self.assertRaisesRegex(ValueError, "must not extend PCR11"):
+                tpm_replay.verify(run)
+            (run / "tpm-userspace.jsonseq").write_text(log)
+            (run / "tpm-target.json").write_bytes(target.replace(b"tank/root", b"tank/other"))
+            with self.assertRaisesRegex(ValueError, "exact verified final plan"):
+                tpm_replay.verify(run)
+
     def test_authorization_index_has_shared_rust_vector_and_keeps_clone_root_variable(self):
         args = ["init=/nix/store/system/init", "root=zbm_fixture/nixos", "rootfstype=zfs", "rw"]
         self.assertEqual(authorizer.argument_id(args), "6cab784c1c6b1032495306942cd53286481046b8e61a47cdd220dd405e63702d")

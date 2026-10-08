@@ -1,4 +1,46 @@
-# Broker-authorized NixOS and trusted snapshot boot — 2026-10-08
+# OS-owned TPM setup and loader PCR15 measurement — 2026-10-08
+
+The loader now performs only a read-only TPM2/PCR15 readiness probe and records
+verified prepared targets in PCR15. SRK/NvPCR setup and PCR11 OS phases belong to
+the selected OS. The separate systemd v262 setup derivation, NvPCR configuration,
+loader PCR policy signing and target NvPCR masks have been removed.
+
+All source checks pass: 36 workspace tests, formatting, warnings-denied
+all-targets/all-features Clippy, six owner-tool/PCR replay boundary tests, Cargo
+config input tracking and Nix default/bounds/legacy/optional/required parity.
+The protected loader and authorized NixOS fixture reuse the tested configured
+Linux 6.18.55/ZFS pair; no host kernel, TPM, firmware keys or boot files were changed.
+
+| Run under `target/vm/` | Result |
+| --- | --- |
+| `tpm-os-owned-verified-002` | OVMF/TCG Secure Boot; complete signed input/rejection, protected recovery and actual second-kernel handoff; 12 firmware PCR11 events replay, zero loader PCR11 events; exact prepared-plan PCR15 replay |
+| `tpm-os-owned-required-absent-001` | Required TPM absent: no manager, protected recovery and clean poweroff |
+| `tpm-os-owned-optional-absent-001` | Optional TPM absent: unavailable evidence, every boot-input rejection/recovery check and actual verified handoff still pass |
+| `tpm-os-owned-nixos-001` | OVMF/KVM Secure Boot; actual broker/menu ZFS-root boot, unauthorized arguments rejected; native unmasked target TPM setup succeeds |
+| `tpm-os-owned-snapshot-001` | OVMF/KVM Secure Boot; authorized writable clone boot, original dataset/snapshot preserved; native unmasked target TPM setup succeeds |
+| `tpm-os-owned-off-001` | Ordinary OVMF/TCG ZFS/input/encryption smoke and full PID1 lifecycle regression pass |
+
+Read-only guest queries explicitly use `/dev/tpmrm0`. NV and persistent handle
+lists are empty at loader startup and after protected recovery; no setup helper,
+NvPCR definition or initialization metadata is present. PCR11 remains unchanged
+during input verification and manager crash/restart. The independent replay test
+rejects injected loader phases and changed prepared-target records.
+
+Both installed-OS journals show a **new SRK created by the target initramfs**, then
+reused and saved publicly by target userspace. The target's native systemd v261
+initializes four NvPCRs in its late setup; no loader-owned index/policy conflicts
+occur and no NvPCR masking is needed. This is native v261 compatibility evidence,
+not acceptance of the newer signed-policy v262 API or every NvPCR consumer.
+All QEMU/swtpm children were reaped. The initial `tpm-os-owned-verified-001` failure
+is preserved: a test tool was packaged as a Nix shell wrapper rather than its ELF;
+packaging now stages the underlying ELF with the correct multicall name.
+
+Still pending: owner-managed target v262 signed NvPCR policy integration,
+PCR15 event-log transport across kexec, generic-Linux and encrypted-root acceptance,
+and physical Framework Secure Boot/recovery. Prepared-target measurements are
+not proof of OS execution, remote attestation or rollback resistance.
+
+# Earlier broker-authorized NixOS and trusted snapshot boot — 2026-10-08
 
 The persistent `boot-smoke` harness now supports enrolled OVMF variables and an
 owned disposable swtpm, using the same lifetime helper as `secure-smoke`.
@@ -36,8 +78,8 @@ domain generation. Failed artifacts remain preserved.
 `verified-nixos-diag-001` captured a distinct target TPM failure: ordinary SRK
 load/persistence succeed, then target systemd v261 attempts an incompatible
 anchor-secret initialization over the loader v262 hardware NvPCR and allocates
-three unwanted default NvPCRs. The ordinary-target TPM fixture masks those
-definitions, retains SRK services and now requires an explicit target SRK marker
+three unwanted default NvPCRs. The ordinary-target TPM fixture at that time masked those
+definitions, retained SRK services and required an explicit target SRK marker
 before boot success. `verified-nixos-srk-001` and
 `verified-nixos-snapshot-srk-001` pass that final gate: early and late target setup
 reuse the resident SRK, persist its public part, and report no NvPCR conflict or
@@ -74,11 +116,14 @@ Source checks pass: 35 workspace tests, formatting, all-targets/all-features
 warnings-denied Clippy and three build-tool boundary tests. The earlier unsigned
 regression `security-foundation-off-001` passed real ZFS and full lifecycle.
 
-## TPM and signed-policy NvPCR acceptance
+## Earlier loader-owned NvPCR experiment (superseded)
 
-All runs below use disposable OVMF trust and fresh swtpm state when present.
+These historical runs exercised loader-owned SRK/NvPCR setup and PCR11 phases.
+That design has been removed: the selected OS now owns setup and its phases.
+The old bad/missing NvPCR policy images are not current loader acceptance gates.
+All runs below used disposable OVMF trust and fresh swtpm state when present.
 `systemd-tpm2-setup`, `systemd-pcrextend` and owner `systemd-measure` come from a
-separate v262 provider; the host systemd and host TPM are not used.
+separate v262 provider at that time; the host systemd and host TPM were not used.
 
 | Run under `target/vm/` | Result |
 | --- | --- |
@@ -97,8 +142,8 @@ input/shell/poweroff and the complete PID-1 fault/lifecycle suite. Nix module
 default/bounds/legacy-option JSON parity still passes.
 
 Initial `verified-tpm-001` exposed `ukify --join-pcrsig` not adding an absent
-section. The publisher now builds and verifies that section explicitly before
-EFI signing. Initial KVM negative/replay runs exposed the harness reaching SSH
+section. The publisher at that time built and verified that section explicitly before
+EFI signing; the current publisher no longer embeds NvPCR policies. Initial KVM negative/replay runs exposed the harness reaching SSH
 before the test NIC's first link-up; transport readiness is now awaited separately.
 All failed run artifacts remain available. Firmware/target proofs and PCR replay
 are independent observations; the prepared PCR15 event is not proof of execution.

@@ -10,70 +10,6 @@ import struct
 import subprocess
 import tempfile
 
-MEASURED_SECTIONS = ("linux", "osrel", "cmdline", "initrd", "ucode", "splash", "dtb",
-                     "uname", "sbat", "pcrpkey", "profile", "dtbauto", "hwids", "efifw")
-
-
-def pe_sections(file):
-    """Read precisely the PE VirtualSize bytes measured by systemd-stub."""
-    data = file.read_bytes()
-    if len(data) < 64 or data[:2] != b"MZ":
-        raise ValueError("Invalid EFI DOS header")
-    offset = struct.unpack_from("<I", data, 60)[0]
-    if offset + 24 > len(data) or data[offset:offset+4] != b"PE\0\0":
-        raise ValueError("Invalid EFI PE header")
-    count, optional_size = struct.unpack_from("<H", data, offset+6)[0], struct.unpack_from("<H", data, offset+20)[0]
-    start = offset + 24 + optional_size
-    if count > 96 or start + count * 40 > len(data):
-        raise ValueError("Invalid EFI section table")
-    sections = {}
-    for index in range(count):
-        header = data[start+index*40:start+(index+1)*40]
-        name = header[:8].rstrip(b"\0").decode("ascii")
-        virtual, _, raw, position = struct.unpack_from("<IIII", header, 8)
-        if name in sections or position + raw > len(data):
-            raise ValueError("Duplicate or truncated EFI section")
-        if name.startswith(".") and name[1:] in MEASURED_SECTIONS and virtual > raw:
-            raise ValueError("Measured EFI section has unmapped zero padding")
-        sections[name] = data[position:position+min(virtual, raw)]
-    return sections
-
-
-def sign_pcr_policy(unsigned, output, key, measure, build):
-    """Sign exact final section contents, then add the unmeasured .pcrsig."""
-    public = output / "pcr-public.pem"
-    expected = command(["openssl", "pkey", "-pubin", "-in", public, "-outform", "DER"])
-    actual = command(["openssl", "pkey", "-in", key, "-pubout", "-outform", "DER"])
-    if expected != actual:
-        raise ValueError("PCR signing key differs from packaged public key")
-    sections = pe_sections(unsigned)
-    signature = output / "pcr-signature.json"
-    with tempfile.TemporaryDirectory(prefix="zbm-pcr-sections-") as directory:
-        options = []
-        for name in MEASURED_SECTIONS:
-            if content := sections.get(f".{name}"):
-                file = Path(directory) / name
-                file.write_bytes(content)
-                options.append(f"--{name}={file}")
-        encoded = command([measure, "sign", "--bank=sha256", "--phase=enter-initrd",
-                           "--policyref=initrd", "--private-key", key, "--public-key", public,
-                           "--json=short", *options])
-        if len(encoded) > 1024 * 1024 or not json.loads(encoded).get("sha256"):
-            raise ValueError("Missing bounded SHA-256 PCR policy signatures")
-        signature.write_bytes(encoded)
-    joined = output / "pcr-signed.efi"
-    # --join-pcrsig fills a pre-existing policy-digest section; it silently adds
-    # nothing when that section is absent. Build a fresh section instead.
-    command([*build, "--section", f".pcrsig:@{signature}", "--output", joined])
-    after = pe_sections(joined)
-    if ".pcrsig" not in after or json.loads(after[".pcrsig"]) != json.loads(signature.read_bytes()):
-        raise ValueError("Final UKI is missing its signed PCR policy")
-    if any(after.get(f".{name}") != sections.get(f".{name}") for name in MEASURED_SECTIONS):
-        raise ValueError("Adding PCR signatures changed measured EFI sections")
-    unsigned.unlink()
-    joined.rename(unsigned)
-
-
 def command(args, *, output=None, cwd=None, env=None):
     result = subprocess.run([str(arg) for arg in args], cwd=cwd, env=env,
                             stdout=output or subprocess.PIPE, stderr=subprocess.PIPE)
@@ -235,20 +171,17 @@ def main():
     parser.add_argument("--sign-file", required=True, type=Path)
     parser.add_argument("--evmctl", required=True, type=Path)
     parser.add_argument("--ukify", default=shutil.which("ukify") or "/usr/lib/systemd/ukify", type=Path)
-    parser.add_argument("--pcr-key", type=Path)
-    parser.add_argument("--systemd-measure", type=Path)
     parser.add_argument("--allow-fixture", action="store_true")
     parser.add_argument("--fixture-directory", type=Path)
     args = parser.parse_args()
     image, output = args.image.resolve(), args.output.resolve()
     if output.is_relative_to(Path("/nix/store")) or output.exists():
         raise ValueError("Output must be a fresh directory outside the Nix store")
-    for key in (args.efi_key, args.ima_key, args.module_key, args.pcr_key):
+    for key in (args.efi_key, args.ima_key, args.module_key):
         if key is not None and key.resolve().is_relative_to(Path("/nix/store")):
             raise ValueError("Private signing keys must stay outside the Nix store")
-    pcr = (image / "pcr-public.pem").is_file()
-    if pcr != (args.pcr_key is not None and args.systemd_measure is not None):
-        raise ValueError("PCR public key requires an external PCR key and v262 systemd-measure")
+    if (image / "pcr-public.pem").exists():
+        raise ValueError("Rebuild this obsolete loader-owned NvPCR image before publishing")
     manifest = json.loads((image / "manifest.json").read_text())
     if manifest["test_ssh"] and not args.allow_fixture:
         raise ValueError("Refusing to publish a production-signed test/SSH image")
@@ -289,17 +222,13 @@ def main():
         unsigned = output / "unsigned.efi"
         build = [args.ukify, "build", "--linux", output / "vmlinuz", "--initrd", output / "initramfs.img",
                  "--uname", manifest["kernel"], "--cmdline", f"@{output / 'cmdline'}",
-                 "--os-release", f"@{output / 'os-release'}", "--stub", output / "stub.efi",
-                 *(["--pcrpkey", output / "pcr-public.pem"] if pcr else [])]
+                 "--os-release", f"@{output / 'os-release'}", "--stub", output / "stub.efi"]
         command([*build, "--output", unsigned])
-        if pcr:
-            sign_pcr_policy(unsigned, output, args.pcr_key.resolve(), args.systemd_measure.resolve(), build)
         efi = output / "esp/EFI/BOOT/BOOTX64.EFI"
         command(["sbsign", "--key", args.efi_key.resolve(), "--cert", args.efi_cert.resolve(), "--output", efi, unsigned])
         command(["sbverify", "--cert", args.efi_cert.resolve(), efi])
         unsigned.unlink()
         manifest["deployment"] = {"efi_signed": True, "ima_policy_signed": True,
-                                  "pcr_policy_signed": pcr,
                                   "modules_verified": signed, "disposable_fixture": args.allow_fixture}
         import hashlib
         for name in ("kernel", "initramfs"):
