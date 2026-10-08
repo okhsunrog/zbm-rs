@@ -99,6 +99,37 @@ pub struct BootAuthorization {
     pub initramfs_ima_signature: Vec<u8>,
 }
 
+/// Lookup separates generations sharing the same images. Only the typed root
+/// value is variable; this is an index, not permission to boot that dataset.
+pub fn argument_id(arguments: &[String]) -> io::Result<String> {
+    if arguments.len() > 65 {
+        return Err(invalid("Too many authorization lookup arguments"));
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"zbm-rs:arguments:v1\0");
+    let mut roots = 0;
+    for argument in arguments {
+        if argument.is_empty() || argument.len() > 4096 || argument.contains('\0') {
+            return Err(invalid("Invalid authorization lookup argument"));
+        }
+        let token = if argument.starts_with("root=") {
+            roots += 1;
+            ["root=ZFS=", "root=zfs:", "root="]
+                .into_iter()
+                .find(|prefix| argument.starts_with(prefix))
+                .unwrap()
+        } else {
+            argument.as_str()
+        };
+        digest.update((token.len() as u32).to_be_bytes());
+        digest.update(token.as_bytes());
+    }
+    if roots != 1 {
+        return Err(invalid("Authorization lookup requires one typed root"));
+    }
+    Ok(hex(&digest.finalize()))
+}
+
 impl BootAuthorization {
     pub fn validate(&self) -> io::Result<()> {
         if self.version != 1 || self.architecture != std::env::consts::ARCH {
@@ -190,9 +221,10 @@ impl Authorization {
         let id = hex(&Sha256::digest(
             format!("{}:{}", kernel.sha256, initramfs.sha256).as_bytes(),
         ));
+        let arguments = argument_id(&plan.cmdline)?;
         let path = crate::boot::rooted_path(
             &plan.target.root,
-            &std::path::PathBuf::from(format!("/boot/zbm-rs/authorizations/{id}.json")),
+            &std::path::PathBuf::from(format!("/boot/zbm-rs/authorizations/{id}/{arguments}.json")),
         )?;
         let payload = read_bounded(&path, AUTHORIZATION_LIMIT)?;
         let signature = read_bounded(&path.with_extension("cms"), AUTHORIZATION_LIMIT)?;
@@ -448,6 +480,36 @@ mod tests {
             },
             initramfs_ima_signature: vec![3; 64],
         }
+    }
+    #[test]
+    fn argument_index_separates_generations_but_preserves_typed_clone_root() {
+        let args: Vec<String> = [
+            "init=/nix/store/system/init",
+            "root=zbm_fixture/nixos",
+            "rootfstype=zfs",
+            "rw",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(
+            argument_id(&args).unwrap(),
+            "6cab784c1c6b1032495306942cd53286481046b8e61a47cdd220dd405e63702d"
+        );
+        let mut clone = args.clone();
+        clone[1] = "root=zbm_fixture/zbm-rs-clone".into();
+        assert_eq!(argument_id(&args).unwrap(), argument_id(&clone).unwrap());
+        clone[0] = "init=/nix/store/other-system/init".into();
+        assert_ne!(argument_id(&args).unwrap(), argument_id(&clone).unwrap());
+        clone = args.clone();
+        clone[1] = "root=ZFS=zbm_fixture/nixos".into();
+        assert_ne!(argument_id(&args).unwrap(), argument_id(&clone).unwrap());
+        clone = args.clone();
+        clone.swap(1, 2);
+        assert_ne!(argument_id(&args).unwrap(), argument_id(&clone).unwrap());
+        clone.push("root=another".into());
+        assert!(argument_id(&clone).is_err());
+        assert!(argument_id(&args[2..]).is_err());
     }
     #[test]
     fn cms_requires_exact_payload_and_pinned_signer() {

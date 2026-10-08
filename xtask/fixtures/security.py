@@ -12,6 +12,9 @@ spec = importlib.util.spec_from_file_location("publisher", Path(__file__).parent
 publisher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(publisher)
 command = publisher.command
+spec = importlib.util.spec_from_file_location("authorizer", Path(__file__).parents[2] / "nix/authorize-boot.py")
+authorizer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(authorizer)
 
 
 def digest(file):
@@ -86,7 +89,10 @@ poweroff -f
                 "initramfs_ima_signature": list(ima_signature),
             }
             pair = hashlib.sha256(f'{kernel["sha256"]}:{initramfs["sha256"]}'.encode()).hexdigest()
-            payload = authdir / f"{pair}.json"
+            directory = authdir / pair
+            directory.mkdir()
+            index = authorizer.argument_id(["console=ttyS0,115200", "root=ZFS=tank/root", "zbm.fixture=second"])
+            payload = directory / f"{index}.json"
             cms = payload.with_suffix(".cms")
             if case == "valid":
                 # Exercise the real owner authorization publisher, then demand

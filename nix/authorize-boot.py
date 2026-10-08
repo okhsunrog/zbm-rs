@@ -8,6 +8,23 @@ import re
 import subprocess
 import tempfile
 
+def argument_id(arguments):
+    if len(arguments) > 65:
+        raise ValueError("Too many authorization lookup arguments")
+    digest, roots = hashlib.sha256(b"zbm-rs:arguments:v1\0"), 0
+    for argument in arguments:
+        if not argument or len(argument.encode()) > 4096 or "\0" in argument:
+            raise ValueError("Invalid authorization lookup argument")
+        if argument.startswith("root="):
+            roots += 1
+            argument = next(prefix for prefix in ("root=ZFS=", "root=zfs:", "root=") if argument.startswith(prefix))
+        token = argument.encode()
+        digest.update(len(token).to_bytes(4, "big"))
+        digest.update(token)
+    if roots != 1:
+        raise ValueError("Authorization lookup requires one typed root")
+    return digest.hexdigest()
+
 
 def artifact(path):
     with path.open("rb") as file:
@@ -56,7 +73,10 @@ def main():
                      "initramfs_ima_signature": list(signature)}
     name = hashlib.sha256(f'{kernel["sha256"]}:{initramfs["sha256"]}'.encode()).hexdigest()
     args.output.mkdir(parents=True, exist_ok=True)
-    payload, cms = args.output / f"{name}.json", args.output / f"{name}.cms"
+    index = argument_id(arguments)
+    directory = args.output / name
+    directory.mkdir(exist_ok=True)
+    payload, cms = directory / f"{index}.json", directory / f"{index}.cms"
     if payload.exists() or cms.exists():
         raise ValueError("Authorization already exists; use a fresh staging directory")
     with tempfile.TemporaryDirectory(prefix="zbm-authorize-", dir=args.output) as temporary:
@@ -70,7 +90,7 @@ def main():
                         str(temporary / "payload"), "-out", os.devnull], check=True)
         os.rename(temporary / "payload", payload)
         os.rename(temporary / "signature", cms)
-    print(json.dumps({"authorization": str(payload), "cms": str(cms), "artifact_id": name}))
+    print(json.dumps({"authorization": str(payload), "cms": str(cms), "artifact_id": name, "argument_id": index}))
 
 
 if __name__ == "__main__":
