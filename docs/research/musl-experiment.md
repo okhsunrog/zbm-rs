@@ -1,5 +1,8 @@
 # Whole-initramfs musl experiment
 
+These measurements describe the builds and revisions recorded below. For current
+image outputs and defaults, use [the build guide](../build.md).
+
 The experiment changes the complete image userspace to musl: zbm-rs (both roles),
 BusyBox, kmod, ZFS userspace, eudev, their runtime libraries, and test-profile SSH.
 The normal glibc outputs remain the comparison baseline. This is not a mixed

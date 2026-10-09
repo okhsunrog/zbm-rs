@@ -131,9 +131,8 @@ created in initramfs and four NvPCRs initialized later by native systemd v261.
 
 This establishes compatibility with that native v261 setup. Target v262 signed
 NvPCR policy/consumer integration, PCR15 log transport and physical Framework
-acceptance remain separate gates. The corporate VPN's TPM requirements are unknown;
-using TPM2 does not by itself imply using NvPCRs.
+acceptance remain separate gates.
 
-See [current acceptance results](verification.md#os-owned-tpm-setup-and-loader-pcr15-measurement--2026-10-08),
+See [current acceptance results](verification.md#coverage),
 [reproduction workflow](security-testing.md) and
-[remaining milestones](roadmap.md#secure-boot-and-tpm-milestone-in-progress).
+[remaining milestones](roadmap.md#secure-boot-and-tpm-milestone).

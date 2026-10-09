@@ -1,6 +1,6 @@
 /target/
 
-!AGENTS.md
+!/docs/AGENTS.md
 
 /result*
 __pycache__/

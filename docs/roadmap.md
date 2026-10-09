@@ -1,65 +1,62 @@
 # Roadmap
 
-1. Foundation: workspace, core/TUI, unsigned EFI/initramfs, persistent QMP + SSH
-   harness; real boot/discovery/shell/cleanup scenario.
-2. Pool policy: safe read-only/no-mount imports by GUID, discovery search sources,
-   duplicate names and degraded/unavailable fixtures.
-3. Boot environments: ZFSBootMenu properties and dataset compatibility, filesystem
-   visibility, encryption state, clear rejection reasons.
-4. Linux boot: kernel/initrd discovery, inspectable boot plan and kexec, installed
-   guest handshake. Prove the selected environment actually booted.
-5. NixOS: Bootspec, generations and specialisations with real fixtures.
-6. Snapshots: temporary clones, explicit ownership and cleanup after failed boot.
-7. Recovery: key loading, locked/degraded pools and interrupted operations.
-8. Agent adapter: optional MCP over the existing harness, not a parallel engine.
-9. Verified boot: the dedicated Secure Boot milestone below.
-10. Hardening/release: reproducible images, kernel/ZFS pinning, packaging,
-    compatibility matrix and physical boot acceptance.
+zbm-rs is in early development. The next release needs to make supported boot
+layouts and recovery dependable on real hardware. Current test coverage is
+listed in [verification](verification.md); design details live in
+[architecture](architecture.md) and [verified boot](secure-boot-model.md).
 
-Each step adds deterministic core checks and a reusable real VM scenario. Keep
-serial state, screenshots, SSH results, boot handshake and physical-device
-acceptance distinct in reports.
+## Working features
 
-## Secure Boot and TPM milestone (in progress)
+- Generic Linux kernel/initramfs discovery and ordinary ZFS-root boot.
+- NixOS Bootspec generation selection with `/nix` in the selected root.
+- Snapshot inspection, owned writable boot clones, and ordinary-mode rollback,
+  persistent clones and promotion.
+- Search, target details, keyboard help and compact-console layouts.
+- PID 1 supervision, console restoration and bounded recovery after failure.
+- Reproducible Nix images, portable/host-only profiles and a persistent VM harness.
+- Enforced boot inputs and protected recovery, with signed OVMF acceptance for
+  synthetic targets, installed NixOS roots and authorized snapshot clones.
+- Read-only TPM readiness and verified prepared-target measurement in PCR15.
 
-TPM responsibilities and integration limits are documented in
-[TPM and measured boot](tpm.md).
+These features have source and VM validation. They do not establish physical
+deployment acceptance or full ZFSBootMenu feature parity.
 
-The specification is [Secure Boot and verified boot](secure-boot-model.md), with
+## Secure Boot and TPM milestone
+
+The enforced NixOS path is implemented. Remaining work includes:
+
+- Generic-Linux verified boot through the same authorization boundary.
+- Encrypted-root passphrase UI and protected recovery on that path.
+- Automated embedded-certificate inventory and signing-profile checks.
+- PCR15 event/plan transport across kexec for independent replay in the OS.
+- OS-owned signed NvPCR policy integration with a systemd v262 target.
+- Physical Secure Boot, trusted snapshot boot and recovery on the intended hardware.
+- DMI-scoped Insyde EFI-variable enumeration recovery where required.
+
+The loader does not initialize SRK/NvPCR objects or extend OS phases in PCR11.
+Those operations belong to the selected OS. See [TPM ownership](tpm.md),
 [configuration](configuration.md#secure-boot-configuration) and
 [acceptance gates](verification.md#secure-boot-acceptance-matrix).
 
-- Implemented foundation: immutable `off`/`enforce` schema with compiled image
-  mode, independent firmware requirement and incomplete-config rejection.
-- Implemented: validate or separately configure the loader kernel and matching
-  ZFS; inspect final configuration and independently verify staged signatures.
-  Pre-deployment embedded certificate inventory remains to be automated.
-- Implemented: authenticated early IMA setup and separate owner UKI signing/deployment;
-  keep production private keys out of Nix and fixture artifacts.
-- Implemented foundation: pinned CMS BootAuthorization, exact arguments/typed ZFS
-  roots, snapshot-source permission, opaque sealed input plans, a privileged broker
-  and UI privilege dropping. Enforced Linux 6.18.55 IMA/memfd interoperability and
-  actual synthetic handoff passed; NixOS typed-root authorization requires systemd initrd.
-- Implemented foundation: restricted PID-1/recovery/failure paths, no enforced
-  root shell or automatic reboot loop; separate firmware/authorization evidence.
-- Implemented: off/optional/required TPM2/PCR15 readiness and verified prepared-target
-  measurement. SRK/NvPCR initialization and PCR11 phases belong to the OS; the
-  loader never allocates NV indices or persistent TPM objects. The swtpm harness
-  checks unchanged PCR11, exact prepared-plan replay, no loader allocation,
-  required absence and optional absence with complete boot-input enforcement.
-  Next: PCR15 event-log transport across kexec and OS-owned signed-policy
-  integration; no TPM disk unlock.
-- Passed: negative/positive signed OVMF synthetic-input scenario, actual broker
-  catalog with installed NixOS ZFS root and authorized snapshot clones, including
-  unauthorized arguments, foreign mounts/owners and restart reconciliation.
-  Next: PCR15 event-log transport and OS-owned TPM policy integration, generic
-  Linux, encrypted-root passphrase UX and physical Secure Boot/recovery acceptance.
+## Boot support and release work
 
-Deferred: UI action “Boot without a trusted signature”, owner-authenticated
-administrative recovery, optional development-image packaging, TPM automatic
-unlock/rollback-resistant state, whole-root integrity and shim/MOK.
-There is no automatic policy downgrade when firmware Secure Boot is disabled and
-no requirement to ship two images. Signature encoding, broker sandbox/IPC and
-IMA staging passed the configured-kernel VM experiment. Loader TPM measurement
-is part of the active milestone. SRK/NvPCR setup and PCR11 OS phases belong to the
-selected OS initramfs; zbm-rs does not own them.
+- Interactive encrypted boot-environment unlock and key-source handling.
+- NixOS specialisations, separate `/nix` layouts and a defined `initrdSecrets` flow.
+- Locked/degraded pool recovery and clear diagnostics for unsupported layouts.
+- Explicit autoboot policy and timeout behavior.
+- Deployment, signing-key rotation and trusted recovery packaging.
+- Published compatibility matrix and physical boot acceptance.
+
+Each new boot path should include a reusable disposable-VM scenario that reaches
+the selected OS and verifies its root and system closure.
+
+## Deferred ideas
+
+- Owner-authorized administrative recovery in enforced images.
+- An explicit UI action for booting an untrusted target.
+- Optional development-image packaging.
+- TPM unlock, remote attestation and rollback-resistant state.
+- Whole-root integrity and shim/MOK integration.
+
+There is no automatic policy downgrade when firmware Secure Boot is disabled,
+and no requirement to ship two images.

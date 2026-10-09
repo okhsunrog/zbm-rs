@@ -1,5 +1,8 @@
 # Image size experiments
 
+These measurements describe the builds and revisions recorded below. For current
+image outputs and defaults, use [the build guide](../build.md).
+
 Source baseline: `fa3f9ff2a677e1e3b4762bfa16ced83a889a00f1`; host compiler: `rustc 1.98.1 (48a229cea 2026-09-01)`.
 
 The Rust matrix uses identical sources and Cargo.lock. Each variant uses strip,

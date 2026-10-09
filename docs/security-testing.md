@@ -173,41 +173,26 @@ uv run --no-project python xtask/fixtures/authorize_nixos.py \
   --evmctl /path/to/evmctl
 ```
 
-## Recorded scope and remaining gates
+## Target fixture requirements
 
 For installed-OS acceptance, `nix/boot-fixture.nix` accepts a separate
-`kernelPackages` and `extraNixosModules`. The default fixture still uses the stock
-kernel; the protected profile is explicitly selected.
-The protected fixture must use the tested configured kernel with matching ZFS,
-and explicitly retain `ima` and `lockdown` in NixOS `security.lsm`: the ordinary
-NixOS default otherwise emits a narrower `lsm=` argument despite the kernel's
-configured default. Fixture preparation is not target capability approval.
+`kernelPackages` and `extraNixosModules`. The default fixture uses the stock
+kernel; select the protected profile explicitly with matching ZFS.
 
-`target/security-fixtures/nixos-signed-001` contains two authorized NixOS
-generations sharing one image pair but distinct argument indexes. Owner publishing
-signed 7297 installed-root modules, the preboot modules, kernel and final initramfs
-outside Nix. `verified-nixos-002` passes real ZFS-root boot through the broker/menu;
-`verified-nixos-snapshot-001` passes writable trusted clone boot with source and
-snapshot preserved. Their actual selection/prepared-clone PNGs were inspected.
-Before removing loader-owned TPM setup, the SRK-scoped target fixture additionally
-passed ordinary and snapshot boot in `verified-nixos-srk-001` / `verified-nixos-snapshot-srk-001`, including
-early/late target SRK reuse and public-key persistence without extra NvPCR allocation.
+Retain `ima` and `lockdown` in the target's NixOS `security.lsm`: the ordinary
+NixOS default can emit a narrower `lsm=` argument than the kernel default.
+Fixture preparation does not authorize a target. Publish authorization for its
+actual final kernel, initramfs, arguments and allowed root before testing it.
 
-`target/vm/verified-004/security-report.json` passed under OVMF Secure Boot using
-Linux 6.18.55 and matching ZFS. This confirmed IMA appraisal of sealed, read-only
-memfd inputs and actual file-based kexec. The earlier `verified-001` preserved
-the CA-certificate rejection; `verified-003` preserved a screenshot stability
-failure caused by a blinking cursor. The harness now pauses QEMU while capturing
-stable screenshots and resumes only if it was running.
+## Acceptance scope
 
-The current OS-owned TPM matrix and earlier experiments are recorded in
-[verification](verification.md). The new ordinary and snapshot runs show the
-selected OS creating its own SRK and initializing its native v261 NvPCRs without
-target masks. Signed-policy v262 consumer acceptance remains a separate gate.
-Before production: verify generic-Linux authorization, encrypted-root passphrase
-UI, expected embedded kernel
-certificates, algorithm/profile restrictions, PCR15 log transport across kexec,
-OS-owned signed NvPCR policy/consumer integration and physical Framework recovery. Insyde
-EFI enumeration recovery is a separate DMI-scoped provider and remains pending
-here. No attestation, rollback-resistance or whole-root-integrity promise follows
-from this synthetic scenario.
+The persistent scenarios exercise loader signature enforcement, independent
+kernel/IMA/CMS rejection, protected recovery, prepared-target PCR replay and
+real handoff. Installed NixOS scenarios also verify the selected system closure,
+writable clone root and preservation of the source snapshot.
+
+See [current coverage and remaining gates](verification.md) and
+[dated run records](history/verification-2026-10.md). Generic-Linux verified boot,
+encrypted-root unlock, physical recovery, PCR15 log transport and OS-owned v262
+signed NvPCR policy integration require separate acceptance. Synthetic target
+success does not establish attestation or whole-root integrity.

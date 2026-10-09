@@ -1,61 +1,53 @@
 # Immutable image configuration
 
-Nix options produce JSON using builtins.toJSON and writeText. The Rust derivation
-receives that exact file as ZBM_RS_CONFIG. build.rs deserializes and validates it
-on the build host; it generates no Rust and writes no checked-in files. Cargo
-tracks both the environment variable and selected file explicitly.
+Configuration is an image input. Nix serializes settings to JSON, and the shared
+[Rust schema](../crates/tui/src/config/schema.rs) validates them during the build
+and at process startup. Rebuild the EFI image to change normal settings.
 
-The image contains the same JSON as a mode-0444 Nix-store file, with
-/etc/zbm-rs/config.json pointing to it. PID 1 reads/validates it once for the
-restart policy, before spawning a manager. Each manager generation reads it once
-before Tokio starts. Supervised processes ignore developer ZBM_RS_CONFIG overrides.
-There is no configuration writer, watch service or live reload. Root can alter a
-RAM-backed initramfs during recovery; file mode is not a security boundary.
-Normal configuration changes rebuild the EFI image.
+The image contains a read-only Nix-store configuration file at
+`/etc/zbm-rs/config.json`. PID 1 reads it before starting a manager; each manager
+reads it before starting its async runtime. Supervised roles ignore developer
+`ZBM_RS_CONFIG` overrides. There is no runtime writer or live reload.
 
-A shared Rust schema and validator live in crates/tui/src/config/schema.rs.
-Runtime deserialization uses serde/serde_json, which already belonged to the
-runtime dependency graph through telemetry/core/zfskit. Runtime values are ordinary
-owned structs, typed enums, String, Vec<String>, Option<String> and fixed-width u32.
-No const-gen/databake/codegen dependency remains. Serde derive/proc-macro helpers
-run on the build host, not as boot-time code.
+The security mode is also compiled into the executable and must match the JSON.
+An enforced executable cannot downgrade by removing or changing its runtime
+configuration. File permissions alone are not a security boundary: unrestricted
+root recovery can alter a RAM-backed initramfs, which is why enforced recovery
+limits administrative access.
 
 ## Development
 
+Local preview uses [the default configuration](../config/default.json) unless
+an explicit file is supplied:
+
+```sh
 cargo run -p zbm-rs -- --manager --preview
-
-Without an override, local execution uses the checked-in config/default.json
-embedded as the development default. To try another JSON file:
-
 ZBM_RS_CONFIG=config/test.json cargo run -p zbm-rs -- --manager --preview
-
 cargo run -p zbm-rs -- --validate-config config/test.json
 cargo run -p zbm-rs -- --print-config
 uv run --no-project nix/check-config.py
+```
 
-ZBM_RS_CONFIG participates in Cargo validation as well as local runtime loading.
-Packaging the JSON supplies ordinary values. The security mode is additionally
-compiled into the ELF and must match supervised runtime JSON; removing that JSON
-section cannot downgrade an enforced binary. --print-config normalizes defaults;
---validate-config prints validated JSON.
-Missing or invalid explicit files fail instead of silently choosing defaults.
+`ZBM_RS_CONFIG` participates in Cargo input tracking and build validation as well
+as local execution. Missing or invalid explicit files fail. `--print-config`
+normalizes defaults; `--validate-config` prints validated JSON.
 
 ## Schema
 
 | JSON field | Default | Constraint / current behavior |
 | --- | --- | --- |
-| ui.timeout_secs | 5 | 0..300; reserved for future autoboot |
-| ui.show_snapshots | true | enable snapshot browsing from the BE list |
-| ui.title | null | optional heading; <=256 bytes, no control characters |
-| manager.restart_limit | 2 | 0..8; rapid failure threshold entering recovery |
-| zfs.import_policy | host-id | host-id or read-only; explicit import only, never force |
-| nixos.generation_limit | 20 | 1..512; maximum generations per root or snapshot |
-| kernel_args | [] | <=64 strings, <=4096 bytes each, no NUL; future target kernel |
-| security.mode | off | off/enforce; compiled image mode must agree at runtime |
-| security.require_firmware_secure_boot | false | enforced mode only; enabled firmware must be positively observed |
-| security.target_authorities | [] | <=32 image-owned public certificate paths; nonempty for enforce |
-| security.ima_certificate | null | image-owned public DER certificate path; required for enforce |
-| security.tpm.policy | off | off/optional/required; required TPM2/PCR15 read or prepared-target extend failures stop startup/handoff |
+| `ui.timeout_secs` | `5` | 0..300; reserved for future autoboot |
+| `ui.show_snapshots` | `true` | enable snapshot browsing from the BE list |
+| `ui.title` | `null` | optional heading; <=256 bytes, no control characters |
+| `manager.restart_limit` | `2` | 0..8; rapid failure threshold entering recovery |
+| `zfs.import_policy` | `host-id` | host-id or read-only; explicit import only, never force |
+| `nixos.generation_limit` | `20` | 1..512; maximum generations per root or snapshot |
+| `kernel_args` | `[]` | <=64 strings, <=4096 bytes each, no NUL; additional target arguments |
+| `security.mode` | `off` | off/enforce; compiled image mode must agree at runtime |
+| `security.require_firmware_secure_boot` | `false` | enforced mode only; enabled firmware must be positively observed |
+| `security.target_authorities` | `[]` | <=32 image-owned public certificate paths; nonempty for enforce |
+| `security.ima_certificate` | `null` | image-owned public DER certificate path; required for enforce |
+| `security.tpm.policy` | `off` | off/optional/required; required TPM2/PCR15 read or prepared-target extend failures stop startup/handoff |
 
 A threshold of 2 restarts on the first rapid failure and enters recovery on the
 second. Values 0 and 1 enter recovery on the first failure. Controlled restarts
@@ -65,7 +57,7 @@ field names and kebab-case enum variants, with defaults for omitted fields/secti
 
 ## Nix integration
 
-Current options are under `programs.zbm-rs.settings`: `ui.timeout`,
+Runtime options are under `programs.zbm-rs.settings`: `ui.timeout`,
 `ui.showSnapshots`, `ui.title`, `manager.restartLimit`, `zfs.importPolicy`,
 `nixos.generationLimit` and `kernelArgs`. Image packaging uses `image.profile`
 and `image.hardwareManifest`. The former top-level names remain renamed aliases.
@@ -84,12 +76,10 @@ remain separate. Features select code such as vm-test, never ordinary values.
 
 ## Secure Boot configuration
 
-The Rust JSON fields and Nix module options below are implemented. The protected
-loader and synthetic target handoff have signed OVMF acceptance; production
-generic-Linux and physical acceptance remain pending; real NixOS ZFS-root and
-trusted snapshot-clone acceptance pass. See [the full trust model](secure-boot-model.md) for enforcement,
-recovery, key roles and limitations. Ordinary policy stays in Nix-generated,
-shared-schema-validated immutable JSON; it does not become Cargo features.
+The options below configure the enforced loader. See
+[the trust model](secure-boot-model.md) for enforcement and key roles, and
+[verification](verification.md) for supported targets and acceptance limits. Ordinary policy stays in
+Nix-generated, shared-schema-validated immutable JSON; it does not become Cargo features.
 
 All paths below are relative to `programs.zbm-rs`:
 
@@ -158,16 +148,9 @@ the current emergency shell behavior is not the protected-mode contract. Runtime
 permission to boot without a trusted signature is explicitly deferred, not a
 current configuration switch.
 
-## Evaluated alternatives
+## Design rationale
 
-An isolated const-gen 1.6.10 spike passed nested structs, enums, defaults, Option,
-primitive values and static slice conversion through include!. Its String emitter
-failed escaped quotes/backslashes; a local adapter would be needed. databake 0.2.1
-emits String/Vec constructions and does not generate replacement type definitions.
-After confirming serde_json already existed in the runtime, the project selected
-immutable runtime JSON. No custom derive or proc macro was written.
-
-All configuration integers are fixed-width and JSON has no host byte layout.
-AArch64 cargo check and a release cross-build with aarch64-linux-gnu-gcc
-exercise the shared schema and runtime; complete AArch64
-image packaging/boot is not yet supported by the x86_64 flake/UKI layout.
+The configuration uses typed runtime JSON instead of generated Rust constants.
+See [the schema design comparison](research/configuration-design.md) for the
+implementation tradeoffs. Complete AArch64 image packaging/boot is not yet
+supported by the x86_64 flake/UKI layout.

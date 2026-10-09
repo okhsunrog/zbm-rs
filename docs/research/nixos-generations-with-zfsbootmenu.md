@@ -249,10 +249,10 @@ datasets and state outside the snapshot need a consistent-layout policy.
 Defer these layouts in an initial adapter rather than claim universal snapshot
 boot support.
 
-The zbm-rs implementation uses an opt-in Bootspec capability and a systemd-root
-override for a restricted layout; see [the snapshot module](../nix/snapshot-boot.nix),
-[the boot-plan resolver](../crates/core/src/boot.rs) and
-[the documented restrictions](../README.md#snapshots-and-recovery). That mechanism is a
+The zbm-rs implementation recognizes systemd in the actual initramfs and uses a
+root override for the supported layout, without an opt-in Bootspec capability.
+See [the boot-plan resolver](../../crates/core/src/boot.rs) and
+[the documented restrictions](../usage.md#snapshots-and-recovery). That mechanism is a
 reference for a possible compatibility policy, not proof that the proposed
 upstream adapter already handles clones.
 
@@ -284,7 +284,7 @@ publication; do not silently substitute the base configuration.
 | Command line | Serialized during publication, then interpreted by ZBM | Constructed from the selected Bootspec by core |
 | Menu | Generation identities represented in the kernel menu | Explicit generation model and menu |
 | Required loader | Upstream ZFSBootMenu | This project's Linux/initramfs image |
-| Clone-root compatibility | Policy still needs implementation and acceptance | Restricted opt-in systemd-root path exists |
+| Clone-root compatibility | Policy still needs implementation and acceptance | Recognized systemd-initramfs root override |
 
 A correctly implemented adapter can select the same NixOS system closure as a
 direct Bootspec-aware loader. The mechanisms differ in when metadata is resolved
@@ -294,7 +294,7 @@ architectural choice, not a prerequisite for offering a generation menu.
 Upstream's existing recovery and encryption facilities are available to an adapter,
 subject to its installation and root policies. Current zbm-rs still rejects
 encrypted NixOS BE boot, separate `/nix`, `initrdSecrets` and other layouts listed
-in [the README](../README.md#linux-and-nixos-boot-paths).
+in [the usage guide](../usage.md#linux-and-nixos-boot-paths).
 
 ## Acceptance scenarios for an implementation
 
@@ -320,12 +320,13 @@ dataset. Run a disposable upstream-ZFSBootMenu fixture separately from zbm-rs's
 existing fixture. Physical boot and Secure Boot require their own acceptance;
 this note makes no claim for either.
 
-For zbm-rs, [the accepted Secure Boot design](secure-boot-model.md) adds a common
+For zbm-rs, [the accepted Secure Boot design](../secure-boot-model.md) adds a common
 signed BootAuthorization above both the Linux and Bootspec adapters. Publication
 of Bootspec, `.kcl` files or matching kernel/initrd names alone is not owner
 authorization. An enforced loader must bind the actual artifacts and allowed
-arguments/root variation, including snapshot clones. This is planned zbm-rs work,
-not a claim that the upstream adapter described here provides that trust chain.
+arguments/root variation, including snapshot clones. The enforced NixOS backend implements this boundary; generic-Linux verified
+acceptance remains pending. The upstream adapter proposed here has no such
+acceptance claim.
 
 ## Sources
 

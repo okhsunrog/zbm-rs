@@ -1,6 +1,6 @@
 # zbm-rs development
 
-Read README.md and docs/architecture.md. This is an early Linux/initramfs boot
+Read ../README.md and architecture.md. This is an early Linux/initramfs boot
 manager, not a native UEFI ZFS implementation.
 
 - Rust edition 2024. Add dependencies with cargo add; Python uses uv run/uv add.

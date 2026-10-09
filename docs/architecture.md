@@ -118,7 +118,7 @@ enters recovery, not a crash loop. The lifecycle scenario tests failed handoff;
 the separate NixOS boot scenario exercises actual kernel handoff and requires a
 success marker from the selected OS.
 
-## Initial boot backend
+## Boot backends
 
 core owns BootTarget, BootPlan, guest-root-aware Bootspec path resolution and
 explicit import/mount reconciliation. TUI selects a pool or generation; the
@@ -130,9 +130,9 @@ and mount destinations. A restarted manager checks imported pools and mountinfo
 before reusing them. It does not claim pre-existing foreign imports, force import,
 or export a pool with a foreign mount. These ephemeral ownership records are
 runtime state, not mutable loader configuration or a persistent recovery journal.
-The first path does not create clones or change dataset properties.
+Ordinary target discovery does not create clones or change dataset properties.
 
-## Verified-boot boundary under implementation
+## Verified boot
 
 The complete accepted design is in [Secure Boot and verified boot](secure-boot-model.md).
 The core verifier, broker, protected lifecycle and owner signing pipeline are
@@ -141,7 +141,7 @@ trusted snapshot-clone scenarios. Linux and
 NixOS discovery produce untrusted candidates; a signed BootAuthorization binds
 kernel/initramfs bytes, arguments and permitted dataset/snapshot-clone selection.
 
-One ELF now includes a privileged broker role alongside an unprivileged manager.
+One ELF includes a privileged broker role alongside an unprivileged manager.
 Core owns trust policy and opaque verified-plan types;
 the manager submits typed target/operation requests and displays evidence. The
 broker independently resolves and authorizes inputs, owns privileged ZFS actions

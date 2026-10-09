@@ -1,17 +1,15 @@
 # Secure Boot and verified boot design
 
-This is the accepted design, not a claim of completed Secure Boot acceptance. It is
-intended to make verified boot a first-class zbm-rs feature for both generic Linux
-and NixOS, while keeping the existing Linux/initramfs architecture. Configuration
-names below include implemented API; see [configuration](configuration.md). Implementation
-work and deferred features are tracked in [the roadmap](roadmap.md), and acceptance
-requirements in [verification](verification.md#secure-boot-acceptance-matrix).
+This document defines the trust boundaries, image policy and authorization format
+for verified Linux/NixOS boot. See [configuration](configuration.md) for the
+implemented API, [the roadmap](roadmap.md) for remaining work and
+[verification](verification.md#secure-boot-acceptance-matrix) for acceptance gates.
 
 ## Current implementation
 
-Implementation has started. The shared schema provides `off`/`enforce`, a separate
-firmware requirement, public authority paths and explicit TPM capabilities. The image
-mode is also compiled into the ELF; runtime JSON cannot downgrade an enforced
+The shared schema provides `off`/`enforce`, a separate firmware requirement,
+public authority paths and explicit TPM capabilities. The image mode is also
+compiled into the ELF; runtime JSON cannot downgrade an enforced
 binary. PID 1 initializes restricted IMA policy before launching the manager and
 uses bounded protected recovery on every enforced failure path. Root shell,
 administrative rollback and persistent clone/promotion are unavailable in that mode.
@@ -24,7 +22,7 @@ ignores caller paths/import policy/extra arguments, and owns kexec. Its private
 stream uses bounded length-prefixed typed JSON; malformed or timed-out exchanges
 invalidate the connection. UI telemetry is not an authorization record.
 
-Core now verifies detached binary CMS signatures against explicit X.509 pins.
+Core verifies detached binary CMS signatures against explicit X.509 pins.
 It ignores embedded signer certificates and has no implicit CA store. Authorization
 binds sizes/SHA-256, exact ordered arguments, one typed ZFS root slot, source
 dataset and snapshot-clone permission. Read-only OS roots carry
@@ -35,10 +33,8 @@ hexadecimal. The argument ID hashes ordered tokens with UTF-8 byte lengths
 is replaced by its typed prefix; the position and all other arguments stay in
 the index. Different generations can share image bytes, and authorized clone
 selection retains the same index. This is a lookup rule, not authorization:
-signature, exact arguments and signed source/clone rules still must pass. The
-earlier flat layout is replaced; owner tooling must republish authorizations.
-The signed
-JSON also carries the detached `security.ima` signature for the initramfs.
+signature, exact arguments and signed source/clone rules still must pass. The signed JSON also carries the detached `security.ima` signature
+for the initramfs.
 Authorization precedes persistent clone creation and is repeated against the
 actual owned clone before handoff. An opaque plan holds copied/sealed, read-only
 memfd inputs and exact arguments. Source changes cannot alter those sealed bytes.
@@ -56,16 +52,14 @@ TPM startup is read-only; verified prepared-target measurements use PCR15.
 SRK/NvPCR setup and PCR11 OS phases belong to the selected OS. The
 persistent swtpm harness checks PCR replay and no loader NV/persistent allocation;
 OS policy integration, across-kexec log transport and physical acceptance remain
-pending. All published default images
-remain `off`; do not install this work as a verified production loader yet.
+pending. All published default images remain `off`; do not install this work as a verified production loader yet.
 
 The executor uses `kexec_file_load` exclusively and does not silently fall back to
 `kexec_load`. It reports kernel verification/lockdown errors, unloads a prepared
 kernel on failure, unmounts its OS roots and exports only pools matched to import
 ownership records. `KexecStarting` distinguishes failed handoff from an ordinary
 manager crash. These safeguards alone do not authenticate Bootspec, initramfs or
-the command line; the new enforced broker supplies that authorization. Existing
-unsigned OVMF evidence remains separate from the signed synthetic-input scenario.
+the command line; the enforced broker supplies that authorization.
 
 Initial NixOS support uses `org.nixos.bootspec.v1`. Specialisations and extra
 initrd extensions remain outside the initial path; `initrdSecrets` execution is
@@ -200,8 +194,8 @@ boot plans. Both OS adapters use a common signed authorization model that binds:
 - Required loader capabilities and approved target security profile.
 
 SHA-256 authenticates bytes only as part of a verified signature over the policy.
-The encoding and signature backend remain implementation decisions: use a standard
-reviewed format/library, not new cryptography. Parsing must be bounded and reject
+The implemented format is bounded JSON with a detached binary CMS signature
+verified against explicit X.509 pins. Parsing must reject
 unsupported versions, duplicate or ambiguous fields and malformed signatures.
 A signed claim about a target profile needs a trusted artifact producer; an
 untrusted `.config` file beside a kernel cannot establish its actual capabilities.
@@ -230,8 +224,8 @@ verified-boot promise.
 
 ## Privileged boundary and handoff API
 
-The current root manager and public-path `BootPlan` are insufficient security
-boundaries. The accepted direction keeps one ELF with distinct runtime roles:
+A public-path `BootPlan` is an untrusted candidate. Enforced images use one ELF
+with distinct runtime roles:
 PID 1 supervises an unprivileged UI/manager and a trusted privileged broker. Core
 owns authorization models and policy; TUI renders results and submits typed
 requests; generic ZFS mechanisms stay in zfskit, not application trust policy.
@@ -258,11 +252,11 @@ is not sufficient; OS privilege separation must enforce the broker boundary.
 
 The exact bytes verified must be the bytes passed to `kexec_file_load`. Holding an
 open file descriptor prevents path substitution but not modification of its inode.
-Preparation therefore needs immutable private staging with only the broker able
-to write, finalized read-only handles and an enforced no-mutation lifetime. The
-implementation must prove this property, including helper-process privileges.
-Sealed memfd is a candidate requiring an IMA/kexec compatibility experiment, not an
-accepted assumption. Native ZFS fs-verity support is not assumed.
+Preparation copies inputs into private memfds, attaches the authenticated IMA
+signature and seals them against mutation before creating read-only handles. The
+verified plan owns those handles through `kexec_file_load`. The configured-kernel
+VM scenario exercises actual IMA appraisal of those sealed inputs. Native ZFS
+fs-verity support is not assumed.
 
 A detached IMA signature can be authenticated and attached to a prepared private
 copy when the snapshot/archive lacks `security.ima`. This must preserve the signed
@@ -312,7 +306,7 @@ hash algorithms. Exact `CONFIG_*` requirements depend on the supported kernel an
 architecture and must be maintained as a validated capability matrix. Kconfig
 may reset requested flags because dependencies are missing.
 
-The proposed x86_64 capability checks include `CONFIG_EFI`, `CONFIG_EFI_STUB`,
+The x86_64 capability requirements include `CONFIG_EFI`, `CONFIG_EFI_STUB`,
 `CONFIG_KEXEC_FILE`, `CONFIG_KEXEC_SIG`, `CONFIG_KEXEC_SIG_FORCE`, the architecture's
 signed bzImage verification support, `CONFIG_MODULE_SIG`, `CONFIG_MODULE_SIG_FORCE`,
 `CONFIG_SECURITY_LOCKDOWN_LSM` with early forced integrity restrictions, and IMA
@@ -458,10 +452,10 @@ The following are not required for the initial enforced image:
   passphrase unlock, which must not authorize administrative recovery.
 - Whole-root integrity policy, target-wide IMA appraisal, and shim/MOK support.
 
-Signature encoding/backend, certificate rotation tooling, the exact broker IPC
-and sandbox, immutable staging/IMA interoperability, and per-kernel capability
-checks require implementation design and tests. These choices must preserve the
-accepted boundaries above; they must not become silent bypass options.
+Certificate rotation tooling, wider kernel/architecture compatibility and physical
+deployment need further validation. The implemented CMS format, broker IPC and
+sealed-input appraisal remain subject to the acceptance matrix as support grows;
+new profiles must preserve these trust boundaries.
 
 ## References
 
