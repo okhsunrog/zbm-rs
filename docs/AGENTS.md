@@ -26,4 +26,6 @@ manager, not a native UEFI ZFS implementation.
 - Preserve run artifacts on failure. State what VM checks passed and what remains
   unimplemented; VM boot does not establish physical boot or Secure Boot.
 - Never put assistant attribution in commits, PRs, branches or trailers.
-  Never post GitHub/GitLab review comments. Do not publish without a request.
+  Never post GitHub/GitLab review comments.
+- Commit and push each completed, validated logical change to GitHub. Preserve
+  unrelated work and stage only files belonging to that change.
