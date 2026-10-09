@@ -6,6 +6,10 @@ ownership boundaries are described in [the architecture](architecture.md).
 
 ## Local checks and preview
 
+Enter `nix develop` for the pinned Rust toolchain and native dependencies,
+including OpenSSL and pkg-config. This keeps C compilation and dependency
+discovery within the same Nix environment on non-NixOS hosts.
+
 ```sh
 cargo fmt --all --check
 cargo test --workspace --all-features --locked

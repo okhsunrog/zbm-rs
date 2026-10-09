@@ -53,6 +53,10 @@
       };
       nixosModules.default = import ./nix/nixos-module.nix { inherit self; };
       nixosModules.snapshotBoot = import ./nix/snapshot-boot.nix;
-      devShells.${system}.default = pkgs.mkShell { packages = with pkgs; [ cargo rustc rustfmt clippy qemu cpio uv python3 gzip xz zstd patchelf ]; };
+      devShells.${system}.default = pkgs.mkShell {
+        packages = with pkgs; [ cargo rustc rustfmt clippy qemu cpio uv python3 gzip xz zstd patchelf ];
+        nativeBuildInputs = [ pkgs.pkg-config ];
+        buildInputs = [ pkgs.openssl ];
+      };
     };
 }
