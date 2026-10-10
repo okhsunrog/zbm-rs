@@ -1,6 +1,6 @@
 # Screenshot sources
 
-These PNGs are unmodified 1280×800 QEMU captures made on 2026-10-09. They show the
+These PNGs are unmodified 1280×800 QEMU captures made on 2026-10-10. They show the
 actual Ratatui interface at 160×50 console cells, using the portable disposable
 VM profile with `security.mode = "off"` and no TPM. They demonstrate the interface;
 they are not Secure Boot or successful OS-handoff evidence.
@@ -28,8 +28,8 @@ uses these image settings in a consuming flake's `lib.mkImage` call:
 }
 ```
 
-The screenshot session used `target/readme-demo-image`,
-`target/nixos-fixture-default-regression` and `target/vm/readme-demo-001`. The
+The screenshot session used `target/ui-design-image-v3`,
+`target/nixos-fixture-default-regression` and `target/vm/ui-design-final-002`. The
 fixture is the ordinary `zbm-rs-boot-fixture` output; it contains two distinct
 system closures without the intentionally rejected peers from acceptance tests.
 Build and launch equivalent images with fresh output/run paths:
@@ -48,8 +48,17 @@ cargo xtask vm --run target/vm/screenshots-new ssh 'set -eu;
   zfs create -o mountpoint=legacy -o org.zfsbootmenu:active=on zbm_fixture/nixos;
   zpool set bootfs=zbm_fixture/nixos zbm_fixture;
   mkdir -p /fixture-root;
-  mount -t zfs zbm_fixture/nixos /fixture-root;
-  tar -xf /dev/vdb -C /fixture-root;
+  mount -t zfs zbm_fixture/nixos /fixture-root'
+
+# The large fixture needs a longer deadline than the harness's 30-second SSH
+# command limit. These are generated disposable VM credentials.
+timeout --kill-after=2 905 ssh -F /dev/null \
+  -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile=target/vm/screenshots-new/known_hosts \
+  -i target/vm/screenshots-new/id_ed25519 -p 2298 root@127.0.0.1 \
+  'timeout 900 tar -xf /dev/vdb -C /fixture-root'
+
+cargo xtask vm --run target/vm/screenshots-new ssh 'set -eu;
   zfs snapshot zbm_fixture/nixos@known-good;
   umount /fixture-root;
   zpool export zbm_fixture'
@@ -64,5 +73,7 @@ cargo xtask vm --run target/vm/screenshots-new screenshot /path/to/capture.png
 ```
 
 The harness pauses QEMU for each capture and resumes the running guest afterward.
-The original session powered off through P and its foreground QEMU process exited.
+The capture session also exercised the action menu, full details, discard
+confirmation (cancelled) and 80×25 controls. It powered off through P and its
+foreground QEMU process exited.
 No host disks, keys or TPM were attached.

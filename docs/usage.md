@@ -102,10 +102,14 @@ Restart before further boot actions; the next manager reconciles recorded
 resource intent. Blocking OS-root reads run outside the input loop, and shutdown
 does not wait indefinitely for those reads.
 
-The TUI uses a candidate list and a read-only details pane on wide consoles
-(110 columns or more). Smaller consoles keep the list and recovery controls;
-I/F3 opens the same complete details in a scrollable panel. Bootspec previews
-show the generation's actual kernel, initrd, init and arguments. Execution still
+The TUI uses a candidate list and a concise selection summary on wide consoles
+(110 columns or more). The summary shows the boot source, generation and snapshot
+clone state; full store paths and arguments stay in the I/F3 details panel.
+Smaller consoles keep the list, details shortcut and recovery controls.
+The layout uses base ANSI background colors for Linux-console compatibility,
+with cyan selection, magenta snapshot labels and explicit text for every state.
+The header reports the configured boot policy, not a verification result.
+Bootspec previews show the generation's actual kernel, initrd, init and arguments. Execution still
 revalidates the boot inputs. Rejected generations can be inspected but cannot boot.
 
 - `/` starts fuzzy search in the current list. Enter accepts the filter without

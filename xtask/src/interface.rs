@@ -98,7 +98,10 @@ pub fn environments(run: &Path) -> Result<()> {
     })?;
     let text = vm::console(run)?;
     ensure!(
-        text.contains("Rescan") && text.contains("Shell") && text.contains("Power off"),
+        text.contains("Rescan")
+            && text.contains("Shell")
+            && text.contains("Power off")
+            && text.contains("Details"),
         "Compact console hid recovery"
     );
     vm::screenshot(run, &run.join("ui-compact.png"))?;

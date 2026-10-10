@@ -10,7 +10,7 @@
   </a>
 </p>
 
-<p align="center"><sub>NixOS snapshot selection and the prepared clone's boot details, captured in a disposable QEMU VM.</sub></p>
+<p align="center"><sub>NixOS snapshot selection and the prepared clone's boot summary, captured in a disposable QEMU VM.</sub></p>
 
 ---
 

@@ -1,16 +1,14 @@
 //! Presentation and keyboard navigation. No filesystem reads or ZFS effects.
+mod render;
 use super::{
     Options,
     command::{ALL, Command},
-    status_message,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
-    Frame,
-    layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::ListState,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -479,13 +477,11 @@ impl Ui {
     }
     pub fn open_label(&self, state: &State) -> &'static str {
         match View::of(state) {
-            View::Pools => "Import / inspect pool",
-            View::Environments => "Inspect boot targets",
-            View::Snapshots => "Inspect snapshot boot targets",
-            View::Generations | View::Kernels if state.snapshot_view => {
-                "Prepare / reuse clone & boot"
-            }
-            View::Generations | View::Kernels => "Boot selected target",
+            View::Pools => "Import",
+            View::Environments => "Open",
+            View::Snapshots => "Open",
+            View::Generations | View::Kernels if state.snapshot_view => "Boot clone",
+            View::Generations | View::Kernels => "Boot",
         }
     }
     pub fn open_panel(&mut self, panel: Panel) {
@@ -664,11 +660,24 @@ impl Ui {
             .map(|command| Input::Command(command, false))
             .unwrap_or(Input::Ignored)
     }
+    fn prepared_target(&self, target: &BootTarget) -> Option<&BootPlan> {
+        self.prepared.as_ref().filter(|plan| {
+            plan.target.generation == target.generation
+                && plan.target.inputs.kernel == target.inputs.kernel
+                && plan
+                    .target
+                    .snapshot
+                    .as_ref()
+                    .zip(target.snapshot.as_ref())
+                    .is_some_and(|(a, b)| a.guid == b.guid && a.name == b.name)
+        })
+    }
+
     fn details(&self, state: &State, options: &Options) -> Vec<Line<'static>> {
         let mut lines = vec![];
         let mut field = |key: &str, value: String| {
             lines.push(Line::from(vec![
-                Span::styled(format!("{key}: "), Style::default().fg(Color::Gray)),
+                Span::styled(format!("{key}: "), Style::default().fg(Color::Cyan)),
                 Span::raw(clean(value)),
             ]));
         };
@@ -765,15 +774,7 @@ impl Ui {
                     field("Snapshot GUID", s.guid.to_string());
                     field("Root override", "Validated during clone preparation".into());
                 }
-                let plan = self.prepared.as_ref().filter(|p| {
-                    p.target.generation == t.generation
-                        && p.target.inputs.kernel == t.inputs.kernel
-                        && p.target
-                            .snapshot
-                            .as_ref()
-                            .zip(t.snapshot.as_ref())
-                            .is_some_and(|(a, b)| a.guid == b.guid && a.name == b.name)
-                });
+                let plan = self.prepared_target(t);
                 if let Some(plan) = plan {
                     field("Prepared clone", plan.target.dataset.clone());
                     field("Prepared cmdline", plan.cmdline.join(" "));
@@ -801,333 +802,6 @@ impl Ui {
             ),
         }
         lines
-    }
-    pub fn draw(&mut self, frame: &mut Frame, state: &State, options: &Options) {
-        let area = frame.area();
-        let colors = Style::default().fg(Color::Gray);
-        let regions = Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Min(4),
-            Constraint::Length(4),
-            Constraint::Length(2),
-            Constraint::Length(2),
-        ])
-        .split(area);
-        let title = options
-            .config
-            .ui
-            .title
-            .as_deref()
-            .unwrap_or("zbm-rs | ZFS boot environment manager");
-        let context = state
-            .environments
-            .get(state.selected_environment)
-            .map(|e| e.dataset.as_str())
-            .or_else(|| state.pools.get(state.selected).map(|p| p.name.as_str()))
-            .unwrap_or("Select a ZFS pool");
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(vec![
-                    Span::styled(
-                        clean(title),
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(format!("   / {}", View::of(state).title()), colors),
-                ]),
-                Line::styled(clean(context), colors),
-            ]),
-            regions[0],
-        );
-        let wide = area.width >= 110;
-        let columns = if wide {
-            Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)])
-                .split(regions[1])
-                .to_vec()
-        } else {
-            vec![regions[1]]
-        };
-        let list_area = columns[0];
-        let list_regions = Layout::vertical([Constraint::Length(2), Constraint::Min(1)])
-            .split(Block::bordered().inner(list_area));
-        frame.render_widget(
-            Block::bordered()
-                .border_style(Style::default().fg(Color::DarkGray))
-                .title(View::of(state).title()),
-            list_area,
-        );
-        let query = &self.screens[&self.key].query;
-        frame.render_widget(
-            Paragraph::new(format!(
-                "Find: {}{}",
-                clean(query),
-                if self.searching { "_" } else { "  [/]" }
-            ))
-            .style(Style::default().fg(if self.searching {
-                Color::Yellow
-            } else {
-                Color::Gray
-            })),
-            list_regions[0],
-        );
-        let rows = self.visible(state);
-        let items: Vec<_> = if state.scanning {
-            vec![ListItem::new("Discovering pools...")]
-        } else if rows.is_empty() {
-            vec![ListItem::new(if Self::rows(state).is_empty() {
-                "No candidates discovered"
-            } else {
-                "No targets match this filter"
-            })]
-        } else {
-            rows.iter()
-                .map(|row| {
-                    ListItem::new(vec![
-                        Line::from(vec![
-                            Span::raw(clean(&row.title)),
-                            Span::styled(
-                                format!("  [{}]", row.tag),
-                                Style::default().fg(if row.tag.contains("UNAVAILABLE") {
-                                    Color::Yellow
-                                } else {
-                                    Color::Gray
-                                }),
-                            ),
-                        ]),
-                        Line::styled(format!("  {}", clean(&row.subtitle)), colors),
-                    ])
-                })
-                .collect()
-        };
-        frame.render_stateful_widget(
-            List::new(items).highlight_symbol("> ").highlight_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            list_regions[1],
-            &mut self.screens.get_mut(&self.key).unwrap().list,
-        );
-        if wide {
-            frame.render_widget(
-                Paragraph::new(self.details(state, options))
-                    .wrap(Wrap { trim: false })
-                    .block(
-                        Block::bordered()
-                            .border_style(Style::default().fg(Color::DarkGray))
-                            .title("Selected target [I] full details"),
-                    ),
-                columns[1],
-            );
-        }
-        let mut message = status_message(state);
-        if state.operation.is_some()
-            && let Some(started) = self.operation_started
-        {
-            message.push_str(&format!(
-                "  [{}s / 30s deadline]",
-                started.elapsed().as_secs()
-            ));
-        }
-        frame.render_widget(
-            Paragraph::new(clean(message))
-                .wrap(Wrap { trim: false })
-                .style(Style::default().fg(if state.error.is_some() {
-                    Color::Yellow
-                } else {
-                    Color::Gray
-                }))
-                .block(
-                    Block::default()
-                        .borders(Borders::TOP)
-                        .border_style(Style::default().fg(Color::DarkGray))
-                        .title("Status"),
-                ),
-            regions[2],
-        );
-        let mut local = format!("[Enter] {}  [B] Back", self.open_label(state));
-        if !state.environments.is_empty() && options.config.ui.show_snapshots {
-            local.push_str("  [T] Snapshots");
-        }
-        if state.snapshot_view
-            && options.config.security.mode != crate::config::SecurityMode::Enforce
-        {
-            local.push_str("  [O] Clone BE  [M] Clone/promote  [U] Rollback");
-        }
-        if state.snapshot_view && matches!(View::of(state), View::Generations | View::Kernels) {
-            local.push_str("  [C] Clone  [D] Discard");
-        }
-        frame.render_widget(
-            Paragraph::new(local)
-                .wrap(Wrap { trim: true })
-                .style(Style::default().fg(Color::Cyan)),
-            regions[3],
-        );
-        let protected = options.config.security.mode == crate::config::SecurityMode::Enforce;
-        let global = if protected && area.width >= 110 {
-            "[enforce] [F1] Help  [F2] Actions  [I] Details  [R/F5] Rescan  [N/F6] Restart manager  [P/F10] Power off"
-        } else if protected {
-            "[enforce] F1 Help  F2 Actions  I Details  R Rescan  N Restart  P Power off"
-        } else if area.width >= 110 {
-            "[F1] Help  [F2] Actions  [I] Details  [R/F5] Rescan  [S/F4] Shell  [N/F6] Restart manager  [P/F10] Power off"
-        } else {
-            "F1 Help  F2 Actions  I Details  R Rescan  S Shell  N Restart  P Power off"
-        };
-        frame.render_widget(
-            Paragraph::new(global)
-                .wrap(Wrap { trim: true })
-                .style(colors),
-            regions[4],
-        );
-        if self.panel != Panel::None {
-            let width = area.width.saturating_sub(4).min(106);
-            let height = area.height.saturating_sub(4).min(30);
-            let popup = Rect::new(
-                area.x + (area.width - width) / 2,
-                area.y + (area.height - height) / 2,
-                width,
-                height,
-            );
-            frame.render_widget(Clear, popup);
-            let block = Block::bordered()
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(match self.panel {
-                    Panel::Help => "Keyboard help [Esc] close",
-                    Panel::Actions => "All actions [Enter] run [Esc] close",
-                    Panel::Details => "Full target details [PgUp/PgDn] scroll [Esc] close",
-                    Panel::ConfirmDiscard => "Discard prepared clone? [Enter] confirm [Esc] cancel",
-                    Panel::ConfirmRollback => "Rollback dataset [Esc] cancel",
-                    Panel::ConfirmPromote => "Clone and promote [Enter] confirm [Esc] cancel",
-                    Panel::None => unreachable!(),
-                });
-            if self.panel == Panel::Actions {
-                let items: Vec<_> = ALL
-                    .into_iter()
-                    .map(|command| {
-                        let reason = self.reason(command, state, options);
-                        ListItem::new(format!(
-                            "{:12} {}{}",
-                            command.keys(),
-                            command.label(),
-                            reason
-                                .as_ref()
-                                .map(|r| format!("  (unavailable: {})", clean(r)))
-                                .unwrap_or_default()
-                        ))
-                        .style(Style::default().fg(if reason.is_some() {
-                            Color::Gray
-                        } else {
-                            Color::Cyan
-                        }))
-                    })
-                    .collect();
-                frame.render_stateful_widget(
-                    List::new(items)
-                        .block(block)
-                        .highlight_symbol("> ")
-                        .highlight_style(
-                            Style::default()
-                                .bg(Color::DarkGray)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    popup,
-                    &mut self.menu,
-                );
-            } else {
-                let text = match self.panel {
-                    Panel::Help => {
-                        let mut lines: Vec<_> = ALL
-                            .into_iter()
-                            .map(|command| {
-                                let annotation = if protected
-                                    && matches!(
-                                        command,
-                                        Command::Shell
-                                            | Command::Rollback
-                                            | Command::Clone
-                                            | Command::ClonePromote
-                                    ) {
-                                    " (disabled in enforce)"
-                                } else {
-                                    ""
-                                };
-                                Line::raw(format!(
-                                    "{:12} {}{annotation}",
-                                    command.keys(),
-                                    command.label()
-                                ))
-                            })
-                            .collect();
-                        let recovery = if protected {
-                            "F6 Restart manager and F10 Power off work during search and operations."
-                        } else {
-                            "F4 Shell, F6 Restart manager, F10 Power off work during search and operations."
-                        };
-                        lines.extend([Line::raw(""),Line::raw("Arrow / Home / End / PgUp / PgDn: select / scroll"),Line::raw("Search: Enter keeps filter; Esc clears filter. Typing never runs commands."),Line::raw(recovery),Line::raw("Snapshot: Enter inspects boot targets; administrative mutations need authorization."),Line::raw("Q exits the manager; PID 1 decides recovery. N restarts only the manager.")]);
-                        lines
-                    }
-                    Panel::Details => self.details(state, options),
-                    Panel::ConfirmRollback => vec![
-                        Line::raw(
-                            state
-                                .snapshots
-                                .get(state.selected_snapshot)
-                                .map(|s| clean(&s.source.name))
-                                .unwrap_or_default(),
-                        ),
-                        Line::raw(""),
-                        Line::raw(
-                            "Discard current changes and ALL newer snapshots of this dataset.",
-                        ),
-                        Line::raw(
-                            "Dependent clones are not forcibly destroyed. Other datasets are not rolled back.",
-                        ),
-                        Line::raw("Type ROLLBACK and press Enter to confirm. Esc cancels."),
-                        Line::raw(format!("> {}_", self.confirmation)),
-                    ],
-                    Panel::ConfirmPromote => vec![
-                        Line::raw(
-                            state
-                                .snapshots
-                                .get(state.selected_snapshot)
-                                .map(|s| clean(&s.source.name))
-                                .unwrap_or_default(),
-                        ),
-                        Line::raw("Create an ordinary boot environment and promote it."),
-                        Line::raw(
-                            "Promotion moves ownership of the origin and older snapshots to the new BE.",
-                        ),
-                        Line::raw("The source filesystem remains. Enter confirms; Esc cancels."),
-                    ],
-                    Panel::ConfirmDiscard => vec![
-                        Line::raw(
-                            self.target(state)
-                                .and_then(|t| t.snapshot.as_ref())
-                                .map(|s| clean(&s.name))
-                                .unwrap_or_default(),
-                        ),
-                        Line::raw(""),
-                        Line::raw("Discard only the prepared owned clone for this snapshot."),
-                        Line::raw(
-                            "The backend verifies ownership and uses non-recursive destruction.",
-                        ),
-                        Line::raw("The source dataset and snapshot remain unchanged."),
-                        Line::raw(""),
-                        Line::raw("Enter: confirm    Esc: cancel"),
-                    ],
-                    _ => unreachable!(),
-                };
-                frame.render_widget(
-                    Paragraph::new(text)
-                        .block(block)
-                        .wrap(Wrap { trim: false })
-                        .scroll((self.scroll, 0)),
-                    popup,
-                );
-            }
-        }
     }
 }
 
@@ -1296,7 +970,10 @@ mod tests {
                 .map(|cell| cell.symbol())
                 .collect::<String>();
             assert!(
-                text.contains("Rescan") && text.contains("Shell") && text.contains("Power off"),
+                text.contains("Rescan")
+                    && text.contains("Shell")
+                    && text.contains("Power off")
+                    && text.contains("Details"),
                 "{width}x{height}: {text}"
             );
             ui.open_panel(Panel::Actions);

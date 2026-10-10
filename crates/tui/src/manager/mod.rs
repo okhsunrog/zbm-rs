@@ -181,10 +181,7 @@ async fn tui(
                 }
                 Ok(Outcome::Prepared(plan)) => {
                     ui.prepared = Some(plan.clone());
-                    state.error = Some(format!(
-                        "Prepared clone: {}. Enter boots it; restart reuses it.",
-                        plan.target.dataset
-                    ));
+                    state.error = None;
                     save_plan(&plan)?;
                     "snapshot-prepared"
                 }
