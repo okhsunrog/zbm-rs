@@ -2,6 +2,34 @@ use anyhow::Result;
 use slint::ComponentHandle;
 
 slint::slint! {
+    component SourceRow inherits Rectangle {
+        in property <int> source-index;
+        in property <int> selected-source;
+        in property <bool> keyboard-focus;
+        in property <string> title;
+        callback activated(int);
+
+        height: 44px;
+        border-radius: 8px;
+        background: root.source-index == root.selected-source
+            ? #223550
+            : source-touch.has-hover ? #19283a : transparent;
+        border-width: root.keyboard-focus && root.source-index == root.selected-source ? 1px : 0px;
+        border-color: #64a8ff;
+
+        Text {
+            text: "  " + root.title;
+            color: root.source-index == root.selected-source ? #deebff : #9babc0;
+            font-size: 15px;
+            vertical-alignment: center;
+        }
+
+        source-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.activated(root.source-index); }
+        }
+    }
+
     component BootRow inherits Rectangle {
         in property <int> row-index;
         in property <int> selected-index;
@@ -9,6 +37,7 @@ slint::slint! {
         in property <string> subtitle;
         in property <string> badge;
         in property <bool> trusted: true;
+        in property <bool> keyboard-focus;
         callback activated(int);
 
         height: 72px;
@@ -16,7 +45,7 @@ slint::slint! {
         background: root.row-index == root.selected-index
             ? #243b55
             : row-touch.has-hover ? #1d2a3a : transparent;
-        border-width: root.row-index == root.selected-index ? 1px : 0px;
+        border-width: root.keyboard-focus && root.row-index == root.selected-index ? 1px : 0px;
         border-color: #64a8ff;
 
         HorizontalLayout {
@@ -72,6 +101,12 @@ slint::slint! {
 
     export component BootManager inherits Window {
         in-out property <int> selected-index: 0;
+        in-out property <int> selected-source: 0;
+        private property <int> focus-column: 0;
+        private property <string> source-title:
+            root.selected-source == 0 ? "All boot environments" :
+            root.selected-source == 1 ? "NixOS generations" :
+            root.selected-source == 2 ? "ZFS snapshots" : "Linux kernels";
         private property <string> selected-title:
             root.selected-index == 0 ? "NixOS generation 42" :
             root.selected-index == 1 ? "NixOS generation 41" :
@@ -90,12 +125,42 @@ slint::slint! {
             height: 100%;
             init => { keyboard.focus(); }
             key-pressed(event) => {
+                if event.text == Key.Tab || event.text == Key.RightArrow || event.text == "l" {
+                    root.focus-column = 1;
+                    return accept;
+                }
+                if event.text == Key.Backtab || event.text == Key.LeftArrow || event.text == "h" {
+                    root.focus-column = 0;
+                    return accept;
+                }
                 if event.text == Key.DownArrow || event.text == "j" {
-                    root.selected-index = min(5, root.selected-index + 1);
+                    if root.focus-column == 0 {
+                        root.selected-source = min(3, root.selected-source + 1);
+                        root.selected-index = root.selected-source == 0 ? 0 : root.selected-source == 1 ? 0 : root.selected-source == 2 ? 2 : 4;
+                    } else {
+                        root.selected-index = root.selected-source == 1
+                            ? min(1, root.selected-index + 1)
+                            : root.selected-source == 2
+                                ? min(3, root.selected-index + 1)
+                                : root.selected-source == 3
+                                    ? 4
+                                    : min(5, root.selected-index + 1);
+                    }
                     return accept;
                 }
                 if event.text == Key.UpArrow || event.text == "k" {
-                    root.selected-index = max(0, root.selected-index - 1);
+                    if root.focus-column == 0 {
+                        root.selected-source = max(0, root.selected-source - 1);
+                        root.selected-index = root.selected-source == 0 ? 0 : root.selected-source == 1 ? 0 : root.selected-source == 2 ? 2 : 4;
+                    } else {
+                        root.selected-index = root.selected-source == 1
+                            ? max(0, root.selected-index - 1)
+                            : root.selected-source == 2
+                                ? max(2, root.selected-index - 1)
+                                : root.selected-source == 3
+                                    ? 4
+                                    : max(0, root.selected-index - 1);
+                    }
                     return accept;
                 }
                 return reject;
@@ -153,15 +218,10 @@ slint::slint! {
                         padding: 18px;
                         spacing: 10px;
                         Text { text: "BOOT SOURCES"; color: #677991; font-size: 11px; font-weight: 600; }
-                        Rectangle {
-                            height: 44px;
-                            border-radius: 8px;
-                            background: #223550;
-                            Text { text: "  All entries"; color: #deebff; font-size: 15px; vertical-alignment: center; }
-                        }
-                        Text { text: "  NixOS generations"; color: #9babc0; font-size: 15px; vertical-alignment: center; height: 42px; }
-                        Text { text: "  Snapshots"; color: #9babc0; font-size: 15px; vertical-alignment: center; height: 42px; }
-                        Text { text: "  Linux kernels"; color: #9babc0; font-size: 15px; vertical-alignment: center; height: 42px; }
+                        SourceRow { source-index: 0; selected-source: root.selected-source; keyboard-focus: root.focus-column == 0; title: "All entries"; activated(i) => { root.selected-source = i; root.selected-index = 0; root.focus-column = 0; } }
+                        SourceRow { source-index: 1; selected-source: root.selected-source; keyboard-focus: root.focus-column == 0; title: "NixOS generations"; activated(i) => { root.selected-source = i; root.selected-index = 0; root.focus-column = 0; } }
+                        SourceRow { source-index: 2; selected-source: root.selected-source; keyboard-focus: root.focus-column == 0; title: "Snapshots"; activated(i) => { root.selected-source = i; root.selected-index = 2; root.focus-column = 0; } }
+                        SourceRow { source-index: 3; selected-source: root.selected-source; keyboard-focus: root.focus-column == 0; title: "Linux kernels"; activated(i) => { root.selected-source = i; root.selected-index = 4; root.focus-column = 0; } }
                         Rectangle { vertical-stretch: 1; }
                         Text { text: "POOL"; color: #677991; font-size: 11px; font-weight: 600; }
                         Text { text: "novafs  ·  ONLINE"; color: #80d9a3; font-size: 14px; }
@@ -172,13 +232,13 @@ slint::slint! {
                     background: transparent;
                     VerticalLayout {
                         spacing: 8px;
-                        Text { text: "Choose a boot environment"; color: #f1f6ff; font-size: 22px; font-weight: 600; height: 38px; }
-                        BootRow { row-index: 0; selected-index: root.selected-index; title: "NixOS generation 42"; subtitle: "2026-10-12  ·  current system"; badge: "CURRENT"; activated(i) => { root.selected-index = i; } }
-                        BootRow { row-index: 1; selected-index: root.selected-index; title: "NixOS generation 41"; subtitle: "2026-10-10  ·  previous system"; badge: "SIGNED"; activated(i) => { root.selected-index = i; } }
-                        BootRow { row-index: 2; selected-index: root.selected-index; title: "@before-kernel-update"; subtitle: "Snapshot  ·  writable clone on boot"; badge: "TRUSTED"; activated(i) => { root.selected-index = i; } }
-                        BootRow { row-index: 3; selected-index: root.selected-index; title: "@known-good"; subtitle: "Snapshot  ·  3 days ago"; badge: "TRUSTED"; activated(i) => { root.selected-index = i; } }
-                        BootRow { row-index: 4; selected-index: root.selected-index; title: "Linux 6.17.1-zfs"; subtitle: "Generic Linux boot target"; badge: "SIGNED"; activated(i) => { root.selected-index = i; } }
-                        BootRow { row-index: 5; selected-index: root.selected-index; title: "Recovery tools"; subtitle: "Diagnostics and reboot controls"; badge: "LOCAL"; trusted: false; activated(i) => { root.selected-index = i; } }
+                        Text { text: root.source-title; color: #f1f6ff; font-size: 22px; font-weight: 600; height: 38px; }
+                        BootRow { visible: root.selected-source == 0 || root.selected-source == 1; row-index: 0; selected-index: root.selected-index; keyboard-focus: root.focus-column == 1; title: "NixOS generation 42"; subtitle: "2026-10-12  ·  current system"; badge: "CURRENT"; activated(i) => { root.selected-index = i; root.focus-column = 1; } }
+                        BootRow { visible: root.selected-source == 0 || root.selected-source == 1; row-index: 1; selected-index: root.selected-index; keyboard-focus: root.focus-column == 1; title: "NixOS generation 41"; subtitle: "2026-10-10  ·  previous system"; badge: "SIGNED"; activated(i) => { root.selected-index = i; root.focus-column = 1; } }
+                        BootRow { visible: root.selected-source == 0 || root.selected-source == 2; row-index: 2; selected-index: root.selected-index; keyboard-focus: root.focus-column == 1; title: "@before-kernel-update"; subtitle: "Snapshot  ·  writable clone on boot"; badge: "TRUSTED"; activated(i) => { root.selected-index = i; root.focus-column = 1; } }
+                        BootRow { visible: root.selected-source == 0 || root.selected-source == 2; row-index: 3; selected-index: root.selected-index; keyboard-focus: root.focus-column == 1; title: "@known-good"; subtitle: "Snapshot  ·  3 days ago"; badge: "TRUSTED"; activated(i) => { root.selected-index = i; root.focus-column = 1; } }
+                        BootRow { visible: root.selected-source == 0 || root.selected-source == 3; row-index: 4; selected-index: root.selected-index; keyboard-focus: root.focus-column == 1; title: "Linux 6.17.1-zfs"; subtitle: "Generic Linux boot target"; badge: "SIGNED"; activated(i) => { root.selected-index = i; root.focus-column = 1; } }
+                        BootRow { visible: root.selected-source == 0; row-index: 5; selected-index: root.selected-index; keyboard-focus: root.focus-column == 1; title: "Recovery tools"; subtitle: "Diagnostics and reboot controls"; badge: "LOCAL"; trusted: false; activated(i) => { root.selected-index = i; root.focus-column = 1; } }
                     }
                 }
 
@@ -214,7 +274,7 @@ slint::slint! {
             HorizontalLayout {
                 height: 26px;
                 vertical-stretch: 0;
-                Text { text: "↑ ↓ / j k  Navigate"; color: #6f8097; font-size: 12px; }
+                Text { text: "← → / h l / Tab  Switch panel    ↑ ↓ / j k  Navigate"; color: #6f8097; font-size: 12px; }
                 Rectangle { horizontal-stretch: 1; }
                 Text { text: "GUI prototype · software renderer"; color: #596b82; font-size: 12px; }
             }
