@@ -244,8 +244,8 @@ async fn target(zfs: &Zfs, pool: &Pool, wanted: &BootTarget, limit: u32) -> Resu
         .into_iter()
         .find(|candidate| {
             candidate.dataset == wanted.dataset
-                && candidate.generation == wanted.generation
-                && candidate.inputs.kernel == wanted.inputs.kernel
+                && candidate.generation() == wanted.generation()
+                && candidate.inputs().kernel == wanted.inputs().kernel
         })
         .ok_or_else(|| {
             anyhow::anyhow!("Target is not in the broker's independently resolved catalog")

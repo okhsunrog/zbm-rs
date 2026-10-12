@@ -1,5 +1,7 @@
 //! Bootspec resolution is independent of rendering and execution.
 pub(crate) mod planning;
+mod record;
+use record::TargetRecord;
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -9,19 +11,52 @@ use std::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "TargetRecord", into = "TargetRecord")]
 pub struct BootTarget {
     pub dataset: String,
-    pub generation: Option<u64>,
     pub label: String,
     pub root: PathBuf,
-    /// Guest-absolute path, not a host path under the loader's /nix/store.
-    pub toplevel: Option<PathBuf>,
     pub backend: Backend,
     pub snapshot: Option<SnapshotSource>,
     pub mountpoint: Option<String>,
-    pub issue: Option<String>,
-    /// Guest paths and arguments for inspection. Execution revalidates Bootspec.
-    pub inputs: BootInputs,
+}
+
+impl BootTarget {
+    pub fn generation(&self) -> Option<u64> {
+        match &self.backend {
+            Backend::Nixos(t) => Some(t.generation),
+            Backend::Linux(_) => None,
+        }
+    }
+    pub fn toplevel(&self) -> Option<&Path> {
+        match &self.backend {
+            Backend::Nixos(t) => Some(&t.toplevel),
+            Backend::Linux(_) => None,
+        }
+    }
+    pub fn issue(&self) -> Option<&str> {
+        match &self.backend {
+            Backend::Nixos(_) => None,
+            Backend::Linux(t) => t.issue.as_deref(),
+        }
+    }
+    /// Discovery data for display only. Execution revalidates the inputs.
+    pub fn inputs(&self) -> BootInputs {
+        match &self.backend {
+            Backend::Nixos(t) => BootInputs {
+                kernel: t.kernel.clone(),
+                initrd: t.initrd.clone(),
+                init: Some(t.init.clone()),
+                kernel_params: t.kernel_params.clone(),
+            },
+            Backend::Linux(t) => BootInputs {
+                kernel: t.kernel.clone(),
+                initrd: t.initrd.clone(),
+                init: None,
+                kernel_params: t.commandline.clone(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,14 +87,29 @@ impl BootInputs {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind")]
+#[derive(Debug, Clone)]
 pub enum Backend {
-    Nixos,
-    Linux {
-        rootprefix: String,
-        commandline: Vec<String>,
-    },
+    Nixos(NixosTarget),
+    Linux(LinuxTarget),
+}
+
+#[derive(Debug, Clone)]
+pub struct NixosTarget {
+    pub generation: u64,
+    pub toplevel: PathBuf,
+    pub init: PathBuf,
+    pub kernel: PathBuf,
+    pub initrd: Option<PathBuf>,
+    pub kernel_params: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LinuxTarget {
+    pub kernel: PathBuf,
+    pub initrd: Option<PathBuf>,
+    pub rootprefix: String,
+    pub commandline: Vec<String>,
+    pub issue: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,14 +233,13 @@ fn read_spec(root: &Path, toplevel: &Path) -> io::Result<Bootspec> {
     Ok(read_document(root, toplevel)?.boot)
 }
 pub fn supports_snapshot(target: &BootTarget) -> io::Result<bool> {
-    if matches!(target.backend, Backend::Linux { .. }) {
+    if matches!(target.backend, Backend::Linux(_)) {
         return Ok(true);
     }
     let spec = read_spec(
         &target.root,
         target
-            .toplevel
-            .as_ref()
+            .toplevel()
             .ok_or_else(|| invalid("Missing NixOS toplevel"))?,
     )?;
     let initrd = spec
@@ -245,16 +294,19 @@ pub fn discover_generations(root: &Path, dataset: &str, limit: u32) -> io::Resul
                 return Err(invalid("Bootspec toplevel does not match generation"));
             }
             Ok(BootTarget {
-                inputs: BootInputs::from_spec(&spec),
                 dataset: dataset.into(),
-                generation: Some(generation),
                 label: spec.label,
                 root: root.into(),
-                toplevel: Some(spec.toplevel),
-                backend: Backend::Nixos,
+                backend: Backend::Nixos(NixosTarget {
+                    generation,
+                    toplevel: spec.toplevel,
+                    init: spec.init,
+                    kernel: spec.kernel,
+                    initrd: spec.initrd,
+                    kernel_params: spec.kernel_params,
+                }),
                 snapshot: None,
                 mountpoint: None,
-                issue: None,
             })
         })();
         match target {
@@ -272,7 +324,7 @@ impl BootPlan {
     /// A verified NixOS target needs an explicit typed ZFS root instead of an
     /// indirect fstab selector. Existing initrd checks forbid unsupported rewrites.
     pub fn resolve_verified(target: &BootTarget, extra_args: &[String]) -> io::Result<Self> {
-        if matches!(target.backend, Backend::Linux { .. }) {
+        if matches!(target.backend, Backend::Linux(_)) {
             Self::resolve(target, extra_args)
         } else {
             Self::resolve_nixos(target, extra_args, Some(&target.dataset))
@@ -280,7 +332,7 @@ impl BootPlan {
     }
 
     pub fn resolve(target: &BootTarget, extra_args: &[String]) -> io::Result<Self> {
-        if matches!(target.backend, Backend::Linux { .. }) {
+        if matches!(target.backend, Backend::Linux(_)) {
             return crate::linux::resolve(target, &target.dataset, extra_args);
         }
         Self::resolve_nixos(target, extra_args, None)
@@ -292,8 +344,7 @@ impl BootPlan {
         root_override: Option<&str>,
     ) -> io::Result<Self> {
         let toplevel = target
-            .toplevel
-            .as_ref()
+            .toplevel()
             .ok_or_else(|| invalid("Missing NixOS toplevel"))?;
         let spec = read_spec(&target.root, toplevel)?;
         let fstab_path = rooted_path(&target.root, &spec.toplevel.join("etc/fstab"))?;
@@ -332,7 +383,7 @@ impl BootPlan {
                 "Cannot boot this NixOS initrd on a clone: systemd initrd is required",
             ));
         }
-        if matches!(target.backend, Backend::Linux { .. }) {
+        if matches!(target.backend, Backend::Linux(_)) {
             let mut plan = crate::linux::resolve(target, clone, extra_args)?;
             plan.target.dataset = clone.into();
             return Ok(plan);
@@ -418,7 +469,7 @@ mod tests {
         }
         let targets = generations(&root, "tank/root", 1).unwrap();
         assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].generation, Some(12));
+        assert_eq!(targets[0].generation(), Some(12));
         let plan = BootPlan::resolve(&targets[0], &["quiet".into()]).unwrap();
         assert_eq!(plan.kernel, root.join("nix/store/os/kernel"));
         assert_eq!(
@@ -517,7 +568,7 @@ mod tests {
             discovery
                 .targets
                 .iter()
-                .map(|target| target.generation)
+                .map(|target| target.generation())
                 .collect::<Vec<_>>(),
             [Some(4), Some(1)]
         );

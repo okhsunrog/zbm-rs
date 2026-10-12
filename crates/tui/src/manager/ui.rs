@@ -33,7 +33,7 @@ impl View {
             if state
                 .targets
                 .first()
-                .is_some_and(|t| t.generation.is_none())
+                .is_some_and(|t| t.generation().is_none())
             {
                 Self::Kernels
             } else {
@@ -122,9 +122,9 @@ pub enum Input {
 }
 
 fn target_id(t: &BootTarget) -> RowId {
-    t.generation
+    t.generation()
         .map(RowId::Generation)
-        .unwrap_or_else(|| RowId::Kernel(t.inputs.kernel.display().to_string()))
+        .unwrap_or_else(|| RowId::Kernel(t.inputs().kernel.display().to_string()))
 }
 
 fn clean(value: impl AsRef<str>) -> String {
@@ -211,31 +211,31 @@ impl Ui {
                     .enumerate()
                     .map(|(i, t)| {
                         (
-                            t.generation.unwrap_or(0),
+                            t.generation().unwrap_or(0),
                             Row {
                                 id: target_id(t),
                                 kind: Kind::Generation(i),
                                 title: t
-                                    .generation
+                                    .generation()
                                     .map(|g| format!("Generation {g}"))
                                     .unwrap_or_else(|| t.label.clone()),
-                                subtitle: t.issue.clone().unwrap_or_else(|| {
-                                    if t.generation.is_some() {
+                                subtitle: t.issue().map(str::to_owned).unwrap_or_else(|| {
+                                    if t.generation().is_some() {
                                         t.label.clone()
                                     } else {
-                                        t.inputs
+                                        t.inputs()
                                             .initrd
                                             .as_ref()
                                             .map(|p| p.display().to_string())
                                             .unwrap_or_default()
                                     }
                                 }),
-                                tag: if t.issue.is_some() {
+                                tag: if t.issue().is_some() {
                                     "UNAVAILABLE"
                                 } else if t.snapshot.is_some() {
                                     "SNAPSHOT"
                                 } else {
-                                    if t.generation.is_some() {
+                                    if t.generation().is_some() {
                                         "BOOTSPEC"
                                     } else {
                                         "KERNEL"
@@ -437,7 +437,10 @@ impl Ui {
             .then(|| "Image import policy is read-only".into());
         }
         if command == Command::Prepare {
-            if let Some(issue) = self.target(state).and_then(|t| t.issue.clone()) {
+            if let Some(issue) = self
+                .target(state)
+                .and_then(|t| t.issue().map(str::to_owned))
+            {
                 return Some(issue);
             }
             if !state.snapshot_view
@@ -458,7 +461,10 @@ impl Ui {
             }
             return None;
         }
-        if let Some(issue) = self.target(state).and_then(|t| t.issue.clone()) {
+        if let Some(issue) = self
+            .target(state)
+            .and_then(|t| t.issue().map(str::to_owned))
+        {
             return Some(issue);
         }
         match self.selected(state).map(|row| row.kind) {
@@ -662,8 +668,8 @@ impl Ui {
     }
     fn prepared_target(&self, target: &BootTarget) -> Option<&BootPlan> {
         self.prepared.as_ref().filter(|plan| {
-            plan.target.generation == target.generation
-                && plan.target.inputs.kernel == target.inputs.kernel
+            plan.target.generation() == target.generation()
+                && plan.target.inputs().kernel == target.inputs().kernel
                 && plan
                     .target
                     .snapshot
@@ -746,27 +752,27 @@ impl Ui {
             }
             Some(Kind::Generation(i)) => {
                 let t = &state.targets[i];
-                if let Some(issue) = &t.issue {
-                    field("Unavailable", issue.clone());
+                if let Some(issue) = &t.issue() {
+                    field("Unavailable", issue.to_string());
                 }
-                if let Some(g) = t.generation {
+                if let Some(g) = t.generation() {
                     field("Generation", g.to_string());
                 }
                 field("Label", t.label.clone());
                 field("Dataset", t.dataset.clone());
-                if let Some(p) = &t.toplevel {
+                if let Some(p) = &t.toplevel() {
                     field("Toplevel", p.display().to_string());
                 }
-                field("Kernel", t.inputs.kernel.display().to_string());
+                field("Kernel", t.inputs().kernel.display().to_string());
                 field(
                     "Initrd",
-                    t.inputs
+                    t.inputs()
                         .initrd
                         .as_ref()
                         .map(|p| p.display().to_string())
                         .unwrap_or("None".into()),
                 );
-                if let Some(p) = &t.inputs.init {
+                if let Some(p) = &t.inputs().init {
                     field("Init", p.display().to_string());
                 }
                 if let Some(s) = &t.snapshot {
@@ -779,13 +785,13 @@ impl Ui {
                     field("Prepared clone", plan.target.dataset.clone());
                     field("Prepared cmdline", plan.cmdline.join(" "));
                 } else {
-                    let mut args = t.inputs.command_line(&options.config.kernel_args);
-                    if let zbm_core::boot::Backend::Linux { rootprefix, .. } = &t.backend {
+                    let mut args = t.inputs().command_line(&options.config.kernel_args);
+                    if let zbm_core::boot::Backend::Linux(linux) = &t.backend {
                         args.retain(|arg| !arg.starts_with("root=") && !arg.starts_with("zfs="));
-                        args.push(format!("{rootprefix}{}", t.dataset));
+                        args.push(format!("{}{}", linux.rootprefix, t.dataset));
                     }
                     field(
-                        if t.generation.is_some() {
+                        if t.generation().is_some() {
                             "Bootspec cmdline"
                         } else {
                             "Kernel cmdline"
@@ -997,23 +1003,21 @@ mod tests {
 
     #[test]
     fn unavailable_generation_is_inspectable_but_never_becomes_a_boot_target() {
-        use zbm_core::boot::{BootInputs, GenerationIssue};
+        use zbm_core::boot::GenerationIssue;
         let target = BootTarget {
             dataset: "tank/root".into(),
-            generation: Some(1),
             label: "NixOS".into(),
             root: "/run/fixture".into(),
-            toplevel: Some("/nix/store/fixture".into()),
-            backend: zbm_core::boot::Backend::Nixos,
             snapshot: None,
             mountpoint: None,
-            issue: None,
-            inputs: BootInputs {
+            backend: zbm_core::boot::Backend::Nixos(zbm_core::boot::NixosTarget {
+                generation: 1,
+                toplevel: "/nix/store/fixture".into(),
                 kernel: "/nix/store/fixture/kernel".into(),
                 initrd: None,
-                init: Some("/nix/store/fixture/init".into()),
+                init: "/nix/store/fixture/init".into(),
                 kernel_params: vec![],
-            },
+            }),
         };
         let mut state = State {
             targets: vec![target],

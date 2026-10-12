@@ -250,7 +250,7 @@ async fn expanded_commandline(zfs: &Zfs, dataset: &str) -> io::Result<String> {
 
 pub async fn refresh_target(zfs: &Zfs, target: &boot::BootTarget) -> io::Result<boot::BootTarget> {
     let properties = properties(zfs, &target.dataset).await?;
-    if matches!(target.backend, boot::Backend::Nixos) {
+    if matches!(target.backend, boot::Backend::Nixos(_)) {
         let mut refreshed = target.clone();
         refreshed.mountpoint = Some(properties.mountpoint);
         return Ok(refreshed);
@@ -260,7 +260,8 @@ pub async fn refresh_target(zfs: &Zfs, target: &boot::BootTarget) -> io::Result<
         .targets
         .into_iter()
         .find(|t| {
-            t.inputs.kernel == target.inputs.kernel && t.inputs.initrd == target.inputs.initrd
+            t.inputs().kernel == target.inputs().kernel
+                && t.inputs().initrd == target.inputs().initrd
         })
         .ok_or_else(|| failure("Selected Linux kernel/initramfs pair changed"))?;
     refreshed.snapshot = target.snapshot.clone();
@@ -867,7 +868,7 @@ pub async fn prepare_snapshot(
         let options = zfskit::dataset::CloneOptions::new()
             .property(
                 "mountpoint",
-                if matches!(target.backend, boot::Backend::Linux { .. }) {
+                if matches!(target.backend, boot::Backend::Linux(_)) {
                     "/"
                 } else {
                     "legacy"

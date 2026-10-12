@@ -192,14 +192,15 @@ impl CheckedNixos {
 
 impl GuestPlan {
     pub(crate) fn linux(target: &BootTarget, dataset: &str, extra: &[String]) -> io::Result<Self> {
-        if let Some(issue) = &target.issue {
-            return Err(invalid(issue.clone()));
+        if let Some(issue) = target.issue() {
+            return Err(invalid(issue));
         }
         zfskit::names::DatasetName::parse(dataset).map_err(invalid_error)?;
-        let Backend::Linux {
+        let Backend::Linux(LinuxTarget {
             rootprefix,
             commandline,
-        } = &target.backend
+            ..
+        }) = &target.backend
         else {
             return Err(invalid("Not a Linux kernel target"));
         };
@@ -213,11 +214,7 @@ impl GuestPlan {
         crate::linux::command_line(&cmdline)?;
         Ok(Self {
             target: target.clone(),
-            // Linux targets do not use the NixOS init selector.
-            inputs: BootInputs {
-                init: None,
-                ..target.inputs.clone()
-            },
+            inputs: target.inputs(),
             cmdline,
         })
     }
@@ -246,20 +243,18 @@ mod tests {
     fn target() -> BootTarget {
         BootTarget {
             dataset: "tank/root".into(),
-            generation: Some(1),
             label: "test".into(),
             root: "/nonexistent-pure-policy-fixture".into(),
-            toplevel: Some("/system".into()),
-            backend: Backend::Nixos,
             snapshot: None,
             mountpoint: Some("/".into()),
-            issue: None,
-            inputs: BootInputs {
+            backend: Backend::Nixos(NixosTarget {
+                generation: 1,
+                toplevel: "/system".into(),
                 kernel: "/stale-kernel".into(),
                 initrd: None,
-                init: None,
+                init: "/init".into(),
                 kernel_params: vec![],
-            },
+            }),
         }
     }
 
@@ -400,10 +395,13 @@ mod tests {
     #[test]
     fn linux_policy_replaces_all_root_selectors_without_filesystem_reads() {
         let target = BootTarget {
-            backend: Backend::Linux {
+            backend: Backend::Linux(LinuxTarget {
+                kernel: "/kernel".into(),
+                initrd: None,
+                issue: None,
                 rootprefix: "zfs=".into(),
                 commandline: vec!["root=old".into(), "quiet".into()],
-            },
+            }),
             ..target()
         };
         let plan = GuestPlan::linux(
@@ -414,16 +412,10 @@ mod tests {
         .unwrap();
         assert_eq!(plan.cmdline, ["quiet", "label=two words", "zfs=tank/clone"]);
         assert!(GuestPlan::linux(&target, "invalid@clone", &[]).is_err());
-        assert!(
-            GuestPlan::linux(
-                &BootTarget {
-                    issue: Some("broken".into()),
-                    ..target
-                },
-                "tank/root",
-                &[]
-            )
-            .is_err()
-        );
+        let mut broken = target;
+        if let Backend::Linux(linux) = &mut broken.backend {
+            linux.issue = Some("broken".into());
+        }
+        assert!(GuestPlan::linux(&broken, "tank/root", &[]).is_err());
     }
 }

@@ -549,27 +549,21 @@ mod tests {
     }
     #[test]
     fn authorization_binds_arguments_source_and_owned_snapshot_handoff() {
-        use crate::boot::{Backend, BootInputs, BootTarget, SnapshotSource};
+        use crate::boot::{Backend, BootTarget, SnapshotSource};
         let p = policy();
         let target = BootTarget {
             dataset: "tank/root".into(),
-            generation: None,
             label: "fixture".into(),
             root: "/fixture".into(),
-            toplevel: None,
             snapshot: None,
             mountpoint: Some("/".into()),
-            issue: None,
-            backend: Backend::Linux {
+            backend: Backend::Linux(crate::boot::LinuxTarget {
                 rootprefix: "root=ZFS=".into(),
                 commandline: vec![],
-            },
-            inputs: BootInputs {
+                issue: None,
                 kernel: "/boot/kernel".into(),
                 initrd: Some("/boot/initrd".into()),
-                init: None,
-                kernel_params: vec![],
-            },
+            }),
         };
         let mut plan = BootPlan {
             target,

@@ -1,7 +1,7 @@
 //! ZFSBootMenu on-disk kernel/initramfs and command-line conventions.
 //! Filesystem reads only; no importing, mounting or ZFS mutations.
 use crate::{
-    boot::{Backend, BootInputs, BootPlan, BootTarget, TargetDiscovery, rooted_path},
+    boot::{Backend, BootPlan, BootTarget, LinuxTarget, TargetDiscovery, rooted_path},
     environment::BootProperties,
 };
 use std::{
@@ -206,23 +206,17 @@ pub fn discover(
         };
         targets.push(BootTarget {
             dataset: dataset.into(),
-            generation: None,
             label: name.clone(),
             root: root.into(),
-            toplevel: None,
             snapshot: None,
             mountpoint: Some(properties.mountpoint.clone()),
-            issue,
-            inputs: BootInputs {
+            backend: Backend::Linux(LinuxTarget {
                 kernel,
                 initrd: Some(initrd),
-                init: None,
-                kernel_params: commandline.clone(),
-            },
-            backend: Backend::Linux {
                 rootprefix: rootprefix.clone(),
                 commandline,
-            },
+                issue,
+            }),
         });
     }
     targets.sort_by_key(|target| std::cmp::Reverse(version_key(&target.label)));
@@ -307,13 +301,13 @@ mod tests {
         let targets = discover(&root, "tank/root", &properties).unwrap().targets;
         assert_eq!(targets.len(), 5);
         let rejected = targets.iter().find(|t| t.label == "vmlinuz-bad").unwrap();
-        assert!(rejected.issue.is_some());
+        assert!(rejected.issue().is_some());
         assert!(resolve(rejected, "tank/root", &[]).is_err());
         assert_eq!(targets[0].label, "vmlinuz-linux-lts");
         assert!(
             targets
                 .iter()
-                .all(|t| t.generation.is_none() && t.toplevel.is_none())
+                .all(|t| t.generation().is_none() && t.toplevel().is_none())
         );
         let plan = resolve(&targets[0], "tank/clone", &["root=extra-wrong".into()]).unwrap();
         assert_eq!(plan.cmdline, ["rw", "foo=two words", "zfs=tank/clone"]);

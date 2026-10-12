@@ -70,7 +70,7 @@ impl Ui {
                 let target = &state.targets[i];
                 lines.push(heading(clean(&target.label), INK));
                 lines.push(Line::raw(""));
-                if let Some(generation) = target.generation {
+                if let Some(generation) = target.generation() {
                     lines.push(field("Generation", generation.to_string()));
                 }
                 lines.push(field("Dataset", &target.dataset));
@@ -99,7 +99,7 @@ impl Ui {
                         lines.push(Line::raw("C prepares the clone without booting."));
                     }
                 }
-                if let Some(issue) = &target.issue {
+                if let Some(issue) = &target.issue() {
                     lines.push(Line::raw(""));
                     lines.push(heading("Unavailable", NOTICE));
                     lines.push(Line::raw(clean(issue)));
@@ -673,32 +673,32 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zbm_core::boot::{Backend, BootInputs, SnapshotSource};
+    use zbm_core::boot::{Backend, SnapshotSource};
 
     #[test]
     fn clone_summary_tracks_the_selected_generation_and_keeps_paths_in_details() {
         let target = BootTarget {
             dataset: "tank/nixos".into(),
-            generation: Some(2),
             label: "NixOS (Linux 6.18)".into(),
             root: "/run/snapshot".into(),
-            toplevel: Some("/nix/store/system".into()),
-            backend: Backend::Nixos,
             snapshot: Some(SnapshotSource {
                 name: "tank/nixos@good".into(),
                 guid: 42,
             }),
             mountpoint: None,
-            issue: None,
-            inputs: BootInputs {
+            backend: zbm_core::boot::Backend::Nixos(zbm_core::boot::NixosTarget {
+                generation: 2,
+                toplevel: "/nix/store/system".into(),
                 kernel: "/nix/store/kernel/bzImage".into(),
                 initrd: Some("/nix/store/initrd/initrd".into()),
-                init: Some("/nix/store/system/init".into()),
+                init: "/nix/store/system/init".into(),
                 kernel_params: vec![],
-            },
+            }),
         };
         let mut older = target.clone();
-        older.generation = Some(1);
+        if let Backend::Nixos(nixos) = &mut older.backend {
+            nixos.generation = 1;
+        }
         let mut clone = target.clone();
         clone.dataset = "tank/zbm-rs-owned-clone".into();
         let mut state = State {
