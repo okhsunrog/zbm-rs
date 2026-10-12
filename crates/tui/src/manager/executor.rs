@@ -3,14 +3,18 @@ use std::{ffi::CString, fs::File, io, os::fd::AsRawFd};
 use zbm_core::boot::BootPlan;
 
 pub struct LoadedKernel {
-    remote: bool,
-    _verified: Option<zbm_core::security::VerifiedBootPlan>,
+    state: LoadedState,
+}
+
+enum LoadedState {
+    Remote,
+    Local,
+    Verified(zbm_core::security::VerifiedBootPlan),
 }
 impl LoadedKernel {
     pub(crate) fn remote() -> Self {
         Self {
-            remote: true,
-            _verified: None,
+            state: LoadedState::Remote,
         }
     }
     pub fn load(plan: &BootPlan) -> io::Result<Self> {
@@ -39,8 +43,7 @@ impl LoadedKernel {
             return Err(io::Error::last_os_error());
         }
         Ok(Self {
-            remote: false,
-            _verified: None,
+            state: LoadedState::Local,
         })
     }
     pub(crate) fn load_verified(plan: &BootPlan, owned_clone: bool) -> io::Result<Self> {
@@ -71,18 +74,25 @@ impl LoadedKernel {
             return Err(error);
         }
         let loaded = Self {
-            remote: false,
-            _verified: Some(verified),
+            state: LoadedState::Verified(verified),
         };
-        crate::tpm::prepared_target(loaded._verified.as_ref().unwrap())?;
-        std::fs::write(
-            "/run/zbm-rs/verified-boot.json",
-            serde_json::to_vec(loaded._verified.as_ref().unwrap().evidence())?,
-        )?;
+        loaded.record_evidence()?;
         Ok(loaded)
     }
+
+    fn record_evidence(&self) -> io::Result<()> {
+        if let LoadedState::Verified(verified) = &self.state {
+            crate::tpm::prepared_target(verified)?;
+            std::fs::write(
+                "/run/zbm-rs/verified-boot.json",
+                serde_json::to_vec(verified.evidence())?,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn execute(&self) -> io::Result<()> {
-        if self.remote {
+        if matches!(self.state, LoadedState::Remote) {
             return crate::broker::execute().map_err(|e| io::Error::other(e.to_string()));
         }
         unsafe {
@@ -96,7 +106,7 @@ impl LoadedKernel {
 }
 impl Drop for LoadedKernel {
     fn drop(&mut self) {
-        if self.remote {
+        if matches!(self.state, LoadedState::Remote) {
             crate::broker::unload();
             return;
         }

@@ -1,4 +1,6 @@
 //! Bootspec resolution is independent of rendering and execution.
+pub(crate) mod planning;
+
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
@@ -41,14 +43,12 @@ impl BootInputs {
     }
 
     pub fn command_line(&self, extra_args: &[String]) -> Vec<String> {
-        let mut args: Vec<String> = self
-            .init
+        self.init
             .iter()
             .map(|init| format!("init={}", init.display()))
-            .collect();
-        args.extend(self.kernel_params.iter().cloned());
-        args.extend_from_slice(extra_args);
-        args
+            .chain(self.kernel_params.iter().cloned())
+            .chain(extra_args.iter().cloned())
+            .collect()
     }
 }
 
@@ -302,72 +302,22 @@ impl BootPlan {
             return Err(invalid("Invalid target fstab"));
         }
         let fstab = fs::read_to_string(fstab_path)?;
-        let mounts: Vec<Vec<&str>> = fstab
-            .lines()
-            .filter(|line| !line.trim_start().starts_with('#'))
-            .map(|line| line.split_whitespace().collect())
-            .filter(|fields: &Vec<_>| fields.len() >= 3)
-            .collect();
-        let roots: Vec<_> = mounts.iter().filter(|fields| fields[1] == "/").collect();
-        if roots.len() != 1 || roots[0][2] != "zfs" {
-            return Err(invalid(
-                "NixOS configuration root does not match selected ZFS dataset",
-            ));
-        }
-        if roots[0][0] != target.dataset && root_override.is_none() {
-            return Self::resolve_nixos(target, extra_args, Some(&target.dataset));
-        }
-        if mounts
-            .iter()
-            .any(|fields| fields[1] == "/nix" || fields[1].starts_with("/nix/"))
-        {
-            return Err(invalid("Separate Nix store mounts are not supported yet"));
-        }
-        let cmdline = BootInputs::from_spec(&spec).command_line(extra_args);
-        for argument in &cmdline {
-            if argument.is_empty()
-                || argument
-                    .chars()
-                    .any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '\'')
-            {
-                return Err(invalid("Unsupported whitespace/quoting in kernel argument"));
-            }
-        }
-        if extra_args
-            .iter()
-            .any(|a| a.starts_with("init=") || a.starts_with("root="))
-        {
-            return Err(invalid("Cannot override Bootspec init or root"));
-        }
-        if cmdline
-            .iter()
-            .any(|a| a.starts_with("root=") && a != "root=fstab")
-        {
-            return Err(invalid("Only the configured NixOS fstab root is supported"));
-        }
-        rooted_path(&target.root, &spec.init)?;
-        let plan = Self {
-            target: target.clone(),
-            kernel: rooted_path(&target.root, &spec.kernel)?,
-            initrd: spec
-                .initrd
-                .map(|p| rooted_path(&target.root, &p))
-                .transpose()?,
-            cmdline,
-        };
-        for path in std::iter::once(&plan.kernel).chain(plan.initrd.iter()) {
-            if !fs::metadata(path)?.is_file() {
-                return Err(invalid("Kernel and initrd must be regular files"));
-            }
-        }
-        if let Some(root) = root_override {
-            if !supports_snapshot(target)? {
-                return Err(invalid("NixOS root override requires systemd initrd"));
-            }
-            Self::rewrite_systemd_root(plan, target, root)
+        let checked = planning::NixosConfiguration::new(spec, fstab).check(
+            target.clone(),
+            extra_args,
+            root_override,
+        )?;
+        let systemd_initrd = checked
+            .required_initrd()?
+            .map(|path| crate::initrd::systemd(&rooted_path(&target.root, path)?))
+            .transpose()?
+            .unwrap_or(false);
+        let support = if systemd_initrd {
+            planning::InitrdSupport::Systemd
         } else {
-            Ok(plan)
-        }
+            planning::InitrdSupport::Unsupported
+        };
+        checked.plan(support)?.resolve()
     }
 
     /// The caller has validated and created this clone from the immutable source.
@@ -377,7 +327,7 @@ impl BootPlan {
         extra_args: &[String],
     ) -> io::Result<Self> {
         zfskit::names::DatasetName::parse(clone).map_err(invalid_error)?;
-        if target.snapshot.is_none() || !supports_snapshot(target)? {
+        if target.snapshot.is_none() {
             return Err(invalid(
                 "Cannot boot this NixOS initrd on a clone: systemd initrd is required",
             ));
@@ -389,56 +339,32 @@ impl BootPlan {
         }
         Self::resolve_nixos(target, extra_args, Some(clone))
     }
+}
 
-    fn rewrite_systemd_root(mut plan: Self, target: &BootTarget, clone: &str) -> io::Result<Self> {
-        zfskit::names::DatasetName::parse(clone).map_err(invalid_error)?;
-        let fstab_path = rooted_path(
-            &target.root,
-            &target.toplevel.as_ref().unwrap().join("etc/fstab"),
-        )?;
-        if fs::read_to_string(fstab_path)?
-            .lines()
-            .filter(|line| !line.trim_start().starts_with('#'))
-            .map(|line| line.split_whitespace().collect::<Vec<_>>())
-            .any(|fields| {
-                fields.len() >= 3
-                    && fields[1] != "/"
-                    && (fields[1] == "/usr"
-                        || fields.get(3).is_some_and(|options| {
-                            options.split(',').any(|option| option == "x-initrd.mount")
-                        }))
-            })
-        {
-            return Err(invalid(
-                "Snapshot boot does not support additional initrd mounts",
-            ));
+impl planning::GuestPlan {
+    /// Effect boundary: resolve guest symlinks and check actual boot files.
+    pub(crate) fn resolve(self) -> io::Result<BootPlan> {
+        if let Some(init) = &self.inputs.init {
+            rooted_path(&self.target.root, init)?;
         }
-        if plan.cmdline.iter().any(|arg| {
-            arg.starts_with("rootflags=")
-                || arg.starts_with("rootfstype=")
-                || arg.starts_with("rd.fstab=")
-                || arg == "ro"
-        }) {
-            return Err(invalid(
-                "Snapshot boot cannot override conflicting root policy",
-            ));
+        let kernel = rooted_path(&self.target.root, &self.inputs.kernel)?;
+        let initrd = self
+            .inputs
+            .initrd
+            .as_ref()
+            .map(|path| rooted_path(&self.target.root, path))
+            .transpose()?;
+        for path in std::iter::once(&kernel).chain(initrd.iter()) {
+            if !fs::metadata(path)?.is_file() {
+                return Err(invalid("Kernel and initrd must be regular files"));
+            }
         }
-        plan.cmdline.retain(|arg| !arg.starts_with("root="));
-        plan.cmdline.extend([
-            format!("root={clone}"),
-            "rootfstype=zfs".into(),
-            if clone == target.dataset
-                && target.mountpoint.as_deref().is_some_and(|p| p != "legacy")
-            {
-                "rootflags=defaults,zfsutil".into()
-            } else {
-                "rootflags=defaults".into()
-            },
-            "rw".into(),
-            "rd.fstab=no".into(),
-        ]);
-        plan.target.dataset = clone.into();
-        Ok(plan)
+        Ok(BootPlan {
+            target: self.target,
+            kernel,
+            initrd,
+            cmdline: self.cmdline,
+        })
     }
 }
 

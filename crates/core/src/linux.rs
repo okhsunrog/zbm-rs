@@ -46,11 +46,6 @@ pub fn command_line(args: &[String]) -> io::Result<String> {
         .collect::<Vec<_>>()
         .join(" "))
 }
-fn root_argument(arg: &str) -> bool {
-    ["root=", "zfs="]
-        .iter()
-        .any(|prefix| arg.starts_with(prefix))
-}
 fn regular(root: &Path, path: &Path) -> bool {
     rooted_path(root, path)
         .and_then(fs::metadata)
@@ -246,43 +241,7 @@ pub fn discover(
 }
 
 pub fn resolve(target: &BootTarget, dataset: &str, extra: &[String]) -> io::Result<BootPlan> {
-    if let Some(issue) = &target.issue {
-        return Err(invalid(issue.clone()));
-    }
-    zfskit::names::DatasetName::parse(dataset).map_err(|e| invalid(e.to_string()))?;
-    let Backend::Linux {
-        rootprefix,
-        commandline,
-    } = &target.backend
-    else {
-        return Err(invalid("Not a Linux kernel target"));
-    };
-    let mut args = commandline
-        .iter()
-        .chain(extra)
-        .filter(|arg| !root_argument(arg))
-        .cloned()
-        .collect::<Vec<_>>();
-    args.push(format!("{rootprefix}{dataset}"));
-    validate(&args)?;
-    let kernel = rooted_path(&target.root, &target.inputs.kernel)?;
-    let initrd = target
-        .inputs
-        .initrd
-        .as_ref()
-        .map(|path| rooted_path(&target.root, path))
-        .transpose()?;
-    for path in std::iter::once(&kernel).chain(initrd.iter()) {
-        if !fs::metadata(path)?.is_file() {
-            return Err(invalid("Kernel/initrd is not a regular file"));
-        }
-    }
-    Ok(BootPlan {
-        target: target.clone(),
-        kernel,
-        initrd,
-        cmdline: args,
-    })
+    crate::boot::planning::GuestPlan::linux(target, dataset, extra)?.resolve()
 }
 
 #[cfg(test)]
