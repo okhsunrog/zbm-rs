@@ -1,5 +1,7 @@
 mod broker;
 mod config;
+#[cfg(feature = "gui-prototype")]
+mod gui;
 mod manager;
 mod security;
 mod session;
@@ -80,5 +82,8 @@ fn main() -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    #[cfg(feature = "gui-prototype")]
+    return gui::run();
+    #[cfg(not(feature = "gui-prototype"))]
     manager::run(channel)
 }
