@@ -893,14 +893,49 @@ pub async fn prepare_snapshot(
     Ok(plan)
 }
 
-/// Keep any booted clone: its writable state belongs to the target OS/user.
+/// Evidence from the live ownership check, bound to one exact clone identity.
+/// Not serializable and not constructible by a broker request.
+#[derive(Debug)]
+pub struct ValidatedClone {
+    dataset: zfskit::names::DatasetName,
+    source: zfskit::names::SnapshotName,
+    source_guid: u64,
+}
+
+impl ValidatedClone {
+    fn from_lease(clone: &CloneLease) -> io::Result<Self> {
+        Ok(Self {
+            dataset: zfskit::names::DatasetName::parse(&clone.dataset).map_err(failure)?,
+            source: zfskit::names::SnapshotName::parse(&clone.source.name).map_err(failure)?,
+            source_guid: clone.source.guid,
+        })
+    }
+
+    pub(crate) fn matches(&self, plan: &boot::BootPlan) -> bool {
+        self.dataset.as_str() == plan.target.dataset
+            && plan.target.snapshot.as_ref().is_some_and(|snapshot| {
+                self.source.as_str() == snapshot.name && self.source_guid == snapshot.guid
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(dataset: &str, source: &str, guid: u64) -> Self {
+        Self {
+            dataset: zfskit::names::DatasetName::parse(dataset).unwrap(),
+            source: zfskit::names::SnapshotName::parse(source).unwrap(),
+            source_guid: guid,
+        }
+    }
+}
+
+/// Validate live ownership immediately before authorizing a snapshot handoff.
 pub async fn validate_handoff_clone(
     zfs: &Zfs,
     pool: &Pool,
     plan: &boot::BootPlan,
-) -> io::Result<bool> {
+) -> io::Result<Option<ValidatedClone>> {
     if plan.target.snapshot.is_none() {
-        return Ok(false);
+        return Ok(None);
     }
     let lease = load(pool)?;
     let clone = lease
@@ -919,7 +954,7 @@ pub async fn validate_handoff_clone(
         ));
     }
     validate_clone(zfs, clone).await?;
-    Ok(true)
+    Ok(Some(ValidatedClone::from_lease(clone)?))
 }
 
 pub async fn retain_snapshot_clone(

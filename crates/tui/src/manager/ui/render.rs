@@ -185,7 +185,7 @@ impl Ui {
             }
             None => {
                 lines.push(heading(
-                    if state.scanning {
+                    if state.activity.is_scanning() {
                         "Discovering ZFS pools"
                     } else {
                         "Nothing selected"
@@ -397,7 +397,7 @@ impl Ui {
             ])),
             filter,
         );
-        let items = if state.scanning {
+        let items = if state.activity.is_scanning() {
             vec![ListItem::new("Discovering pools...")]
         } else if rows.is_empty() {
             vec![ListItem::new(vec![
@@ -460,7 +460,7 @@ impl Ui {
             );
         }
         let mut message = if state.error.is_none()
-            && state.operation.is_none()
+            && state.activity.operation().is_none()
             && self
                 .target(state)
                 .is_some_and(|t| self.prepared_target(t).is_some())
@@ -469,17 +469,20 @@ impl Ui {
         } else {
             status_message(state)
         };
-        if let Some(started) = self.operation_started.filter(|_| state.operation.is_some()) {
+        if let Some(started) = self
+            .operation_started
+            .filter(|_| state.activity.operation().is_some())
+        {
             message.push_str(&format!(
                 "  [{}s / 30s deadline]",
                 started.elapsed().as_secs()
             ));
         }
-        let (label, color) = if state.requires_restart {
+        let (label, color) = if state.activity.requires_restart() {
             (" Recovery required ", DANGER)
         } else if state.error.is_some() {
             (" Notice ", NOTICE)
-        } else if state.operation.is_some() || state.scanning {
+        } else if state.activity.operation().is_some() || state.activity.is_scanning() {
             (" Working ", FOCUS)
         } else {
             (" > ", FOCUS)

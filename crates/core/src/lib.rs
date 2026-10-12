@@ -1,4 +1,5 @@
 //! Boot-domain state. Discovery never imports, mounts or modifies a pool.
+pub mod activity;
 pub mod boot;
 pub mod boot_zfs;
 pub mod environment;
@@ -32,9 +33,8 @@ impl TryFrom<DiscoveredPool> for Pool {
 pub struct State {
     pub pools: Vec<Pool>,
     pub selected: usize,
-    pub scanning: bool,
-    pub operation: Option<String>,
-    pub requires_restart: bool,
+    #[serde(flatten)]
+    pub activity: activity::Activity,
     pub error: Option<String>,
     pub scans: u64,
     pub targets: Vec<boot::BootTarget>,
@@ -57,7 +57,6 @@ impl State {
         self.snapshot_view = false;
         self.selected_environment = 0;
         self.selected_target = 0;
-        self.scanning = false;
         self.scans += 1;
         match result {
             Ok(pools) => {

@@ -46,7 +46,10 @@ impl LoadedKernel {
             state: LoadedState::Local,
         })
     }
-    pub(crate) fn load_verified(plan: &BootPlan, owned_clone: bool) -> io::Result<Self> {
+    pub(crate) fn load_verified(
+        plan: &BootPlan,
+        owned_clone: Option<&zbm_core::boot_zfs::ValidatedClone>,
+    ) -> io::Result<Self> {
         let config = crate::config::load(true).map_err(|e| io::Error::other(e.to_string()))?;
         if config.security.mode != crate::config::SecurityMode::Enforce {
             return Err(io::Error::other("Verified broker requires enforced image"));

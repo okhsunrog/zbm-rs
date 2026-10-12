@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use zbm_core::{
     Pool, Zfs,
+    activity::{Activity, RecoveryAction},
     boot::{BootPlan, BootTarget, SnapshotSource, TargetDiscovery},
     boot_zfs::{self, Snapshot},
     environment::BootEnvironment,
@@ -72,6 +73,12 @@ pub enum Outcome {
 }
 
 impl Action {
+    fn recovery(&self) -> RecoveryAction {
+        match self {
+            Self::Rollback { .. } | Self::Clone { .. } => RecoveryAction::RestartRequired,
+            _ => RecoveryAction::Retry,
+        }
+    }
     fn description(&self) -> &'static str {
         match self {
             Self::Rollback { .. } => "Rolling back selected dataset",
@@ -195,7 +202,7 @@ impl Action {
                 let owned_clone = boot_zfs::validate_handoff_clone(&zfs, &pool, &plan).await?;
                 let loaded = tokio::task::spawn_blocking(move || {
                     if crate::config::image_enforced() {
-                        LoadedKernel::load_verified(&load_plan, owned_clone)
+                        LoadedKernel::load_verified(&load_plan, owned_clone.as_ref())
                     } else {
                         LoadedKernel::load(&load_plan)
                     }
@@ -214,6 +221,24 @@ pub struct Pending {
     pub error_event: &'static str,
     task: JoinHandle<Result<Outcome>>,
     deadline: Instant,
+    recovery: RecoveryAction,
+}
+
+#[derive(Debug)]
+pub struct OperationFailure {
+    pub source: anyhow::Error,
+    pub recovery: RecoveryAction,
+}
+
+impl OperationFailure {
+    fn new(source: anyhow::Error, recovery: RecoveryAction) -> Self {
+        let recovery = if source.is::<tokio::task::JoinError>() {
+            RecoveryAction::RestartRequired
+        } else {
+            recovery
+        };
+        Self { source, recovery }
+    }
 }
 
 impl Pending {
@@ -221,6 +246,7 @@ impl Pending {
         Self {
             description: action.description(),
             error_event: action.error_event(),
+            recovery: action.recovery(),
             task: tokio::spawn(action.run()),
             deadline: Instant::now() + DEADLINE,
         }
@@ -234,13 +260,160 @@ impl Pending {
         Instant::now() >= self.deadline
     }
 
-    pub async fn finish(&mut self) -> Result<Outcome> {
-        (&mut self.task).await?
+    pub async fn finish(&mut self) -> std::result::Result<Outcome, OperationFailure> {
+        (&mut self.task)
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(std::convert::identity)
+            .map_err(|error| OperationFailure::new(error, self.recovery))
+    }
+}
+
+/// Owns the pending handle and phase together. UI state is only a projection.
+#[derive(Default)]
+pub struct Workflow {
+    phase: Activity<Pending>,
+}
+
+impl Workflow {
+    pub fn view(&self) -> Activity {
+        self.phase.project(|pending| {
+            format!(
+                "{}. Restart and Power off remain available.",
+                pending.description
+            )
+        })
+    }
+    pub fn start_scan(&mut self) -> bool {
+        if !self.phase.is_idle() {
+            return false;
+        }
+        self.phase = Activity::Scanning;
+        true
+    }
+    pub fn finish_scan(&mut self) {
+        if self.phase.is_scanning() {
+            self.phase = Activity::Idle;
+        }
+    }
+    pub fn start(&mut self, action: Action) -> Result<()> {
+        anyhow::ensure!(
+            self.phase.is_idle(),
+            "An operation cannot start in the current phase"
+        );
+        self.phase = Activity::Running(Pending::start(action));
+        Ok(())
+    }
+    pub fn take_finished(&mut self) -> Option<Pending> {
+        if !self.phase.operation().is_some_and(Pending::is_finished) {
+            return None;
+        }
+        match std::mem::take(&mut self.phase) {
+            Activity::Running(pending) => Some(pending),
+            _ => unreachable!("finished operation is running"),
+        }
+    }
+    pub fn expire(&mut self) -> bool {
+        if !self.phase.operation().is_some_and(Pending::expired) {
+            return false;
+        }
+        // Dropping the handle aborts async work; persistent intent stays journaled.
+        self.phase = Activity::RestartRequired;
+        true
+    }
+    pub fn recover(&mut self, action: RecoveryAction) {
+        self.phase = Activity::recovered(action);
     }
 }
 
 impl Drop for Pending {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn action() -> Action {
+        Action::Snapshots {
+            pool: Pool {
+                name: "fixture".into(),
+                guid: 1,
+                health: "ONLINE".into(),
+            },
+            dataset: "fixture/root".into(),
+        }
+    }
+
+    #[test]
+    fn scan_and_restart_phases_reject_concurrent_operations() {
+        let mut workflow = Workflow::default();
+        assert!(workflow.start_scan());
+        assert!(!workflow.start_scan());
+        assert!(workflow.start(action()).is_err());
+        workflow.finish_scan();
+        assert!(workflow.view().is_idle());
+        workflow.recover(RecoveryAction::RestartRequired);
+        assert!(!workflow.start_scan());
+        assert!(workflow.start(action()).is_err());
+        workflow.finish_scan();
+        assert!(workflow.view().requires_restart());
+    }
+
+    #[tokio::test]
+    async fn expiration_aborts_work_and_requires_reconciliation() {
+        let task = tokio::spawn(std::future::pending::<Result<Outcome>>());
+        let abort = task.abort_handle();
+        let mut workflow = Workflow {
+            phase: Activity::Running(Pending {
+                description: "fixture",
+                error_event: "irrelevant-name",
+                task,
+                deadline: Instant::now() - Duration::from_secs(1),
+                recovery: RecoveryAction::Retry,
+            }),
+        };
+        assert!(workflow.expire());
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished());
+        assert!(workflow.view().requires_restart());
+        assert!(workflow.take_finished().is_none());
+        assert!(!workflow.expire());
+    }
+
+    #[tokio::test]
+    async fn recovery_is_typed_and_worker_failures_require_restart() {
+        let failure =
+            OperationFailure::new(anyhow::anyhow!("ordinary error"), RecoveryAction::Retry);
+        assert_eq!(failure.recovery, RecoveryAction::Retry);
+        let failure = OperationFailure::new(
+            anyhow::anyhow!("partial mutation"),
+            RecoveryAction::RestartRequired,
+        );
+        assert_eq!(failure.recovery, RecoveryAction::RestartRequired);
+        let task = tokio::spawn(std::future::pending::<()>());
+        task.abort();
+        let failure = OperationFailure::new(task.await.unwrap_err().into(), RecoveryAction::Retry);
+        assert_eq!(failure.recovery, RecoveryAction::RestartRequired);
+        let pool = Pool {
+            name: "fixture".into(),
+            guid: 1,
+            health: "ONLINE".into(),
+        };
+        assert_eq!(
+            Action::Rollback {
+                pool,
+                source: SnapshotSource {
+                    name: "fixture/root@s".into(),
+                    guid: 1
+                },
+                limit: 1
+            }
+            .recovery(),
+            RecoveryAction::RestartRequired
+        );
+        assert_eq!(action().recovery(), RecoveryAction::Retry);
     }
 }

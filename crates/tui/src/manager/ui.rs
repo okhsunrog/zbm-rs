@@ -283,7 +283,7 @@ impl Ui {
         }
     }
     pub fn sync(&mut self, state: &mut State) {
-        if state.operation.is_none() {
+        if state.activity.operation().is_none() {
             self.operation_started = None;
         }
         let view = View::of(state);
@@ -388,10 +388,10 @@ impl Ui {
         if matches!(command, Command::Restart | Command::PowerOff) {
             return (!options.supervised).then(|| "Requires the PID 1 supervisor".into());
         }
-        if state.requires_restart {
+        if state.activity.requires_restart() {
             return Some("Restart manager to reconcile the timed-out operation".into());
         }
-        if state.operation.is_some() || state.scanning {
+        if state.activity.operation().is_some() || state.activity.is_scanning() {
             return Some(
                 "An operation is in progress; Restart and Power off remain available".into(),
             );
@@ -508,7 +508,10 @@ impl Ui {
             return Input::Command(command, false);
         }
         if self.searching {
-            if state.operation.is_some() || state.scanning || state.requires_restart {
+            if state.activity.operation().is_some()
+                || state.activity.is_scanning()
+                || state.activity.requires_restart()
+            {
                 return Input::Ignored;
             }
             let screen = self.screens.get_mut(&self.key).unwrap();
@@ -643,7 +646,10 @@ impl Ui {
             self.sync(state);
             return Input::Changed("filter");
         }
-        if state.operation.is_none() && !state.requires_restart && !state.scanning {
+        if state.activity.operation().is_none()
+            && !state.activity.requires_restart()
+            && !state.activity.is_scanning()
+        {
             let rows = self.visible(state);
             let screen = self.screens.get_mut(&self.key).unwrap();
             let current = screen.list.selected().unwrap_or(0);

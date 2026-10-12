@@ -14,7 +14,7 @@ pub(crate) mod executor;
 pub(crate) mod operation;
 mod ui;
 use command::Command as UiCommand;
-use operation::{Action, Outcome, Pending};
+use operation::{Action, Outcome, Workflow};
 use ui::{Input, Panel, Ui};
 
 struct Options {
@@ -36,7 +36,7 @@ fn emit(options: &Options, event: &str, state: &State, ui: &Ui) -> Result<()> {
 }
 
 fn status_message(state: &State) -> String {
-    if let Some(message) = state.error.as_ref().or(state.operation.as_ref()) {
+    if let Some(message) = state.error.as_ref().or(state.activity.operation()) {
         return message.clone();
     }
     if let Some(issue) = state.rejected_generations.first() {
@@ -86,7 +86,7 @@ async fn tui(
     ui.sync(&mut state);
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let mut rescan = true;
-    let mut pending: Option<Pending> = None;
+    let mut workflow = Workflow::default();
     let mut last_tick = Instant::now();
     loop {
         #[cfg(feature = "vm-test")]
@@ -98,8 +98,8 @@ async fn tui(
                 .request(request)?;
             break;
         }
-        if rescan && !state.scanning && pending.is_none() && !state.requires_restart {
-            state.scanning = true;
+        if rescan && workflow.start_scan() {
+            state.activity = workflow.view();
             rescan = false;
             refresh(terminal, &mut state, options, &mut ui)?;
             emit(options, "scanning", &state, &ui)?;
@@ -122,13 +122,14 @@ async fn tui(
             });
         }
         if let Ok(result) = rx.try_recv() {
+            workflow.finish_scan();
+            state.activity = workflow.view();
             state.apply_scan(result);
             refresh(terminal, &mut state, options, &mut ui)?;
             emit(options, "ready", &state, &ui)?;
         }
-        if pending.as_ref().is_some_and(Pending::is_finished) {
-            let mut completed = pending.take().unwrap();
-            state.operation = None;
+        if let Some(mut completed) = workflow.take_finished() {
+            state.activity = workflow.view();
             let event = match completed.finish().await {
                 Ok(Outcome::Changed {
                     environments,
@@ -199,25 +200,26 @@ async fn tui(
                     unreachable!("successful kexec leaves this kernel")
                 }
                 Err(error) => {
-                    state.requires_restart = error.is::<tokio::task::JoinError>()
-                        || matches!(completed.error_event, "rollback-error" | "clone-error");
-                    state.error = Some(format!("{} failed: {error:#}", completed.description));
+                    workflow.recover(error.recovery);
+                    state.activity = workflow.view();
+                    state.error = Some(format!(
+                        "{} failed: {:#}",
+                        completed.description, error.source
+                    ));
                     completed.error_event
                 }
             };
             refresh(terminal, &mut state, options, &mut ui)?;
             emit(options, event, &state, &ui)?;
-        } else if pending.as_ref().is_some_and(Pending::expired) {
+        } else if workflow.expire() {
             // Cancellation can interrupt an import/clone/export after an effect.
             // Keep the intent journal and require a fresh manager to reconcile.
-            pending.take();
-            state.operation = None;
-            state.requires_restart = true;
+            state.activity = workflow.view();
             state.error = Some("Operation timed out after 30 seconds. Use Shell or Restart to reconcile ZFS state.".into());
             refresh(terminal, &mut state, options, &mut ui)?;
             emit(options, "operation-timeout", &state, &ui)?;
         }
-        if state.operation.is_some() && last_tick.elapsed() >= Duration::from_secs(1) {
+        if state.activity.operation().is_some() && last_tick.elapsed() >= Duration::from_secs(1) {
             refresh(terminal, &mut state, options, &mut ui)?;
             last_tick = Instant::now();
         }
@@ -387,13 +389,9 @@ async fn tui(
                     }
                 }
                 if let Some(action) = action {
-                    let operation = Pending::start(action);
-                    state.operation = Some(format!(
-                        "{}. Restart and Power off remain available.",
-                        operation.description
-                    ));
+                    workflow.start(action)?;
+                    state.activity = workflow.view();
                     state.error = None;
-                    pending = Some(operation);
                     ui.operation_started = Some(Instant::now());
                     observed = Some("operation-started");
                 }

@@ -163,9 +163,15 @@ impl BootAuthorization {
             format!("{}:{}", self.kernel.sha256, self.initramfs.sha256).as_bytes(),
         ))
     }
-    pub fn matches_plan(&self, plan: &BootPlan, owned_snapshot_clone: bool) -> io::Result<()> {
+    pub fn matches_plan(
+        &self,
+        plan: &BootPlan,
+        owned_snapshot_clone: Option<&crate::boot_zfs::ValidatedClone>,
+    ) -> io::Result<()> {
         self.matches_selection(plan)?;
-        if plan.target.snapshot.is_some() && !owned_snapshot_clone {
+        if plan.target.snapshot.is_some()
+            && !owned_snapshot_clone.is_some_and(|clone| clone.matches(plan))
+        {
             return Err(invalid(
                 "Snapshot handoff requires broker-owned clone evidence",
             ));
@@ -296,7 +302,7 @@ impl Authorization {
     pub fn prepare(
         self,
         plan: &BootPlan,
-        owned_snapshot_clone: bool,
+        owned_snapshot_clone: Option<&crate::boot_zfs::ValidatedClone>,
     ) -> io::Result<VerifiedBootPlan> {
         self.policy.matches_plan(plan, owned_snapshot_clone)?;
         let kernel = PreparedInput::copy(&plan.kernel, &self.policy.kernel, None)?;
@@ -551,6 +557,8 @@ mod tests {
     fn authorization_binds_arguments_source_and_owned_snapshot_handoff() {
         use crate::boot::{Backend, BootTarget, SnapshotSource};
         let p = policy();
+        let evidence =
+            crate::boot_zfs::ValidatedClone::fixture("tank/other", "tank/root@approved", 42);
         let target = BootTarget {
             dataset: "tank/root".into(),
             label: "fixture".into(),
@@ -571,22 +579,31 @@ mod tests {
             initrd: Some("/fixture/initrd".into()),
             cmdline: vec!["root=ZFS=tank/root".into(), "rw".into()],
         };
-        assert!(p.matches_plan(&plan, false).is_ok());
+        assert!(p.matches_plan(&plan, None).is_ok());
         plan.cmdline.push("init=/bin/sh".into());
-        assert!(p.matches_plan(&plan, false).is_err());
+        assert!(p.matches_plan(&plan, None).is_err());
         plan.cmdline.pop();
         plan.target.dataset = "tank/other".into();
         plan.cmdline[0] = "root=ZFS=tank/other".into();
-        assert!(p.matches_plan(&plan, true).is_err());
+        assert!(p.matches_plan(&plan, Some(&evidence)).is_err());
         plan.target.snapshot = Some(SnapshotSource {
             name: "tank/root@approved".into(),
             guid: 42,
         });
         assert!(p.matches_selection(&plan).is_ok());
-        assert!(p.matches_plan(&plan, false).is_err());
-        assert!(p.matches_plan(&plan, true).is_ok());
+        assert!(p.matches_plan(&plan, None).is_err());
+        assert!(p.matches_plan(&plan, Some(&evidence)).is_ok());
+        plan.target.snapshot.as_mut().unwrap().guid = 99;
+        assert!(p.matches_plan(&plan, Some(&evidence)).is_err());
+        plan.target.snapshot.as_mut().unwrap().guid = 42;
+        plan.target.dataset = "tank/different-clone".into();
+        plan.cmdline[0] = "root=ZFS=tank/different-clone".into();
+        assert!(p.matches_selection(&plan).is_ok());
+        assert!(p.matches_plan(&plan, Some(&evidence)).is_err());
+        plan.target.dataset = "tank/other".into();
+        plan.cmdline[0] = "root=ZFS=tank/other".into();
         plan.target.snapshot.as_mut().unwrap().name = "tank/foreign@approved".into();
-        assert!(p.matches_plan(&plan, true).is_err());
+        assert!(p.matches_plan(&plan, Some(&evidence)).is_err());
     }
     #[test]
     fn prepared_inode_is_sealed_and_readonly() {

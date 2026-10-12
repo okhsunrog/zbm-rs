@@ -44,7 +44,7 @@ pub fn utility() -> io::Result<bool> {
                 return Err(io::Error::other("Expected PLAN.json [--execute]"));
             }
             let plan: zbm_core::boot::BootPlan = serde_json::from_slice(&fs::read(&args[2])?)?;
-            let loaded = crate::manager::executor::LoadedKernel::load_verified(&plan, false)?;
+            let loaded = crate::manager::executor::LoadedKernel::load_verified(&plan, None)?;
             println!("ZBM_TEST_VERIFIED_LOAD_PASS");
             if args.len() == 4 {
                 loaded.execute()?;
