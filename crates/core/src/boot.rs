@@ -360,15 +360,9 @@ impl BootPlan {
         )?;
         let systemd_initrd = checked
             .required_initrd()?
-            .map(|path| crate::initrd::systemd(&rooted_path(&target.root, path)?))
-            .transpose()?
-            .unwrap_or(false);
-        let support = if systemd_initrd {
-            planning::InitrdSupport::Systemd
-        } else {
-            planning::InitrdSupport::Unsupported
-        };
-        checked.plan(support)?.resolve()
+            .map(|path| planning::SystemdInitrd::inspect(&target.root, path))
+            .transpose()?;
+        checked.plan(systemd_initrd.as_ref())?.resolve()
     }
 
     /// The caller has validated and created this clone from the immutable source.
@@ -396,25 +390,44 @@ impl planning::GuestPlan {
     /// Effect boundary: resolve guest symlinks and check actual boot files.
     pub(crate) fn resolve(self) -> io::Result<BootPlan> {
         if let Some(init) = &self.inputs.init {
-            rooted_path(&self.target.root, init)?;
+            init.resolve(&self.target.root)?;
         }
-        let kernel = rooted_path(&self.target.root, &self.inputs.kernel)?;
+        let kernel = self.inputs.kernel.resolve(&self.target.root)?;
         let initrd = self
             .inputs
             .initrd
             .as_ref()
-            .map(|path| rooted_path(&self.target.root, path))
+            .map(|path| path.resolve(&self.target.root))
             .transpose()?;
         for path in std::iter::once(&kernel).chain(initrd.iter()) {
-            if !fs::metadata(path)?.is_file() {
+            if !fs::metadata(&path.0)?.is_file() {
                 return Err(invalid("Kernel and initrd must be regular files"));
             }
         }
         Ok(BootPlan {
             target: self.target,
-            kernel,
-            initrd,
+            kernel: kernel.0,
+            initrd: initrd.map(|path| path.0),
             cmdline: self.cmdline,
+        })
+    }
+}
+
+impl planning::GuestPath {
+    fn resolve(&self, root: &Path) -> io::Result<planning::ResolvedPath> {
+        rooted_path(root, self.as_path()).map(planning::ResolvedPath)
+    }
+}
+
+impl planning::SystemdInitrd {
+    fn inspect(root: &Path, path: &Path) -> io::Result<Self> {
+        let path = planning::GuestPath::new(path.into())?;
+        if !crate::initrd::systemd(&path.resolve(root)?.0)? {
+            return Err(invalid("NixOS root override requires systemd initrd"));
+        }
+        Ok(Self {
+            root: root.into(),
+            path,
         })
     }
 }

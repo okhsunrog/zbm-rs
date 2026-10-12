@@ -16,21 +16,58 @@ pub(super) struct CheckedNixos {
     additional_initrd_mounts: bool,
 }
 
-pub(super) enum InitrdSupport {
-    Systemd,
-    Unsupported,
+/// Evidence refers to an inspected guest initrd in one mounted OS root.
+pub(super) struct SystemdInitrd {
+    pub(super) root: PathBuf,
+    pub(super) path: GuestPath,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct GuestPath(PathBuf);
+
+impl GuestPath {
+    pub(super) fn new(path: PathBuf) -> io::Result<Self> {
+        if !path.is_absolute() {
+            return Err(invalid("Boot path must be absolute"));
+        }
+        Ok(Self(path))
+    }
+    pub(super) fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// Constructed only by the filesystem boundary, never by pure policy.
+pub(super) struct ResolvedPath(pub(super) PathBuf);
+
+#[derive(Debug)]
+pub(super) struct GuestInputs {
+    pub(super) kernel: GuestPath,
+    pub(super) initrd: Option<GuestPath>,
+    pub(super) init: Option<GuestPath>,
+}
+
+impl TryFrom<BootInputs> for GuestInputs {
+    type Error = io::Error;
+    fn try_from(inputs: BootInputs) -> io::Result<Self> {
+        Ok(Self {
+            kernel: GuestPath::new(inputs.kernel)?,
+            initrd: inputs.initrd.map(GuestPath::new).transpose()?,
+            init: inputs.init.map(GuestPath::new).transpose()?,
+        })
+    }
 }
 
 enum RootSelection {
     Fstab,
-    Explicit(String),
+    Explicit(zfskit::names::DatasetName),
 }
 
 /// A policy-checked plan whose paths still belong to the selected OS.
 #[derive(Debug)]
 pub(crate) struct GuestPlan {
     pub(super) target: BootTarget,
-    pub(super) inputs: BootInputs,
+    pub(super) inputs: GuestInputs,
     pub(super) cmdline: Vec<String>,
 }
 
@@ -70,8 +107,12 @@ impl NixosConfiguration {
             return Err(invalid("Separate Nix store mounts are not supported yet"));
         }
         let root = match root_override {
-            Some(dataset) => RootSelection::Explicit(dataset.into()),
-            None if root[0] != target.dataset => RootSelection::Explicit(target.dataset.clone()),
+            Some(dataset) => RootSelection::Explicit(
+                zfskit::names::DatasetName::parse(dataset).map_err(invalid_error)?,
+            ),
+            None if root[0] != target.dataset => RootSelection::Explicit(
+                zfskit::names::DatasetName::parse(&target.dataset).map_err(invalid_error)?,
+            ),
             None => RootSelection::Fstab,
         };
         let inputs = BootInputs::from_spec(&self.spec);
@@ -127,7 +168,7 @@ impl CheckedNixos {
         }
     }
 
-    pub(super) fn plan(self, initrd: InitrdSupport) -> io::Result<GuestPlan> {
+    pub(super) fn plan(self, initrd: Option<&SystemdInitrd>) -> io::Result<GuestPlan> {
         let Self {
             target,
             inputs,
@@ -138,17 +179,16 @@ impl CheckedNixos {
         let RootSelection::Explicit(dataset) = root else {
             return Ok(GuestPlan {
                 target,
-                inputs,
+                inputs: inputs.try_into()?,
                 cmdline,
             });
         };
-        if !matches!(initrd, InitrdSupport::Systemd) {
+        if !initrd.is_some_and(|evidence| {
+            evidence.root == target.root
+                && inputs.initrd.as_deref() == Some(evidence.path.as_path())
+        }) {
             return Err(invalid("NixOS root override requires systemd initrd"));
         }
-        if inputs.initrd.is_none() {
-            return Err(invalid("NixOS clone boot requires an initrd"));
-        }
-        zfskit::names::DatasetName::parse(&dataset).map_err(invalid_error)?;
         if additional_initrd_mounts {
             return Err(invalid(
                 "Snapshot boot does not support additional initrd mounts",
@@ -164,7 +204,7 @@ impl CheckedNixos {
                 "Snapshot boot cannot override conflicting root policy",
             ));
         }
-        let rootflags = if dataset == target.dataset
+        let rootflags = if dataset.as_str() == target.dataset
             && target.mountpoint.as_deref().is_some_and(|p| p != "legacy")
         {
             "rootflags=defaults,zfsutil"
@@ -183,8 +223,11 @@ impl CheckedNixos {
             ])
             .collect();
         Ok(GuestPlan {
-            target: BootTarget { dataset, ..target },
-            inputs,
+            target: BootTarget {
+                dataset: dataset.to_string(),
+                ..target
+            },
+            inputs: inputs.try_into()?,
             cmdline,
         })
     }
@@ -214,7 +257,7 @@ impl GuestPlan {
         crate::linux::command_line(&cmdline)?;
         Ok(Self {
             target: target.clone(),
-            inputs: target.inputs(),
+            inputs: target.inputs().try_into()?,
             cmdline,
         })
     }
@@ -238,6 +281,13 @@ mod tests {
             },
             fstab.into(),
         )
+    }
+
+    fn systemd() -> SystemdInitrd {
+        SystemdInitrd {
+            root: target().root,
+            path: GuestPath::new("/initrd".into()).unwrap(),
+        }
     }
 
     fn target() -> BootTarget {
@@ -264,8 +314,8 @@ mod tests {
             .check(target(), &["quiet".into()], None)
             .unwrap();
         assert!(checked.required_initrd().unwrap().is_none());
-        let plan = checked.plan(InitrdSupport::Unsupported).unwrap();
-        assert_eq!(plan.inputs.kernel, Path::new("/kernel"));
+        let plan = checked.plan(None).unwrap();
+        assert_eq!(plan.inputs.kernel.as_path(), Path::new("/kernel"));
         assert_eq!(plan.cmdline, ["init=/init", "root=fstab", "quiet"]);
         assert_eq!(plan.target.dataset, "tank/root");
     }
@@ -281,8 +331,8 @@ mod tests {
             checked().required_initrd().unwrap(),
             Some(Path::new("/initrd"))
         );
-        assert!(checked().plan(InitrdSupport::Unsupported).is_err());
-        let plan = checked().plan(InitrdSupport::Systemd).unwrap();
+        assert!(checked().plan(None).is_err());
+        let plan = checked().plan(Some(&systemd())).unwrap();
         assert_eq!(plan.target.dataset, "tank/clone");
         assert_eq!(
             plan.cmdline,
@@ -295,6 +345,24 @@ mod tests {
                 "rd.fstab=no"
             ]
         );
+    }
+
+    #[test]
+    fn initrd_evidence_cannot_be_reused_for_another_root_or_path() {
+        let checked = || {
+            configuration("tank/root / zfs defaults")
+                .check(target(), &[], Some("tank/clone"))
+                .unwrap()
+        };
+        let mut evidence = systemd();
+        evidence.root = "/another-mounted-root".into();
+        assert!(checked().plan(Some(&evidence)).is_err());
+        let evidence = SystemdInitrd {
+            path: GuestPath::new("/different-initrd".into()).unwrap(),
+            ..systemd()
+        };
+        assert!(checked().plan(Some(&evidence)).is_err());
+        assert!(GuestPath::new("relative/kernel".into()).is_err());
     }
 
     #[test]
@@ -314,7 +382,7 @@ mod tests {
                 let plan = configuration(fstab)
                     .check(target, &[], override_root)
                     .unwrap()
-                    .plan(InitrdSupport::Systemd)
+                    .plan(Some(&systemd()))
                     .unwrap();
                 assert!(plan.cmdline.contains(&"root=tank/root".into()));
                 assert!(plan.cmdline.contains(&flags.into()));
@@ -328,7 +396,7 @@ mod tests {
             let checked = configuration("tank/root / zfs defaults")
                 .check(target(), &[arg.into()], Some("tank/clone"))
                 .unwrap();
-            assert!(checked.plan(InitrdSupport::Systemd).is_err(), "{arg}");
+            assert!(checked.plan(Some(&systemd())).is_err(), "{arg}");
         }
         for mount in [
             "tank/usr /usr zfs defaults",
@@ -339,14 +407,14 @@ mod tests {
                 configuration(&fstab)
                     .check(target(), &[], Some("tank/clone"))
                     .unwrap()
-                    .plan(InitrdSupport::Systemd)
+                    .plan(Some(&systemd()))
                     .is_err()
             );
             assert!(
                 configuration(&fstab)
                     .check(target(), &[], None)
                     .unwrap()
-                    .plan(InitrdSupport::Unsupported)
+                    .plan(None)
                     .is_ok()
             );
         }
