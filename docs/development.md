@@ -98,6 +98,45 @@ protection and read-only policy before restoring data and booting the result.
 
 Protected acceptance uses [the separate signing workflow](security-testing.md).
 
+## GUI prototype review
+
+The `gui-prototype` feature selects the Slint interface with Skia software rendering.
+It is a sample-data preview: it does not discover pools, verify boot inputs, boot
+an entry or open recovery tools. The ordinary Nix image continues to use the TUI.
+
+Build the prototype on the development host:
+
+```sh
+cargo build -p zbm-rs --features gui-prototype --locked
+cargo test -p zbm-rs --features gui-prototype gui::tests --locked
+```
+
+Copy the binary into a disposable LinuxKMS VM and run it on a guest VT, as an
+ordinary process rather than PID 1. Inside that VM:
+
+```sh
+SLINT_BACKEND=linuxkms-skia-software ZBM_GUI_FIXTURE=demo ./zbm-rs
+```
+
+`ZBM_GUI_FIXTURE` accepts `demo`, `empty`, `long` and `many` (60 sample generations).
+An unknown fixture is rejected. Use the boot-source selector to test empty filtered
+results as well. Selected entries retain their identity when a filter changes their
+position; changing the selection or source clears the previous action result.
+
+Tab cycles through the source selector, list, details and action button. In the
+list, arrows or j/k select entries, Home/End jump to the ends, Page Up/Down move
+by a viewport, and Enter invokes the same preview action as the button. The details
+pane supports arrows and Page Up/Down for scrolling. Mouse selection returns
+keyboard focus to the list. Below 720 logical pixels, the Entries/Details button
+switches the main pane; the action area stays visible.
+
+Review at 1920×1080 (100%, 150%, 200%), 1024×768, 800×600 and a narrow logical
+viewport. Inspect full-size screenshots and exercise filtering, keyboard/button
+activation, focus after mouse selection, stale-status clearing, long text, empty
+results and scrolling to the last of many entries. A successful unit test does not
+establish layout or keyboard behavior. The pinned LinuxKMS version does not deliver
+Shift+Tab as a reverse-focus key in the VM; use forward Tab to cycle controls.
+
 ## Observing a VM
 
 `screen` returns instrumented application state. `screen --text` reads the actual

@@ -1,0 +1,294 @@
+import { Button, ComboBox, ListView, Palette, ScrollView } from "std-widgets.slint";
+
+export struct BootEntry {
+    title: string,
+    subtitle: string,
+    badge: string,
+    dataset: string,
+    verification: string,
+    measurement: string,
+    recovery: bool,
+}
+
+global Theme {
+    out property <length> gap: 16px;
+    out property <length> radius: 16px;
+    out property <color> muted: Palette.foreground.transparentize(0.3);
+    out property <color> positive: #8ee6b3;
+    out property <color> warning: #ffd08a;
+}
+
+component Label inherits Text {
+    color: Theme.muted;
+    font-size: 12px;
+    overflow: elide;
+}
+
+component BootRow inherits Rectangle {
+    in property <BootEntry> entry;
+    in property <bool> selected;
+    in property <bool> focused;
+    in property <int> index;
+    callback select();
+    height: 76px;
+    min-width: 0px;
+    border-radius: 12px;
+    background: selected ? Palette.control-background : touch.has-hover ? Palette.control-background.transparentize(0.5) : transparent;
+    border-width: selected && focused ? 2px : 0px;
+    border-color: Palette.accent-background;
+    accessible-role: list-item;
+    accessible-label: entry.title + ", " + entry.subtitle + ", demo " + entry.badge;
+    accessible-item-index: index;
+    accessible-item-selectable: true;
+    accessible-item-selected: selected;
+    accessible-action-default => { root.select(); }
+    HorizontalLayout {
+        padding: 12px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            width: 8px;
+            Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.entry.recovery ? Theme.warning : Theme.positive; }
+        }
+        VerticalLayout {
+            min-width: 0px;
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 4px;
+            Text { text: root.entry.title; color: Palette.foreground; font-size: 17px; font-weight: 600; overflow: elide; min-width: 0px; }
+            Label { text: root.entry.subtitle; min-width: 0px; }
+        }
+        VerticalLayout {
+            alignment: center;
+            width: 78px;
+            Rectangle {
+                height: 28px;
+                border-radius: 14px;
+                background: root.entry.recovery ? #49341d : #183d31;
+                Text { text: root.entry.badge; color: root.entry.recovery ? Theme.warning : Theme.positive; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+            }
+        }
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.select(); } }
+}
+
+component EntriesPanel inherits Rectangle {
+    in property <[BootEntry]> entries;
+    in property <int> selected-row: -1;
+    in property <string> heading;
+    callback select-row(int);
+    callback move-selection(int);
+    callback activate();
+    forward-focus: navigation;
+    min-width: 0px;
+    min-height: 0px;
+    clip: true;
+    background: Palette.background;
+    border-radius: Theme.radius;
+    public function reveal() { list.ensure-row-visible(root.selected-row, ScrollBehavior.instant); }
+    public function reset-scroll() { list.content-y = 0px; }
+    changed selected-row => { root.reveal(); }
+    navigation := FocusScope {
+        enabled: root.visible;
+        key-pressed(event) => {
+            if event.modifiers.control || event.modifiers.alt || event.modifiers.meta { return reject; }
+            if event.text == Key.DownArrow || event.text == "j" {
+                root.move-selection(1); root.reveal(); return accept;
+            }
+            if event.text == Key.UpArrow || event.text == "k" {
+                root.move-selection(-1); root.reveal(); return accept;
+            }
+            if event.text == Key.Home { root.select-row(0); root.reveal(); return accept; }
+            if event.text == Key.End { root.select-row(root.entries.length - 1); root.reveal(); return accept; }
+            if event.text == Key.PageDown { root.move-selection(max(1, floor(list.visible-height / 76px))); root.reveal(); return accept; }
+            if event.text == Key.PageUp { root.move-selection(-max(1, floor(list.visible-height / 76px))); root.reveal(); return accept; }
+            if event.text == Key.Return { root.activate(); return accept; }
+            return reject;
+        }
+        VerticalLayout {
+            padding: Theme.gap;
+            spacing: 12px;
+            Label { text: root.heading; font-weight: 600; }
+            list := ListView {
+                min-height: 0px;
+                min-width: 0px;
+                vertical-stretch: 1;
+                horizontal-scrollbar-policy: always-off;
+                for entry[index] in root.entries: BootRow {
+                    entry: entry;
+                    index: index;
+                    selected: index == root.selected-row;
+                    focused: navigation.has-focus;
+                    select => { navigation.focus(); root.select-row(index); }
+                }
+            }
+        }
+        if root.entries.length == 0: Text {
+            text: "No sample entries in this source";
+            color: Theme.muted;
+            font-size: 15px;
+            wrap: word-wrap;
+            horizontal-alignment: center;
+            x: 20px;
+            width: parent.width - 40px;
+        }
+    }
+}
+
+component DetailsPanel inherits Rectangle {
+    in property <BootEntry> entry;
+    in property <bool> has-entry;
+    forward-focus: navigation;
+    min-width: 0px;
+    min-height: 0px;
+    clip: true;
+    background: Palette.background;
+    border-radius: Theme.radius;
+    border-width: navigation.has-focus ? 2px : 0px;
+    border-color: Palette.accent-background;
+    changed entry => { details.content-y = 0px; }
+    navigation := FocusScope {
+        enabled: root.visible;
+        key-pressed(event) => {
+            if event.modifiers.control || event.modifiers.alt || event.modifiers.meta { return reject; }
+            if event.text == Key.DownArrow || event.text == Key.PageDown {
+                details.content-y = max(min(0px, details.visible-height - details.content-height), details.content-y - (event.text == Key.PageDown ? details.visible-height : 40px));
+                return accept;
+            }
+            if event.text == Key.UpArrow || event.text == Key.PageUp {
+                details.content-y = min(0px, details.content-y + (event.text == Key.PageUp ? details.visible-height : 40px));
+                return accept;
+            }
+            return reject;
+        }
+        details := ScrollView {
+            x: 16px;
+            y: 16px;
+            width: parent.width - 32px;
+            height: parent.height - 32px;
+            horizontal-scrollbar-policy: always-off;
+            VerticalLayout {
+                padding-right: 8px;
+                spacing: 14px;
+                alignment: start;
+                Label { text: "SAMPLE DETAILS"; font-weight: 600; }
+                Text { text: root.has-entry ? root.entry.title : "No entry selected"; color: Palette.foreground; font-size: 19px; font-weight: 600; wrap: word-wrap; min-width: 0px; }
+                Rectangle { height: 1px; background: Palette.border.transparentize(0.65); }
+                if root.has-entry: VerticalLayout {
+                    spacing: 12px;
+                    Label { text: "Root dataset"; }
+                    Text { text: root.entry.dataset; color: Palette.foreground; font-size: 13px; wrap: char-wrap; min-width: 0px; }
+                    Label { text: "Verification (sample)"; }
+                    Text { text: root.entry.verification; color: root.entry.recovery ? Theme.warning : Theme.positive; font-size: 13px; wrap: word-wrap; min-width: 0px; }
+                    Label { text: "TPM measurement (sample)"; }
+                    Text { text: root.entry.measurement; color: Palette.foreground; font-size: 13px; wrap: word-wrap; min-width: 0px; }
+                }
+            }
+        }
+    }
+}
+
+export component BootManager inherits Window {
+    in property <[BootEntry]> entries;
+    in property <[string]> sources;
+    in property <int> selected-row: -1;
+    in property <int> selected-source;
+    in property <BootEntry> selected-entry;
+    in property <string> action-status;
+    callback select-source(int);
+    callback select-row(int);
+    callback move-selection(int);
+    callback activate();
+    private property <bool> narrow: root.width < 720px;
+    private property <bool> details-open: false;
+    forward-focus: source-picker;
+    title: "zbm-rs — GUI prototype";
+    background: Palette.alternate-background;
+    min-width: 360px;
+    min-height: 360px;
+    preferred-width: 1280px;
+    preferred-height: 800px;
+
+    VerticalLayout {
+        x: (root.width - self.width) / 2;
+        y: 0px;
+        width: min(root.width, 1280px);
+        height: root.height;
+        padding: 20px;
+        spacing: Theme.gap;
+        HorizontalLayout {
+            height: 60px;
+            spacing: Theme.gap;
+            VerticalLayout {
+                min-width: 0px;
+                horizontal-stretch: 1;
+                Text { text: "zbm-rs"; color: Palette.foreground; font-size: 27px; font-weight: 700; }
+                Label { text: "GUI prototype · sample data"; }
+            }
+            VerticalLayout {
+                width: root.narrow ? 160px : 200px;
+                Label { text: "Boot source"; }
+                source-picker := ComboBox {
+                    height: 40px;
+                    model: root.sources;
+                    current-index: root.selected-source;
+                    selected(value) => { root.select-source(self.current-index); entry-list.reset-scroll(); }
+                    accessible-label: "Boot source";
+                }
+            }
+        }
+        HorizontalLayout {
+            min-height: 0px;
+            vertical-stretch: 1;
+            spacing: root.narrow ? 0px : Theme.gap;
+            entry-list := EntriesPanel {
+                visible: !root.narrow || !root.details-open;
+                width: root.narrow ? (root.details-open ? 0px : parent.width) : max(0px, parent.width - 296px);
+                entries: root.entries;
+                selected-row: root.selected-row;
+                heading: root.sources[root.selected-source];
+                select-row(row) => { root.select-row(row); }
+                move-selection(delta) => { root.move-selection(delta); }
+                activate => { root.activate(); }
+            }
+            detail-panel := DetailsPanel {
+                visible: !root.narrow || root.details-open;
+                width: root.narrow ? (root.details-open ? parent.width : 0px) : 280px;
+                entry: root.selected-entry;
+                has-entry: root.selected-row >= 0;
+            }
+        }
+        VerticalLayout {
+            spacing: 8px;
+            Text {
+                min-width: 0px;
+                text: root.action-status == "" ? "Preview only — no boot actions" : root.action-status;
+                color: Theme.muted;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                if root.narrow: Button {
+                    text: root.details-open ? "Entries" : "Details";
+                    clicked => {
+                        root.details-open = !root.details-open;
+                        if root.details-open { detail-panel.focus(); } else { entry-list.focus(); }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: root.selected-entry.recovery ? "Preview recovery" : "Preview boot";
+                    enabled: root.selected-row >= 0;
+                    primary: true;
+                    min-height: 46px;
+                    clicked => { root.activate(); }
+                }
+            }
+        }
+        Label {
+            text: root.narrow ? "Tab: focus · ↑↓: select · Enter: preview" : "Tab: change focus     ↑↓ / j k: navigate     Home / End: first / last     Enter: preview";
+            height: 18px;
+        }
+    }
+}
