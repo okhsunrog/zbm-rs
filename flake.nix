@@ -40,6 +40,7 @@
         zbm-rs-efi-test-host-only-scsi = mkImage { testProfile = true; profile = "host-only"; hardwareManifest = ./nix/scsi-hardware-example.json; };
       };
       checks.${system} = {
+        native-nixos = import ./nix/check-native-nixos.nix { inherit self pkgs nixpkgs system; };
         module-options = let appliance = mkImage {
           forcedModules = [ "nvme" ];
           moduleOptions.zfs = "zfs_arc_max=67108864";

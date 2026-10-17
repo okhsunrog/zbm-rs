@@ -19,6 +19,22 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--nixos-plans") {
+        anyhow::ensure!(
+            args.len() == 5,
+            "usage: zbm-rs --nixos-plans ROOT DATASET IMAGE_CONFIG TOPLEVEL"
+        );
+        let root = std::path::Path::new(&args[1]).canonicalize()?;
+        let dataset = args[2]
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Dataset must be UTF-8"))?;
+        let config = config::parse(&std::fs::read_to_string(&args[3])?)?;
+        let target =
+            zbm_core::boot::nixos_target(&root, dataset, std::path::Path::new(&args[4]), 0)?;
+        let plan = zbm_core::boot::BootPlan::resolve_verified(&target, &config.kernel_args)?;
+        println!("{}", serde_json::to_string(&[plan])?);
+        return Ok(());
+    }
     if args.first().is_some_and(|arg| arg == "--linux-plans") {
         anyhow::ensure!(
             args.len() == 4,

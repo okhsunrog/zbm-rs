@@ -1,5 +1,6 @@
 //! Bounded inspection of initramfs /init, without extracting or executing it.
 use std::{
+    collections::HashSet,
     fs,
     io::{self, Read},
     path::Path,
@@ -27,8 +28,14 @@ fn bounded(reader: impl Read) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 pub fn systemd(path: &Path) -> io::Result<bool> {
+    Ok(features(path)?.0)
+}
+pub fn features(path: &Path) -> io::Result<(bool, bool)> {
     let mut bytes = bounded(fs::File::open(path)?)?;
     let mut result = false;
+    let mut root_generator = false;
+    let mut marker_target = None;
+    let mut marker_files = HashSet::new();
     // Early microcode may precede the compressed main cpio. Last /init wins.
     for _ in 0..16 {
         let mut position: usize = 0;
@@ -65,6 +72,21 @@ pub fn systemd(path: &Path) -> io::Result<bool> {
                 result = mode & 0xf000 == 0xa000
                     && (data.ends_with(b"/lib/systemd/systemd") || data.ends_with(b"/bin/systemd"));
             }
+            let normalized = name.strip_prefix(b"./").unwrap_or(name);
+            let mode = hex(&header[14..22])? & 0xf000;
+            if mode == 0x8000 && data == b"zfs-pool-root-v1\n" {
+                marker_files.insert(normalized.to_vec());
+            } else {
+                marker_files.remove(normalized);
+            }
+            if normalized == b"etc/zbm-rs/root-selection-v1" {
+                root_generator = mode == 0x8000 && data == b"zfs-pool-root-v1\n";
+                marker_target = if mode == 0xa000 && data.starts_with(b"/nix/store/") {
+                    Some(data[1..].to_vec())
+                } else {
+                    None
+                };
+            }
             position = align(data_end)?;
             if name == b"TRAILER!!!" {
                 break;
@@ -72,7 +94,13 @@ pub fn systemd(path: &Path) -> io::Result<bool> {
         }
         let remainder = bytes.get(position..).ok_or_else(invalid)?;
         let Some(next) = remainder.iter().position(|b| *b != 0) else {
-            return Ok(result);
+            return Ok((
+                result,
+                root_generator
+                    || marker_target
+                        .as_ref()
+                        .is_some_and(|name| marker_files.contains(name)),
+            ));
         };
         bytes = remainder[next..].to_vec();
     }
@@ -98,11 +126,14 @@ impl io::Write for Limited {
 pub(crate) mod tests {
     use super::*;
     pub(crate) fn archive(init: &str) -> Vec<u8> {
-        let mut bytes = vec![];
-        for (name, data, mode) in [
+        entries(&[
             ("init", init.as_bytes(), 0xa1ffu32),
             ("TRAILER!!!", &[][..], 0),
-        ] {
+        ])
+    }
+    fn entries(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
+        let mut bytes = vec![];
+        for &(name, data, mode) in entries {
             bytes.extend_from_slice(b"070701");
             for value in [
                 1,
@@ -132,6 +163,23 @@ pub(crate) mod tests {
             }
         }
         bytes
+    }
+    #[test]
+    fn native_nixos_marker_resolves_its_store_symlink_inside_archive() {
+        let path = std::env::temp_dir().join(format!("zbm-native-marker-{}", std::process::id()));
+        let archive = |content: &[u8]| {
+            entries(&[
+                ("init", b"/lib/systemd/systemd", 0xa1ff),
+                ("etc/zbm-rs/root-selection-v1", b"/nix/store/marker", 0xa1ff),
+                ("nix/store/marker", content, 0x81a4),
+                ("TRAILER!!!", b"", 0),
+            ])
+        };
+        fs::write(&path, archive(b"zfs-pool-root-v1\n")).unwrap();
+        assert_eq!(features(&path).unwrap(), (true, true));
+        fs::write(&path, archive(b"different-content")).unwrap();
+        assert_eq!(features(&path).unwrap(), (true, false));
+        fs::remove_file(path).unwrap();
     }
     #[test]
     fn recognizes_actual_init_and_rejects_malformed_archives() {

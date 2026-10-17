@@ -13,6 +13,9 @@ The TUI separates pools, boot environments, Linux kernel pairs and NixOS generat
 explicit Linux or NixOS backend; generation, toplevel and init are optional for
 Linux. ZBM kernel/commandline/rootprefix properties drive Linux selection and
 root arguments; Bootspec remains authoritative for NixOS.
+Native NixOS installation prepares source-bound signed artifacts outside the
+store; see [NixOS deployment](nixos-deployment.md). Discovery never executes
+runtime secret appenders and handoff revalidates both source and authorization.
 Mount failures are attached to the affected BE. Generation discovery preserves
 usable targets and separate rejected-generation diagnostics, including when
 browsing snapshots; one malformed Bootspec never invalidates its peers.

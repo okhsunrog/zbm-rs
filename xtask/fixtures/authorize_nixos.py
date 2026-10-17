@@ -94,8 +94,15 @@ def main():
         environment = os.environ | {"LD_LIBRARY_PATH": str(args.evmctl.resolve().parent)}
         for generation in (1, 2):
             toplevel = (args.fixture / f"generation-{generation}").read_text().strip()
-            spec = json.loads(owned_file(root, toplevel + "/boot.json").read_text())["org.nixos.bootspec.v1"]
-            kernel, initrd = owned_file(root, spec["kernel"]), owned_file(root, spec["initrd"])
+            bootspec_bytes = owned_file(root, toplevel + "/boot.json").read_bytes()
+            spec = json.loads(bootspec_bytes)["org.nixos.bootspec.v1"]
+            prepared = root / "boot/zbm-rs/nixos" / Path(toplevel).name
+            prepared.mkdir(parents=True, exist_ok=True)
+            kernel, initrd = prepared / "kernel", prepared / "initrd"
+            shutil.copyfile(owned_file(root, spec["kernel"]), kernel)
+            shutil.copyfile(owned_file(root, spec["initrd"]), initrd)
+            (prepared / "prepared.json").write_text(json.dumps({"version": 1,
+                "bootspec_sha256": hashlib.sha256(bootspec_bytes).hexdigest()}) + "\n")
             if kernel not in kernels:
                 signed = temporary / "kernel.signed"
                 command(["sbsign", "--key", args.kernel_key.resolve(), "--cert", args.kernel_cert.resolve(), "--output", signed, kernel])

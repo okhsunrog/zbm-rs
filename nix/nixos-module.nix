@@ -34,7 +34,7 @@ let
     hostId = cfg.image.hostId;
   };
 in {
-  imports = [ ./snapshot-boot.nix ] ++ map (pair: lib.mkRenamedOptionModule
+  imports = [ ./snapshot-boot.nix (import ./nixos-boot.nix { inherit self; }) ] ++ map (pair: lib.mkRenamedOptionModule
     ([ "programs" "zbm-rs" ] ++ builtins.elemAt pair 0)
     ([ "programs" "zbm-rs" ] ++ builtins.elemAt pair 1)) [
       [ [ "timeout" ] [ "settings" "ui" "timeout" ] ]

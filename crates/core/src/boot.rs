@@ -4,6 +4,7 @@ mod record;
 use record::TargetRecord;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
     fs, io,
@@ -148,6 +149,8 @@ struct Document {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Bootspec {
+    #[serde(skip)]
+    prepared: bool,
     system: String,
     kernel: PathBuf,
     initrd: Option<PathBuf>,
@@ -156,6 +159,13 @@ struct Bootspec {
     toplevel: PathBuf,
     kernel_params: Vec<String>,
     label: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedGeneration {
+    version: u32,
+    bootspec_sha256: String,
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -186,7 +196,16 @@ pub fn rooted_path(root: &Path, path: &Path) -> io::Result<PathBuf> {
             Component::Normal(_) => {
                 relative.push(&part);
                 let candidate = root.join(&relative);
-                if fs::symlink_metadata(&candidate)?.file_type().is_symlink() {
+                if fs::symlink_metadata(&candidate)
+                    .map_err(|error| {
+                        io::Error::new(
+                            error.kind(),
+                            format!("Boot path {}: {error}", candidate.display()),
+                        )
+                    })?
+                    .file_type()
+                    .is_symlink()
+                {
                     links += 1;
                     if links > 40 {
                         return Err(invalid("Too many boot path symlinks"));
@@ -210,7 +229,8 @@ fn read_document(root: &Path, toplevel: &Path) -> io::Result<Document> {
     if !metadata.is_file() || metadata.len() > 1024 * 1024 {
         return Err(invalid("Bootspec exceeds 1 MiB"));
     }
-    let document: Document = serde_json::from_slice(&fs::read(path)?).map_err(invalid_error)?;
+    let bytes = fs::read(path)?;
+    let mut document: Document = serde_json::from_slice(&bytes).map_err(invalid_error)?;
     if document.extra_initrd.is_some() {
         return Err(invalid(
             "Bootspec extra initrd extension is not supported yet",
@@ -224,9 +244,56 @@ fn read_document(root: &Path, toplevel: &Path) -> io::Result<Document> {
     if document.boot.system != system {
         return Err(invalid("Unsupported Bootspec architecture"));
     }
-    if document.boot.initrd_secrets.is_some() {
-        return Err(invalid("Bootspec initrdSecrets is not supported yet"));
+    // Source Bootspec stays immutable. Installation prepares copies outside the
+    // store; neither discovery nor the boot broker executes initrdSecrets.
+    let canonical = rooted_path(root, &document.boot.toplevel)?;
+    let guest = canonical.strip_prefix(root).map_err(invalid_error)?;
+    if let Ok(name) = guest.strip_prefix("nix/store")
+        && name.components().count() == 1
+    {
+        let directory = Path::new("/boot/zbm-rs/nixos").join(name);
+        match rooted_path(root, &directory.join("prepared.json")) {
+            Ok(record) => {
+                if !fs::metadata(&record)?.is_file() || fs::metadata(&record)?.len() > 4096 {
+                    return Err(invalid("Invalid prepared NixOS generation record"));
+                }
+                let prepared: PreparedGeneration =
+                    serde_json::from_slice(&fs::read(record)?).map_err(invalid_error)?;
+                if prepared.version != 1
+                    || prepared.bootspec_sha256 != crate::security::hex(&Sha256::digest(&bytes))
+                {
+                    return Err(invalid("Prepared NixOS generation does not match Bootspec"));
+                }
+                document.boot.kernel = directory.join("kernel");
+                if document.boot.initrd.is_some() {
+                    document.boot.initrd = Some(directory.join("initrd"));
+                }
+                document.boot.initrd_secrets = None;
+                document.boot.prepared = true;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
     }
+    if document.boot.initrd_secrets.is_some() {
+        return Err(invalid(
+            "NixOS initrdSecrets requires an installed prepared generation",
+        ));
+    }
+    document.boot.kernel_params = document
+        .boot
+        .kernel_params
+        .iter()
+        .map(|parameter| {
+            let mut tokens = crate::linux::arguments(parameter)?;
+            if tokens.len() != 1 {
+                return Err(invalid(
+                    "Bootspec parameter must contain one quoted kernel argument",
+                ));
+            }
+            Ok(tokens.remove(0))
+        })
+        .collect::<io::Result<_>>()?;
     Ok(document)
 }
 fn read_spec(root: &Path, toplevel: &Path) -> io::Result<Bootspec> {
@@ -253,6 +320,34 @@ fn invalid_error(error: impl std::fmt::Display) -> io::Error {
 
 pub fn generations(root: &Path, dataset: &str, limit: u32) -> io::Result<Vec<BootTarget>> {
     Ok(discover_generations(root, dataset, limit)?.targets)
+}
+
+/// Installation and discovery use the same Bootspec/prepared-input boundary.
+pub fn nixos_target(
+    root: &Path,
+    dataset: &str,
+    profile: &Path,
+    generation: u64,
+) -> io::Result<BootTarget> {
+    let spec = read_spec(root, profile)?;
+    if rooted_path(root, profile)? != rooted_path(root, &spec.toplevel)? {
+        return Err(invalid("Bootspec toplevel does not match generation"));
+    }
+    Ok(BootTarget {
+        dataset: dataset.into(),
+        label: spec.label,
+        root: root.into(),
+        backend: Backend::Nixos(NixosTarget {
+            generation,
+            toplevel: spec.toplevel,
+            init: spec.init,
+            kernel: spec.kernel,
+            initrd: spec.initrd,
+            kernel_params: spec.kernel_params,
+        }),
+        snapshot: None,
+        mountpoint: None,
+    })
 }
 
 pub fn discover_generations(root: &Path, dataset: &str, limit: u32) -> io::Result<TargetDiscovery> {
@@ -287,28 +382,7 @@ pub fn discover_generations(root: &Path, dataset: &str, limit: u32) -> io::Resul
     let mut discovery = TargetDiscovery::default();
     for generation in candidates {
         let profile = PathBuf::from(format!("/nix/var/nix/profiles/system-{generation}-link"));
-        let target = (|| {
-            let spec = read_spec(root, &profile)?;
-            let actual = rooted_path(root, &profile)?;
-            if actual != rooted_path(root, &spec.toplevel)? {
-                return Err(invalid("Bootspec toplevel does not match generation"));
-            }
-            Ok(BootTarget {
-                dataset: dataset.into(),
-                label: spec.label,
-                root: root.into(),
-                backend: Backend::Nixos(NixosTarget {
-                    generation,
-                    toplevel: spec.toplevel,
-                    init: spec.init,
-                    kernel: spec.kernel,
-                    initrd: spec.initrd,
-                    kernel_params: spec.kernel_params,
-                }),
-                snapshot: None,
-                mountpoint: None,
-            })
-        })();
+        let target = nixos_target(root, dataset, &profile, generation);
         match target {
             Ok(target) => discovery.targets.push(target),
             Err(error) => discovery.rejected.push(GenerationIssue {
@@ -422,12 +496,14 @@ impl planning::GuestPath {
 impl planning::SystemdInitrd {
     fn inspect(root: &Path, path: &Path) -> io::Result<Self> {
         let path = planning::GuestPath::new(path.into())?;
-        if !crate::initrd::systemd(&path.resolve(root)?.0)? {
+        let (systemd, root_generator) = crate::initrd::features(&path.resolve(root)?.0)?;
+        if !systemd {
             return Err(invalid("NixOS root override requires systemd initrd"));
         }
         Ok(Self {
             root: root.into(),
             path,
+            root_generator,
         })
     }
 }
@@ -530,6 +606,29 @@ mod tests {
         document["org.nixos.bootspec.v1"]["initrdSecrets"] = "/nix/store/os/secret-appender".into();
         fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
         assert!(BootPlan::resolve(&targets[0], &[]).is_err());
+        let prepared = root.join("boot/zbm-rs/nixos/os");
+        fs::create_dir_all(&prepared).unwrap();
+        fs::write(prepared.join("kernel"), b"signed-kernel").unwrap();
+        fs::copy(root.join("nix/store/os/initrd"), prepared.join("initrd")).unwrap();
+        let record = serde_json::json!({"version":1,
+            "bootspec_sha256":crate::security::hex(&Sha256::digest(fs::read(&path).unwrap()))});
+        fs::write(
+            prepared.join("prepared.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        let native = BootPlan::resolve_verified(&targets[0], &[]).unwrap();
+        assert_eq!(
+            BootPlan::resolve(&targets[0], &[]).unwrap().cmdline,
+            native.cmdline
+        );
+        assert_eq!(native.kernel, prepared.join("kernel"));
+        assert_eq!(native.initrd, Some(prepared.join("initrd")));
+        // Bootspec changes must invalidate a stale prepared generation.
+        document["org.nixos.bootspec.v1"]["kernelParams"] = serde_json::json!(["quiet"]);
+        fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+        assert!(BootPlan::resolve(&targets[0], &[]).is_err());
+        fs::remove_dir_all(prepared).unwrap();
         document["org.nixos.bootspec.v1"]
             .as_object_mut()
             .unwrap()

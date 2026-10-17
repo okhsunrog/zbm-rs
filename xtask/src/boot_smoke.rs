@@ -83,7 +83,18 @@ pub fn run(run: &Path, image: &Path, fixture: &Path, options: Options<'_>) -> Re
             // authorization, even though it uses the same signed image pair.
             vm::ssh(
                 run,
-                "set -eu; fake=/nix/store/zbm-unauthorized-generation; mkdir -p /fixture-root$fake; system=$(readlink /fixture-root/nix/var/nix/profiles/system-2-link); sed \"s|$system|$fake|g; s/\\\"zbm.fixture=2\\\"/\\\"zbm.fixture=unauthorized\\\"/\" /fixture-root$system/boot.json > /fixture-root$fake/boot.json; ln -s $system/init /fixture-root$fake/init; ln -s $system/etc /fixture-root$fake/etc; ln -s $fake /fixture-root/nix/var/nix/profiles/system-4-link",
+                r#"set -eu
+fake=/nix/store/zbm-unauthorized-generation
+mkdir -p /fixture-root$fake
+system=$(readlink /fixture-root/nix/var/nix/profiles/system-2-link)
+bundle=/boot/zbm-rs/nixos/$(basename "$system")
+sed "s|$system|$fake|g; s/\"zbm.fixture=2\"/\"zbm.fixture=unauthorized\"/" /fixture-root$system/boot.json > /fixture-root$fake/boot.json
+if test -f "/fixture-root$bundle/prepared.json"; then
+    sed -i "s|\"kernel\": .*|\"kernel\": \"$bundle/kernel\",|; s|\"initrd\": .*|\"initrd\": \"$bundle/initrd\",|" /fixture-root$fake/boot.json
+fi
+ln -s $system/init /fixture-root$fake/init
+ln -s $system/etc /fixture-root$fake/etc
+ln -s $fake /fixture-root/nix/var/nix/profiles/system-4-link"#,
             )?;
         }
         // A malformed peer must not hide either real NixOS generation, including

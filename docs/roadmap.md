@@ -10,6 +10,7 @@ listed in [verification](verification.md); design details live in
 - Generic Linux kernel/initramfs discovery and ordinary ZFS-root boot.
 - Explicit hidden passphrase unlock, including encrypted Arch root and snapshot-clone boot.
 - NixOS Bootspec generation selection with `/nix` in the selected root.
+- Native NixOS install hook for prepared generations and runtime initrd secrets.
 - Snapshot inspection, owned writable boot clones, and ordinary-mode rollback,
   persistent clones and promotion.
 - Search, target details, keyboard help and compact-console layouts.
@@ -41,7 +42,7 @@ Those operations belong to the selected OS. See [TPM ownership](tpm.md),
 ## Boot support and release work
 
 - Automatic key-source handling and raw/hex-key input beyond passphrase unlock.
-- NixOS specialisations, separate `/nix` layouts and a defined `initrdSecrets` flow.
+- NixOS specialisation selection and separate `/nix` layouts.
 - Locked/degraded pool recovery and clear diagnostics for unsupported layouts.
 - Explicit autoboot policy and timeout behavior.
 - Deployment, signing-key rotation and trusted recovery packaging.

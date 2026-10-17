@@ -20,6 +20,7 @@ pub(super) struct CheckedNixos {
 pub(super) struct SystemdInitrd {
     pub(super) root: PathBuf,
     pub(super) path: GuestPath,
+    pub(super) root_generator: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,20 +111,19 @@ impl NixosConfiguration {
             Some(dataset) => RootSelection::Explicit(
                 zfskit::names::DatasetName::parse(dataset).map_err(invalid_error)?,
             ),
-            None if root[0] != target.dataset => RootSelection::Explicit(
+            None if self.spec.prepared || root[0] != target.dataset => RootSelection::Explicit(
                 zfskit::names::DatasetName::parse(&target.dataset).map_err(invalid_error)?,
             ),
             None => RootSelection::Fstab,
         };
         let inputs = BootInputs::from_spec(&self.spec);
         let cmdline = inputs.command_line(extra);
-        if cmdline.iter().any(|argument| {
-            argument.is_empty()
-                || argument
-                    .chars()
-                    .any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '\'')
-        }) {
-            return Err(invalid("Unsupported whitespace/quoting in kernel argument"));
+        crate::linux::command_line(&cmdline)?;
+        if extra
+            .iter()
+            .any(|arg| arg.chars().any(|c| c.is_whitespace() || c == '\''))
+        {
+            return Err(invalid("Unsupported whitespace in extra kernel argument"));
         }
         if extra
             .iter()
@@ -189,7 +189,8 @@ impl CheckedNixos {
         }) {
             return Err(invalid("NixOS root override requires systemd initrd"));
         }
-        if additional_initrd_mounts {
+        let native_root = initrd.is_some_and(|evidence| evidence.root_generator);
+        if additional_initrd_mounts && !native_root {
             return Err(invalid(
                 "Snapshot boot does not support additional initrd mounts",
             ));
@@ -204,24 +205,31 @@ impl CheckedNixos {
                 "Snapshot boot cannot override conflicting root policy",
             ));
         }
-        let rootflags = if dataset.as_str() == target.dataset
-            && target.mountpoint.as_deref().is_some_and(|p| p != "legacy")
+        let rootflags = if native_root
+            || (dataset.as_str() == target.dataset
+                && target.mountpoint.as_deref().is_some_and(|p| p != "legacy"))
         {
             "rootflags=defaults,zfsutil"
         } else {
             "rootflags=defaults"
         };
-        let cmdline = cmdline
+        let mut cmdline: Vec<_> = cmdline
             .into_iter()
             .filter(|arg| !arg.starts_with("root="))
             .chain([
-                format!("root={dataset}"),
+                if native_root {
+                    format!("root=ZFS={dataset}")
+                } else {
+                    format!("root={dataset}")
+                },
                 "rootfstype=zfs".into(),
                 rootflags.into(),
                 "rw".into(),
-                "rd.fstab=no".into(),
             ])
             .collect();
+        if !native_root {
+            cmdline.push("rd.fstab=no".into());
+        }
         Ok(GuestPlan {
             target: BootTarget {
                 dataset: dataset.to_string(),
@@ -270,6 +278,7 @@ mod tests {
     fn configuration(fstab: &str) -> NixosConfiguration {
         NixosConfiguration::new(
             Bootspec {
+                prepared: false,
                 system: "x86_64-linux".into(),
                 kernel: "/kernel".into(),
                 initrd: Some("/initrd".into()),
@@ -287,6 +296,7 @@ mod tests {
         SystemdInitrd {
             root: target().root,
             path: GuestPath::new("/initrd".into()).unwrap(),
+            root_generator: false,
         }
     }
 
@@ -363,6 +373,25 @@ mod tests {
         };
         assert!(checked().plan(Some(&evidence)).is_err());
         assert!(GuestPath::new("relative/kernel".into()).is_err());
+    }
+
+    #[test]
+    fn native_root_generator_preserves_early_home_mounts_on_clone() {
+        let target = target();
+        let checked = || {
+            configuration("tank/root / zfs defaults\ntank/home /home zfs x-initrd.mount")
+                .check(target.clone(), &[], Some("tank/clone"))
+                .unwrap()
+        };
+        assert!(checked().plan(Some(&systemd())).is_err());
+        let native = SystemdInitrd {
+            root_generator: true,
+            ..systemd()
+        };
+        let plan = checked().plan(Some(&native)).unwrap();
+        assert!(plan.cmdline.contains(&"root=ZFS=tank/clone".into()));
+        assert!(!plan.cmdline.contains(&"rd.fstab=no".into()));
+        assert!(plan.cmdline.contains(&"rootflags=defaults,zfsutil".into()));
     }
 
     #[test]
