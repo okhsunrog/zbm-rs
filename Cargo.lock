@@ -732,7 +732,7 @@ dependencies = [
 [[package]]
 name = "const-field-offset"
 version = "0.2.1"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
+source = "git+https://github.com/slint-ui/slint.git?branch=master#143462b5c41604fa339559ba2fbe669ef4853600"
 dependencies = [
  "const-field-offset-macro",
  "field-offset",
@@ -741,7 +741,7 @@ dependencies = [
 [[package]]
 name = "const-field-offset-macro"
 version = "0.2.1"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
+source = "git+https://github.com/slint-ui/slint.git?branch=master#143462b5c41604fa339559ba2fbe669ef4853600"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1360,9 +1360,9 @@ dependencies = [
 
 [[package]]
 name = "fontique"
-version = "0.11.1"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6688bc1294fe7117d788937b6c53480169b29c566954af490830d4c09da9516a"
+checksum = "bbf1df16263783918b7da396077521f92b729ef7c429444dfcf03581f1448b77"
 dependencies = [
  "hashbrown 0.17.1",
  "linebender_resource_handle",
@@ -1769,16 +1769,16 @@ dependencies = [
 [[package]]
 name = "i-slint-backend-linuxkms"
 version = "1.19.0"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
+source = "git+https://github.com/slint-ui/slint.git?branch=master#143462b5c41604fa339559ba2fbe669ef4853600"
 dependencies = [
- "bytemuck",
  "calloop 0.14.5",
  "cfg_aliases",
  "drm",
  "i-slint-common",
  "i-slint-core",
- "i-slint-renderer-software",
+ "i-slint-renderer-skia",
  "input",
+ "libudev-sys",
  "memmap2",
  "nix 0.31.3",
  "xkbcommon",
@@ -1787,11 +1787,10 @@ dependencies = [
 [[package]]
 name = "i-slint-backend-selector"
 version = "1.19.0"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
+source = "git+https://github.com/slint-ui/slint.git?branch=master#143462b5c41604fa339559ba2fbe669ef4853600"
 dependencies = [
  "cfg_aliases",
  "i-slint-backend-linuxkms",
- "i-slint-backend-testing",
  "i-slint-backend-winit",
  "i-slint-common",
  "i-slint-core",
@@ -1799,33 +1798,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "i-slint-backend-testing"
-version = "1.19.0"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
-dependencies = [
- "cfg_aliases",
- "i-slint-common",
- "i-slint-core",
- "i-slint-renderer-software",
- "vtable",
-]
-
-[[package]]
 name = "i-slint-backend-winit"
 version = "1.19.0"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
+source = "git+https://github.com/slint-ui/slint.git?branch=master#143462b5c41604fa339559ba2fbe669ef4853600"
 dependencies = [
  "arboard",
  "block2 0.6.2",
- "bytemuck",
  "cfg_aliases",
  "futures",
  "i-slint-common",
  "i-slint-core",
  "i-slint-core-macros",
  "i-slint-renderer-skia",
- "i-slint-renderer-software",
- "imgref",
  "lyon_path",
  "muda",
  "objc2 0.6.5",
@@ -1835,10 +1819,8 @@ dependencies = [
  "objc2-ui-kit 0.3.2",
  "pin-weak",
  "raw-window-handle",
- "rgb",
  "scoped-tls-hkt",
  "scopeguard",
- "softbuffer",
  "strum",
  "vtable",
  "wasm-bindgen",
@@ -1852,7 +1834,7 @@ dependencies = [
 [[package]]
 name = "i-slint-common"
 version = "1.19.0"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
+source = "git+https://github.com/slint-ui/slint.git?branch=master#143462b5c41604fa339559ba2fbe669ef4853600"
 dependencies = [
  "derive_more",
  "fontique",
@@ -1869,7 +1851,7 @@ dependencies = [
 [[package]]
 name = "i-slint-compiler"
 version = "1.19.0"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
+source = "git+https://github.com/slint-ui/slint.git?branch=master#143462b5c41604fa339559ba2fbe669ef4853600"
 dependencies = [
  "annotate-snippets",
  "by_address",
@@ -1899,7 +1881,7 @@ dependencies = [
 [[package]]
 name = "i-slint-core"
 version = "1.19.0"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
+source = "git+https://github.com/slint-ui/slint.git?branch=master#143462b5c41604fa339559ba2fbe669ef4853600"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -1950,7 +1932,7 @@ dependencies = [
 [[package]]
 name = "i-slint-core-macros"
 version = "1.19.0"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
+source = "git+https://github.com/slint-ui/slint.git?branch=master#143462b5c41604fa339559ba2fbe669ef4853600"
 dependencies = [
  "quote",
  "serde_json",
@@ -1960,7 +1942,7 @@ dependencies = [
 [[package]]
 name = "i-slint-renderer-skia"
 version = "1.19.0"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
+source = "git+https://github.com/slint-ui/slint.git?branch=master#143462b5c41604fa339559ba2fbe669ef4853600"
 dependencies = [
  "bytemuck",
  "cfg_aliases",
@@ -1997,7 +1979,7 @@ dependencies = [
 [[package]]
 name = "i-slint-renderer-software"
 version = "1.19.0"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
+source = "git+https://github.com/slint-ui/slint.git?branch=master#143462b5c41604fa339559ba2fbe669ef4853600"
 dependencies = [
  "bytemuck",
  "clru",
@@ -2263,12 +2245,6 @@ name = "imagesize"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
-
-[[package]]
-name = "imgref"
-version = "1.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e44b0a4eaa4c82f441d50a963f2d5f05a787240aeee097597033e72accfd22f"
 
 [[package]]
 name = "indexmap"
@@ -3416,32 +3392,58 @@ name = "parlance"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73072a9470554c8e794778acece2312661218aaabb635600957d952cf01c716e"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "parley"
-version = "0.11.1"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22d2ff88bd3f7d68d1d9b09c7e6209f9a8e8c05088295140a2bcf2e9b17038c5"
+checksum = "61bd0c0c1737f0b3d3726dc06b225083af213b61913e4fbae1670613a106c6ce"
+dependencies = [
+ "fontique",
+ "hashbrown 0.17.1",
+ "linebender_resource_handle",
+ "parlance",
+ "parley_engine",
+ "smallvec",
+]
+
+[[package]]
+name = "parley_data"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c43b63f808f6cc8f4a3b07de0d62a977bddd2e0bb5c232bd9e93ba8ef92e5e4b"
+dependencies = [
+ "icu_collections",
+ "icu_properties",
+]
+
+[[package]]
+name = "parley_emoji"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c4482d912d7671a7cd2089794f90ef3bb5f5f8c738230fb0fcd50fa020f0ed3"
+
+[[package]]
+name = "parley_engine"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b74c0d373e462e504ad4436710a39f099e18e848e1ee711f70cd2dcd5a69b290"
 dependencies = [
  "fontique",
  "harfrust",
  "hashbrown 0.17.1",
+ "icu_locale_core",
  "icu_normalizer",
  "icu_properties",
  "icu_segmenter",
  "linebender_resource_handle",
  "parlance",
  "parley_data",
+ "parley_emoji",
  "skrifa",
-]
-
-[[package]]
-name = "parley_data"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1567535334d6ba2d3cde19221ba9a7bd0fabb3cbd99046ddfb10ae061cfcc889"
-dependencies = [
- "icu_properties",
 ]
 
 [[package]]
@@ -4326,7 +4328,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 [[package]]
 name = "slint"
 version = "1.19.0"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
+source = "git+https://github.com/slint-ui/slint.git?branch=master#143462b5c41604fa339559ba2fbe669ef4853600"
 dependencies = [
  "const-field-offset",
  "i-slint-backend-selector",
@@ -4334,18 +4336,16 @@ dependencies = [
  "i-slint-core",
  "i-slint-core-macros",
  "i-slint-renderer-software",
- "num-traits",
  "once_cell",
  "pin-weak",
  "slint-macros",
- "unicode-segmentation",
  "vtable",
 ]
 
 [[package]]
 name = "slint-macros"
 version = "1.19.0"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
+source = "git+https://github.com/slint-ui/slint.git?branch=master#143462b5c41604fa339559ba2fbe669ef4853600"
 dependencies = [
  "i-slint-compiler",
  "proc-macro2",
@@ -4394,6 +4394,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aac18da81ebbf05109ab275b157c22a653bb3c12cf884450179942f81bcbf6c3"
 dependencies = [
  "bytemuck",
+ "drm",
  "js-sys",
  "ndk",
  "objc2 0.6.5",
@@ -4403,6 +4404,7 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "raw-window-handle",
  "redox_syscall 0.5.18",
+ "rustix 1.1.5",
  "tracing",
  "wasm-bindgen",
  "web-sys",
@@ -5079,7 +5081,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vtable"
 version = "0.5.0"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
+source = "git+https://github.com/slint-ui/slint.git?branch=master#143462b5c41604fa339559ba2fbe669ef4853600"
 dependencies = [
  "const-field-offset",
  "portable-atomic",
@@ -5090,7 +5092,7 @@ dependencies = [
 [[package]]
 name = "vtable-macro"
 version = "0.5.0"
-source = "git+https://github.com/okhsunrog/slint.git?branch=fix%2Flinuxkms-software-cursor#f1b67a2639813a54659f6f63b7e059536421808e"
+source = "git+https://github.com/slint-ui/slint.git?branch=master#143462b5c41604fa339559ba2fbe669ef4853600"
 dependencies = [
  "proc-macro2",
  "quote",
