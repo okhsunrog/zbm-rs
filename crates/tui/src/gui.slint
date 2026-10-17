@@ -1,4 +1,6 @@
-import { Button, ComboBox, ListView, Palette, ScrollView } from "std-widgets.slint";
+import { Button, ComboBox, ListView, Palette, ScrollView, LineEdit } from "std-widgets.slint";
+
+export struct ManagerAction { id: int, label: string, enabled: bool, reason: string }
 
 export struct BootEntry {
     title: string,
@@ -37,7 +39,7 @@ component BootRow inherits Rectangle {
     border-width: selected && focused ? 2px : 0px;
     border-color: Palette.accent-background;
     accessible-role: list-item;
-    accessible-label: entry.title + ", " + entry.subtitle + ", demo " + entry.badge;
+    accessible-label: entry.title + ", " + entry.subtitle + ", " + entry.badge;
     accessible-item-index: index;
     accessible-item-selectable: true;
     accessible-item-selected: selected;
@@ -76,9 +78,12 @@ component EntriesPanel inherits Rectangle {
     in property <[BootEntry]> entries;
     in property <int> selected-row: -1;
     in property <string> heading;
+    in property <bool> interactive: true;
     callback select-row(int);
     callback move-selection(int);
     callback activate();
+    callback shortcut(string);
+    callback search();
     forward-focus: navigation;
     min-width: 0px;
     min-height: 0px;
@@ -89,7 +94,7 @@ component EntriesPanel inherits Rectangle {
     public function reset-scroll() { list.content-y = 0px; }
     changed selected-row => { root.reveal(); }
     navigation := FocusScope {
-        enabled: root.visible;
+        enabled: root.visible && root.interactive;
         key-pressed(event) => {
             if event.modifiers.control || event.modifiers.alt || event.modifiers.meta { return reject; }
             if event.text == Key.DownArrow || event.text == "j" {
@@ -102,7 +107,9 @@ component EntriesPanel inherits Rectangle {
             if event.text == Key.End { root.select-row(root.entries.length - 1); root.reveal(); return accept; }
             if event.text == Key.PageDown { root.move-selection(max(1, floor(list.visible-height / 76px))); root.reveal(); return accept; }
             if event.text == Key.PageUp { root.move-selection(-max(1, floor(list.visible-height / 76px))); root.reveal(); return accept; }
+            if event.text == "/" { root.search(); return accept; }
             if event.text == Key.Return { root.activate(); return accept; }
+            if event.text == "b" || event.text == "t" || event.text == "c" || event.text == "d" || event.text == "o" || event.text == "m" || event.text == "u" || event.text == "r" || event.text == "s" || event.text == "n" || event.text == "p" { root.shortcut(event.text); return accept; }
             return reject;
         }
         VerticalLayout {
@@ -124,7 +131,7 @@ component EntriesPanel inherits Rectangle {
             }
         }
         if root.entries.length == 0: Text {
-            text: "No sample entries in this source";
+            text: "No entries in this view";
             color: Theme.muted;
             font-size: 15px;
             wrap: word-wrap;
@@ -138,6 +145,9 @@ component EntriesPanel inherits Rectangle {
 component DetailsPanel inherits Rectangle {
     in property <BootEntry> entry;
     in property <bool> has-entry;
+    in property <bool> live;
+    in property <string> details-text;
+    in property <bool> interactive: true;
     forward-focus: navigation;
     min-width: 0px;
     min-height: 0px;
@@ -148,7 +158,7 @@ component DetailsPanel inherits Rectangle {
     border-color: Palette.accent-background;
     changed entry => { details.content-y = 0px; }
     navigation := FocusScope {
-        enabled: root.visible;
+        enabled: root.visible && root.interactive;
         key-pressed(event) => {
             if event.modifiers.control || event.modifiers.alt || event.modifiers.meta { return reject; }
             if event.text == Key.DownArrow || event.text == Key.PageDown {
@@ -171,10 +181,11 @@ component DetailsPanel inherits Rectangle {
                 padding-right: 8px;
                 spacing: 14px;
                 alignment: start;
-                Label { text: "SAMPLE DETAILS"; font-weight: 600; }
+                Label { text: root.live ? "DETAILS" : "SAMPLE DETAILS"; font-weight: 600; }
                 Text { text: root.has-entry ? root.entry.title : "No entry selected"; color: Palette.foreground; font-size: 19px; font-weight: 600; wrap: word-wrap; min-width: 0px; }
                 Rectangle { height: 1px; background: Palette.border.transparentize(0.65); }
-                if root.has-entry: VerticalLayout {
+                if root.live: Text { text: root.details-text; color: Palette.foreground; font-size: 13px; wrap: word-wrap; min-width: 0px; }
+                if root.has-entry && !root.live: VerticalLayout {
                     spacing: 12px;
                     Label { text: "Root dataset"; }
                     Text { text: root.entry.dataset; color: Palette.foreground; font-size: 13px; wrap: char-wrap; min-width: 0px; }
@@ -199,16 +210,50 @@ export component BootManager inherits Window {
     callback select-row(int);
     callback move-selection(int);
     callback activate();
+    callback shortcut(string);
+    in property <bool> live: false;
+    in property <string> heading;
+    in property <string> details-text;
+    in property <string> primary-label;
+    in property <bool> primary-enabled;
+    in property <bool> editable;
+    in property <string> security-status;
+    in property <[ManagerAction]> actions;
+    in property <int> revision;
+    in property <bool> modal-open;
+    in property <bool> unlock-prompt;
+    in property <bool> rollback-prompt;
+    in property <string> confirmation-text;
+    in-out property <string> filter-text;
+    callback filter-changed(string);
+    callback command(int);
+    callback unlock(string);
+    callback confirm(string);
+    callback cancel();
+    public function focus-prompt() { prompt.text = ""; prompt.focus(); }
+    public function focus-entries() { prompt.text = ""; entry-list.focus(); }
     private property <bool> narrow: root.width < 720px;
     private property <bool> details-open: false;
-    forward-focus: source-picker;
-    title: "zbm-rs — GUI prototype";
+    forward-focus: navigation;
+    title: root.live ? "zbm-rs" : "zbm-rs — preview";
     background: Palette.alternate-background;
     min-width: 360px;
     min-height: 360px;
     preferred-width: 1280px;
     preferred-height: 800px;
 
+    navigation := FocusScope {
+      width: root.width; height: root.height;
+      capture-key-pressed(event) => {
+        if root.modal-open && event.text == Key.Return && (event.modifiers.control || event.modifiers.alt || event.modifiers.meta || event.modifiers.shift) { return accept; }
+        if !root.live || event.modifiers.control || event.modifiers.alt || event.modifiers.meta { return reject; }
+        if event.text == Key.F4 { root.shortcut("F4"); return accept; }
+        if event.text == Key.F5 { root.shortcut("F5"); return accept; }
+        if event.text == Key.F6 { root.shortcut("F6"); return accept; }
+        if event.text == Key.F10 { root.shortcut("F10"); return accept; }
+        if event.text == Key.Escape { root.cancel(); entry-list.focus(); return accept; }
+        return reject;
+      }
     VerticalLayout {
         x: (root.width - self.width) / 2;
         y: 0px;
@@ -223,9 +268,9 @@ export component BootManager inherits Window {
                 min-width: 0px;
                 horizontal-stretch: 1;
                 Text { text: "zbm-rs"; color: Palette.foreground; font-size: 27px; font-weight: 700; }
-                Label { text: "GUI prototype · sample data"; }
+                Label { text: root.live ? root.security-status : "Preview · sample data"; }
             }
-            VerticalLayout {
+            if !root.live: VerticalLayout {
                 width: root.narrow ? 160px : 200px;
                 Label { text: "Boot source"; }
                 source-picker := ComboBox {
@@ -237,6 +282,16 @@ export component BootManager inherits Window {
                 }
             }
         }
+        search := LineEdit {
+            visible: root.live;
+            min-height: root.live ? 56px : 0px;
+            max-height: root.live ? 56px : 0px;
+            accepted => { entry-list.focus(); }
+            text <=> root.filter-text;
+            placeholder-text: "Find in current list";
+            enabled: root.live && root.editable;
+            edited => { root.filter-changed(self.text); }
+        }
         HorizontalLayout {
             min-height: 0px;
             vertical-stretch: 1;
@@ -245,24 +300,30 @@ export component BootManager inherits Window {
                 visible: !root.narrow || !root.details-open;
                 width: root.narrow ? (root.details-open ? 0px : parent.width) : max(0px, parent.width - 296px);
                 entries: root.entries;
+                interactive: !root.live || root.editable;
                 selected-row: root.selected-row;
-                heading: root.sources[root.selected-source];
+                heading: root.live ? root.heading : root.sources[root.selected-source];
                 select-row(row) => { root.select-row(row); }
                 move-selection(delta) => { root.move-selection(delta); }
                 activate => { root.activate(); }
+                search => { if root.live { search.focus(); } }
+                shortcut(text) => { if root.live { root.shortcut(text); } }
             }
             detail-panel := DetailsPanel {
                 visible: !root.narrow || root.details-open;
                 width: root.narrow ? (root.details-open ? parent.width : 0px) : 280px;
                 entry: root.selected-entry;
                 has-entry: root.selected-row >= 0;
+                live: root.live;
+                details-text: root.details-text;
+                interactive: !root.modal-open;
             }
         }
         VerticalLayout {
             spacing: 8px;
             Text {
                 min-width: 0px;
-                text: root.action-status == "" ? "Preview only — no boot actions" : root.action-status;
+                text: root.action-status == "" ? (root.live ? root.heading : "Preview only — no boot actions") : root.action-status;
                 color: Theme.muted;
                 font-size: 12px;
                 wrap: word-wrap;
@@ -270,16 +331,66 @@ export component BootManager inherits Window {
             HorizontalLayout {
                 spacing: 12px;
                 if root.narrow: Button {
+                    enabled: !root.modal-open;
                     text: root.details-open ? "Entries" : "Details";
                     clicked => {
                         root.details-open = !root.details-open;
                         if root.details-open { detail-panel.focus(); } else { entry-list.focus(); }
                     }
                 }
+                if root.live: Rectangle {
+                    width: 160px; height: 46px;
+                    Button {
+                        width: 100%; height: 100%;
+                        text: "Actions…";
+                        enabled: !root.modal-open;
+                        clicked => { actions-popup.show(); }
+                    }
+                    actions-popup := PopupWindow {
+                        x: 0px; y: -self.height - 8px;
+                        width: min(600px, root.width - 40px);
+                        height: min(480px, root.height - 80px);
+                        close-policy: close-on-click-outside;
+                        forward-focus: action-navigation;
+                        Rectangle { background: Palette.background; border-radius: Theme.radius; border-width: 1px; border-color: Palette.border; }
+                        action-navigation := FocusScope {
+                            key-pressed(event) => {
+                                if event.text == Key.Escape { actions-popup.close(); return accept; }
+                                if event.modifiers.control || event.modifiers.alt || event.modifiers.meta { return reject; }
+                                if event.text == Key.F4 { root.shortcut("F4"); actions-popup.close(); return accept; }
+                                if event.text == Key.F6 { root.shortcut("F6"); actions-popup.close(); return accept; }
+                                if event.text == Key.F10 { root.shortcut("F10"); actions-popup.close(); return accept; }
+                                return reject;
+                            }
+                            VerticalLayout {
+                                padding: 16px; spacing: 12px;
+                                Label { text: "ACTIONS · Tab to choose, Enter to run"; }
+                                action-list := ScrollView {
+                                    horizontal-scrollbar-policy: always-off;
+                                    VerticalLayout {
+                                        for action in root.actions: action-row := VerticalLayout {
+                                        padding-bottom: 12px; spacing: 4px;
+                                        Button {
+                                            text: action.label;
+                                            enabled: action.enabled;
+                                            changed has-focus => { if self.has-focus {
+                                                if action-row.y < -action-list.content-y { action-list.content-y = -action-row.y; }
+                                                if action-row.y + action-row.height > -action-list.content-y + action-list.visible-height { action-list.content-y = action-list.visible-height - action-row.y - action-row.height; }
+                                            } }
+                                            clicked => { root.command(action.id); actions-popup.close(); }
+                                        }
+                                        if !action.enabled: Text { text: action.reason; color: Theme.muted; wrap: word-wrap; font-size: 12px; }
+                                    }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 Rectangle { horizontal-stretch: 1; }
                 Button {
-                    text: root.selected-entry.recovery ? "Preview recovery" : "Preview boot";
-                    enabled: root.selected-row >= 0;
+                    text: root.live ? root.primary-label : (root.selected-entry.recovery ? "Preview recovery" : "Preview boot");
+                    enabled: root.live ? root.primary-enabled : root.selected-row >= 0;
                     primary: true;
                     min-height: 46px;
                     clicked => { root.activate(); }
@@ -287,8 +398,45 @@ export component BootManager inherits Window {
             }
         }
         Label {
-            text: root.narrow ? "Tab: focus · ↑↓: select · Enter: preview" : "Tab: change focus     ↑↓ / j k: navigate     Home / End: first / last     Enter: preview";
+            text: root.live ? "F4: recovery · F6: restart · F10: power off" : root.narrow ? "Tab: focus · ↑↓: select · Enter: preview" : "Tab: change focus     ↑↓ / j k: navigate     Home / End: first / last     Enter: preview";
             height: 18px;
         }
     }
+    Rectangle {
+        visible: root.modal-open;
+        width: parent.width; height: parent.height;
+        background: #000000aa;
+        TouchArea { }
+        VerticalLayout {
+            x: 0px; y: 0px; width: parent.width; height: parent.height;
+            padding-left: max(20px, (parent.width - 600px) / 2);
+            padding-right: max(20px, (parent.width - 600px) / 2);
+            alignment: center;
+            Rectangle {
+                background: Palette.background;
+                border-radius: 16px;
+                VerticalLayout {
+                    padding: 24px; spacing: 16px;
+                    Text { text: root.confirmation-text; color: Palette.foreground; wrap: word-wrap; font-size: 18px; }
+                    prompt := LineEdit {
+                        enabled: root.modal-open;
+                        input-type: root.unlock-prompt ? InputType.password : InputType.text;
+                        placeholder-text: root.unlock-prompt ? "Passphrase" : root.rollback-prompt ? "ROLLBACK" : "Press Continue to confirm";
+                        accepted => {
+                            if root.unlock-prompt { root.unlock(self.text); } else { root.confirm(self.text); }
+                            self.text = "";
+                        }
+                    }
+                    HorizontalLayout {
+                        Button { enabled: root.modal-open; text: "Cancel"; clicked => { prompt.text = ""; root.cancel(); } }
+                        Button { enabled: root.modal-open; text: root.unlock-prompt ? "Unlock" : "Continue"; primary: true;
+                            clicked => { if root.unlock-prompt { root.unlock(prompt.text); } else { root.confirm(prompt.text); } prompt.text = ""; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    }
+
 }

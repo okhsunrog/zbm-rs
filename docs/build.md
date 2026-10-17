@@ -10,6 +10,9 @@ Enable the Nix nix-command/flakes features, then:
 ```sh
 nix build .#zbm-rs-efi
 nix build .#zbm-rs-efi-test --out-link result-test
+# Optional LinuxKMS GUI, with the same manager and broker:
+nix build .#zbm-rs-efi-gui --out-link result-gui
+nix build .#zbm-rs-efi-test-gui --out-link result-gui-test
 ```
 
 On hosts with those features disabled, prefix commands with
@@ -59,7 +62,8 @@ bootstrap on a failure. See [Arch and Framework deployment](arch-deployment.md)
 for the DMI-scoped Insyde recovery profile and owner signing requirements.
 
 Import `nixosModules.default`, enable `programs.zbm-rs.enable` and select its
-`image.profile`. `system.build.zbm-rs-efi` then uses the same builder with
+`image.profile` and optionally `image.frontend = "gui"` (default: `"tui"`).
+`system.build.zbm-rs-efi` then uses the same builder with
 `boot.kernelPackages`, `boot.zfs.package`, `boot.initrd.availableKernelModules`
 and `boot.initrd.kernelModules`. The module exposes an artifact; it does not
 silently replace the machine's existing bootloader.

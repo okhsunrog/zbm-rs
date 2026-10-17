@@ -118,6 +118,10 @@ pub struct Ui {
     pub prepared: Option<BootPlan>,
     pub operation_started: Option<Instant>,
     confirmation: String,
+    #[cfg(feature = "gui-prototype")]
+    revision: i32,
+    #[cfg(feature = "gui-prototype")]
+    gui_context: String,
     passphrase: zeroize::Zeroizing<String>,
 }
 
@@ -168,6 +172,190 @@ fn fuzzy(value: &str, query: &str) -> bool {
 }
 
 impl Ui {
+    #[cfg(feature = "gui-prototype")]
+    pub(crate) fn gui_snapshot(
+        &mut self,
+        state: &State,
+        options: &Options,
+    ) -> crate::gui::Snapshot {
+        use crate::gui::{AvailableAction, Row, Snapshot};
+        let rows = self.visible(state);
+        let selected = self.selected(state).map(|row| row.id);
+        // A repaint must not invalidate input; changing targets, selection or a
+        // confirmation does. Never carry secrets in this comparison key.
+        let context = format!(
+            "{}:{:?}:{:?}:{:?}:{}",
+            self.key,
+            rows.iter().map(|r| &r.id).collect::<Vec<_>>(),
+            selected,
+            self.panel,
+            state.activity.is_idle()
+        );
+        if context != self.gui_context {
+            self.gui_context = context;
+            self.revision = self.revision.wrapping_add(1);
+        }
+        Snapshot {
+            query: self
+                .screens
+                .get(&self.key)
+                .map(|s| s.query.clone())
+                .unwrap_or_default(),
+            revision: self.revision,
+            heading: View::of(state).title().into(),
+            selected: rows
+                .iter()
+                .position(|row| Some(&row.id) == selected.as_ref())
+                .map_or(-1, |i| i as i32),
+            rows: rows
+                .into_iter()
+                .map(|row| Row {
+                    title: row.title,
+                    subtitle: row.subtitle,
+                    unavailable: row.tag.contains("UNAVAILABLE"),
+                    badge: if row.tag.contains("UNAVAILABLE") {
+                        "UNAVAILABLE"
+                    } else {
+                        row.tag
+                    }
+                    .into(),
+                })
+                .collect(),
+            details: self
+                .details(state, options)
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            status: state
+                .error
+                .clone()
+                .unwrap_or_else(|| match &state.activity {
+                    zbm_core::activity::Activity::Scanning => "Discovering ZFS pools…".into(),
+                    zbm_core::activity::Activity::Running(description) => description.clone(),
+                    zbm_core::activity::Activity::RestartRequired => {
+                        "Restart required to reconcile interrupted work".into()
+                    }
+                    _ => String::new(),
+                }),
+            primary: self.open_label(state).into(),
+            primary_enabled: self.panel == Panel::None
+                && self.reason(Command::Open, state, options).is_none(),
+            actions: ALL
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    !matches!(
+                        c,
+                        Command::Open
+                            | Command::Search
+                            | Command::Details
+                            | Command::Help
+                            | Command::Actions
+                            | Command::Exit
+                    )
+                })
+                .map(|(id, c)| {
+                    let reason = self.reason(*c, state, options);
+                    AvailableAction {
+                        id: id as i32,
+                        label: c.label().into(),
+                        enabled: reason.is_none() && (self.panel == Panel::None || c.recovery()),
+                        reason: reason.unwrap_or_default(),
+                    }
+                })
+                .collect(),
+            panel: self.panel,
+            confirmation: match self.panel {
+                Panel::Unlock => "Unlock selected boot environment".into(),
+                Panel::ConfirmRollback => {
+                    "Type ROLLBACK to permanently roll back the selected dataset".into()
+                }
+                Panel::ConfirmDiscard => "Discard the owned prepared clone?".into(),
+                Panel::ConfirmPromote => "Clone and promote the selected snapshot?".into(),
+                _ => String::new(),
+            },
+            security: if options.config.security.mode == crate::config::SecurityMode::Enforce {
+                "Protected mode · authorization checked before boot"
+            } else {
+                "Signature enforcement is off"
+            }
+            .into(),
+            editable: state.activity.is_idle() && self.panel == Panel::None,
+        }
+    }
+
+    #[cfg(feature = "gui-prototype")]
+    pub(crate) fn gui_input(&mut self, event: crate::gui::Event, state: &mut State) -> Input {
+        use crate::gui::Event;
+        if event.revision() != self.revision {
+            return Input::Ignored;
+        }
+        let editable = state.activity.is_idle() && self.panel == Panel::None;
+        match event {
+            Event::Select { row, .. } if editable => {
+                if let Some(row) = usize::try_from(row)
+                    .ok()
+                    .and_then(|i| self.visible(state).into_iter().nth(i))
+                {
+                    self.screens.get_mut(&self.key).unwrap().selected = Some(row.id);
+                    state.error = None;
+                    self.sync(state);
+                    return Input::Changed("selection");
+                }
+            }
+            Event::Move { delta, .. } if editable => {
+                let rows = self.visible(state);
+                if !rows.is_empty() {
+                    let screen = self.screens.get_mut(&self.key).unwrap();
+                    let index = (screen.list.selected().unwrap_or(0) as i64 + i64::from(delta))
+                        .clamp(0, rows.len() as i64 - 1) as usize;
+                    screen.selected = Some(rows[index].id.clone());
+                    state.error = None;
+                    self.sync(state);
+                    return Input::Changed("selection");
+                }
+            }
+            Event::Filter { text, .. } if editable => {
+                self.screens.get_mut(&self.key).unwrap().query = text.chars().take(256).collect();
+                self.sync(state);
+                return Input::Changed("filter");
+            }
+            Event::Command { id, .. } => {
+                if let Some(command) = usize::try_from(id).ok().and_then(|i| ALL.get(i)).copied()
+                    && (self.panel == Panel::None || command.recovery())
+                {
+                    return Input::Command(command, false);
+                }
+            }
+            Event::Unlock { passphrase, .. } if self.panel == Panel::Unlock => {
+                if !passphrase.is_empty() && passphrase.len() <= 1024 {
+                    self.panel = Panel::None;
+                    return Input::Unlock(passphrase);
+                }
+            }
+            Event::Confirm { text, .. }
+                if matches!(
+                    self.panel,
+                    Panel::ConfirmRollback | Panel::ConfirmDiscard | Panel::ConfirmPromote
+                ) =>
+            {
+                self.confirmation = text;
+                return self.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), state);
+            }
+            Event::Cancel { .. } => {
+                return self.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), state);
+            }
+            _ => {}
+        }
+        Input::Ignored
+    }
+
     pub fn reset_after_mutation(&mut self) {
         use zeroize::Zeroize;
         self.passphrase.zeroize();
@@ -927,6 +1115,150 @@ mod tests {
             events: None,
         }
     }
+    #[cfg(feature = "gui-prototype")]
+    #[test]
+    fn gui_rejects_stale_targets_but_accepts_input_after_repaint() {
+        use crate::gui::Event;
+        let mut state = State {
+            pools: zbm_core::preview(),
+            ..State::default()
+        };
+        state.pools.push(zbm_core::Pool {
+            name: "other".into(),
+            guid: 43,
+            health: "ONLINE".into(),
+        });
+        let mut ui = Ui::default();
+        ui.sync(&mut state);
+        let revision = ui.gui_snapshot(&state, &options()).revision;
+        assert_eq!(ui.gui_snapshot(&state, &options()).revision, revision);
+        assert!(matches!(
+            ui.gui_input(Event::Select { revision, row: 1 }, &mut state),
+            Input::Changed("selection")
+        ));
+        let next = ui.gui_snapshot(&state, &options()).revision;
+        assert_ne!(revision, next);
+        assert!(matches!(
+            ui.gui_input(Event::Command { revision, id: 0 }, &mut state),
+            Input::Ignored
+        ));
+        assert!(matches!(
+            ui.gui_input(
+                Event::Select {
+                    revision: next,
+                    row: -1
+                },
+                &mut state
+            ),
+            Input::Ignored
+        ));
+        assert!(matches!(
+            ui.gui_input(
+                Event::Command {
+                    revision: next,
+                    id: i32::MAX
+                },
+                &mut state
+            ),
+            Input::Ignored
+        ));
+        state.activity = zbm_core::activity::Activity::Scanning;
+        let busy = ui.gui_snapshot(&state, &options());
+        assert!(!busy.primary_enabled && !busy.editable);
+        assert!(matches!(
+            ui.gui_input(
+                Event::Select {
+                    revision: busy.revision,
+                    row: 0
+                },
+                &mut state
+            ),
+            Input::Ignored
+        ));
+    }
+
+    #[cfg(feature = "gui-prototype")]
+    #[test]
+    fn gui_modal_confirmation_and_security_use_shared_policy() {
+        use crate::gui::Event;
+        let mut state = State::default();
+        let mut ui = Ui::default();
+        ui.sync(&mut state);
+        let mut options = options();
+        options.config.security.mode = crate::config::SecurityMode::Enforce;
+        let snapshot = ui.gui_snapshot(&state, &options);
+        for command in [
+            Command::Shell,
+            Command::Rollback,
+            Command::Clone,
+            Command::ClonePromote,
+        ] {
+            let id = ALL.iter().position(|c| *c == command).unwrap() as i32;
+            let action = snapshot.actions.iter().find(|a| a.id == id).unwrap();
+            assert!(!action.enabled && !action.reason.is_empty());
+        }
+        ui.open_panel(Panel::ConfirmRollback);
+        let revision = ui.gui_snapshot(&state, &options).revision;
+        assert!(matches!(
+            ui.gui_input(Event::Command { revision, id: 0 }, &mut state),
+            Input::Ignored
+        ));
+        assert!(matches!(
+            ui.gui_input(
+                Event::Confirm {
+                    revision,
+                    text: "rollback".into()
+                },
+                &mut state
+            ),
+            Input::Ignored
+        ));
+        assert_eq!(ui.panel, Panel::ConfirmRollback);
+        assert!(matches!(
+            ui.gui_input(
+                Event::Confirm {
+                    revision,
+                    text: "ROLLBACK".into()
+                },
+                &mut state
+            ),
+            Input::Command(Command::Rollback, true)
+        ));
+        ui.open_panel(Panel::Unlock);
+        let revision = ui.gui_snapshot(&state, &options).revision;
+        assert!(matches!(
+            ui.gui_input(
+                Event::Unlock {
+                    revision,
+                    passphrase: zeroize::Zeroizing::new(vec![])
+                },
+                &mut state
+            ),
+            Input::Ignored
+        ));
+        assert!(matches!(
+            ui.gui_input(
+                Event::Unlock {
+                    revision,
+                    passphrase: zeroize::Zeroizing::new(vec![1; 1025])
+                },
+                &mut state
+            ),
+            Input::Ignored
+        ));
+        assert!(matches!(
+            ui.gui_input(
+                Event::Unlock {
+                    revision,
+                    passphrase: zeroize::Zeroizing::new(b"fixture-only".to_vec())
+                },
+                &mut state
+            ),
+            Input::Unlock(_)
+        ));
+        assert_eq!(ui.panel, Panel::None);
+    }
+
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
@@ -1262,6 +1594,13 @@ mod tests {
                 .contains("Invalid Bootspec")
         );
         assert_eq!(state.selected_target, 0);
+        #[cfg(feature = "gui-prototype")]
+        {
+            let snapshot = ui.gui_snapshot(&state, &options());
+            assert!(!snapshot.primary_enabled);
+            assert!(snapshot.rows[snapshot.selected as usize].unavailable);
+            assert!(snapshot.details.contains("Invalid Bootspec"));
+        }
     }
 
     #[test]

@@ -157,30 +157,36 @@ pub fn run(
         vm::screenshot(run, &run.join("protected-menu.png"))?;
         let status = vm::ssh(
             run,
-            "pid=$(cat /run/zbm-rs/manager.pid); cat /proc/$pid/status",
+            "pid=$(cat /run/zbm-rs/manager.pid); for thread in /proc/$pid/task/*; do cat $thread/status; done",
         )?;
         for name in ["Uid:", "Gid:"] {
-            let line = status
+            let lines: Vec<_> = status
                 .lines()
-                .find(|line| line.starts_with(name))
-                .ok_or_else(|| anyhow::anyhow!("Missing {name}"))?;
+                .filter(|line| line.starts_with(name))
+                .collect();
             ensure!(
-                line.split_whitespace()
-                    .skip(1)
-                    .all(|value| value == "65534"),
-                "UI retained privileged IDs"
+                !lines.is_empty()
+                    && lines.iter().all(|line| line
+                        .split_whitespace()
+                        .skip(1)
+                        .all(|value| value == "65534")),
+                "A UI thread retained privileged IDs"
             );
         }
         for name in ["CapInh:", "CapPrm:", "CapEff:", "CapAmb:"] {
             ensure!(
-                status.lines().any(|line| line.starts_with(name)
-                    && line.split_whitespace().nth(1) == Some("0000000000000000")),
+                status
+                    .lines()
+                    .filter(|line| line.starts_with(name))
+                    .all(|line| line.split_whitespace().nth(1) == Some("0000000000000000")),
                 "UI retained capabilities"
             );
         }
         ensure!(
-            status.lines().any(|line| line.starts_with("NoNewPrivs:")
-                && line.split_whitespace().nth(1) == Some("1")),
+            status
+                .lines()
+                .filter(|line| line.starts_with("NoNewPrivs:"))
+                .all(|line| line.split_whitespace().nth(1) == Some("1")),
             "UI can gain privileges"
         );
         fs::write(run.join("ui-status.txt"), status)?;
@@ -260,7 +266,9 @@ pub fn run(
         vm::key(run, "f4")?;
         wait_for(20, Some(&mut owned.0), || {
             ensure!(
-                vm::console(run)?.contains("does not allow an administrative shell"),
+                vm::screen(run)?["state"]["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("does not allow an administrative shell")),
                 "Shell refusal is missing"
             );
             ensure!(

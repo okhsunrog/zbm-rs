@@ -98,24 +98,56 @@ protection and read-only policy before restoring data and booting the result.
 
 Protected acceptance uses [the separate signing workflow](security-testing.md).
 
-## GUI prototype review
+## GUI runtime and preview
 
 The `gui-prototype` feature selects the Slint interface with Skia software rendering.
-It is a sample-data preview: it does not discover pools, verify boot inputs, boot
-an entry or open recovery tools. The ordinary Nix image continues to use the TUI.
+In a supervised image it uses the same manager, discovery, action policy and
+privileged broker as the TUI. Pools, environments, Linux kernels and NixOS
+generations are real. `--preview` explicitly selects isolated sample data;
+unsupervised live GUI startup is rejected. `--tui` selects the terminal frontend
+in a GUI-enabled binary. The ordinary Nix image continues to use the TUI.
+
+Build the separate graphical images with `nix build .#zbm-rs-efi-gui` or
+`.#zbm-rs-efi-test-gui`. Custom `lib.mkImage` callers can set `frontend = "gui"`,
+including protected configurations. This currently supports x86_64 glibc images.
+The image stages input libraries, input-identification rules, XKB data and fonts.
+The pinned Skia release archive and Slint source have fixed hashes; update those
+alongside Cargo.lock when updating the renderer.
+
+Run the graphical lifecycle checks against a fresh disposable directory:
+
+```sh
+cargo xtask smoke --gui --image result --run /path/to/fresh-gui-run
+```
+
+This uses actual QMP keyboard events, GUI screenshots and manager telemetry.
+GUI VMs default to 1920×1080. For compact review, use `vm boot --width 800
+--height 600`; both dimensions must be supplied. Menu checks traverse disabled
+actions, activate Rescan explicitly, and keep typed search text away from recovery
+shortcuts. Encryption checks cover cancellation, wrong and correct passphrases.
+The NixOS `boot-smoke` scenario also uses the shared list shortcuts. A screenshot
+of the selector does not establish a successful kernel handoff or protected boot.
+
+Live controls: `/` focuses the filter; Escape clears it or goes back; Enter opens
+the selected row or boots a target. The list also accepts B (back), R (rescan),
+T (snapshots), C (prepare), D (discard), O (clone), M (clone/promote), U (rollback).
+The Actions menu exposes the same operations and reports unavailable commands.
+F4/F5/F6/F10 provide recovery, rescan, restart and power off outside text shortcuts.
+Confirmation and unlock dialogs block background actions. A confirmation applies
+only to its original selection; delayed events from an older view are discarded.
 
 Build the prototype on the development host:
 
 ```sh
 cargo build -p zbm-rs --features gui-prototype --locked
-cargo test -p zbm-rs --features gui-prototype gui::tests --locked
+cargo test -p zbm-rs --features gui-prototype --locked
 ```
 
 Copy the binary into a disposable LinuxKMS VM and run it on a guest VT, as an
 ordinary process rather than PID 1. Inside that VM:
 
 ```sh
-SLINT_BACKEND=linuxkms-skia-software ZBM_GUI_FIXTURE=demo ./zbm-rs
+SLINT_BACKEND=linuxkms-skia-software ZBM_GUI_FIXTURE=demo ./zbm-rs --preview
 ```
 
 `ZBM_GUI_FIXTURE` accepts `demo`, `empty`, `long` and `many` (60 sample generations).

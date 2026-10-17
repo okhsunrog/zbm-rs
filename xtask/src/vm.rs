@@ -17,6 +17,7 @@ pub fn absolute(path: &Path) -> Result<PathBuf> {
 }
 
 pub struct BootOptions<'a> {
+    pub display_size: Option<(u16, u16)>,
     pub image: &'a Path,
     pub tcg: bool,
     pub port: u16,
@@ -29,6 +30,7 @@ pub struct BootOptions<'a> {
 
 pub fn boot(run: &Path, options: BootOptions<'_>) -> Result<()> {
     let BootOptions {
+        display_size,
         image,
         tcg,
         port,
@@ -109,6 +111,16 @@ pub fn boot(run: &Path, options: BootOptions<'_>) -> Result<()> {
         )?,
     )?;
     let mut cmd = Command::new("qemu-system-x86_64");
+    if let Some((width, height)) =
+        display_size.or_else(|| (manifest["frontend"] == "gui").then_some((1920, 1080)))
+    {
+        cmd.args([
+            "-global",
+            &format!("virtio-vga.xres={width}"),
+            "-global",
+            &format!("virtio-vga.yres={height}"),
+        ]);
+    }
     cmd.args([
         "-machine",
         if tcg && secure_vars.is_some() {

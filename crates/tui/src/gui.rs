@@ -1,394 +1,348 @@
-use anyhow::{Result, bail};
-use slint::{ComponentHandle, ModelRc, VecModel};
-use std::{cell::RefCell, rc::Rc};
+//! Slint is a presentation adapter for the same manager used by the TUI.
+mod preview;
+use crate::manager::{
+    Frontend, Options,
+    ui::{Panel, Ui},
+};
+use crate::session::Client;
+use anyhow::{Result, anyhow, ensure};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 
-slint::slint! {
-    export { BootManager, BootEntry } from "gui.slint";
+slint::slint! { export { BootManager, BootEntry, ManagerAction } from "gui.slint"; }
+
+pub(crate) struct Row {
+    pub title: String,
+    pub subtitle: String,
+    pub badge: String,
+    pub unavailable: bool,
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Source {
-    All,
-    Nixos,
-    Snapshots,
-    Linux,
+pub(crate) struct AvailableAction {
+    pub id: i32,
+    pub label: String,
+    pub enabled: bool,
+    pub reason: String,
 }
-
-impl Source {
-    const ALL: [Self; 4] = [Self::All, Self::Nixos, Self::Snapshots, Self::Linux];
-    const LABELS: [&str; 4] = [
-        "All entries",
-        "NixOS generations",
-        "Snapshots",
-        "Linux kernels",
-    ];
-
-    fn index(self) -> usize {
-        Self::ALL.iter().position(|source| *source == self).unwrap()
-    }
+pub(crate) struct Snapshot {
+    pub query: String,
+    pub revision: i32,
+    pub heading: String,
+    pub selected: i32,
+    pub rows: Vec<Row>,
+    pub details: String,
+    pub status: String,
+    pub primary: String,
+    pub primary_enabled: bool,
+    pub actions: Vec<AvailableAction>,
+    pub panel: Panel,
+    pub confirmation: String,
+    pub security: String,
+    pub editable: bool,
 }
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum EntryId {
-    Generation(u32),
-    Snapshot(String),
-    Kernel(String),
-    Recovery,
+// Never derive Debug/Serialize: Unlock contains a secret.
+pub(crate) enum Event {
+    Select {
+        revision: i32,
+        row: i32,
+    },
+    Move {
+        revision: i32,
+        delta: i32,
+    },
+    Filter {
+        revision: i32,
+        text: String,
+    },
+    Command {
+        revision: i32,
+        id: i32,
+    },
+    Unlock {
+        revision: i32,
+        passphrase: zeroize::Zeroizing<Vec<u8>>,
+    },
+    Confirm {
+        revision: i32,
+        text: String,
+    },
+    Cancel {
+        revision: i32,
+    },
 }
-
-#[derive(Clone)]
-struct Entry {
-    id: EntryId,
-    source: Source,
-    view: BootEntry,
-}
-
-struct Preview {
-    entries: Vec<Entry>,
-    source: Source,
-    selected: Option<EntryId>,
-    status: String,
-}
-
-impl Preview {
-    fn new(entries: Vec<Entry>) -> Self {
-        let selected = entries.first().map(|entry| entry.id.clone());
-        Self {
-            entries,
-            source: Source::All,
-            selected,
-            status: String::new(),
+impl Event {
+    pub fn revision(&self) -> i32 {
+        match self {
+            Self::Select { revision, .. }
+            | Self::Move { revision, .. }
+            | Self::Filter { revision, .. }
+            | Self::Command { revision, .. }
+            | Self::Unlock { revision, .. }
+            | Self::Confirm { revision, .. }
+            | Self::Cancel { revision } => *revision,
         }
     }
+}
 
-    fn visible(&self) -> Vec<&Entry> {
-        self.entries
-            .iter()
-            .filter(|entry| self.source == Source::All || entry.source == self.source)
-            .collect()
+pub(crate) struct Transport {
+    ui: slint::Weak<BootManager>,
+    events: mpsc::Receiver<Event>,
+    stop: Arc<AtomicBool>,
+}
+impl Transport {
+    pub fn draw(&self, ui: &mut Ui, state: &zbm_core::State, options: &Options) -> Result<()> {
+        let snapshot = ui.gui_snapshot(state, options);
+        self.ui
+            .upgrade_in_event_loop(move |ui| snapshot.apply(&ui))?;
+        Ok(())
     }
-
-    fn select_source(&mut self, index: i32) {
-        let Some(source) = usize::try_from(index)
-            .ok()
-            .and_then(|i| Source::ALL.get(i))
-            .copied()
-        else {
-            return;
-        };
-        if self.source == source {
-            return;
-        }
-        self.source = source;
-        let visible = self.visible();
-        if !visible
-            .iter()
-            .any(|entry| Some(&entry.id) == self.selected.as_ref())
-        {
-            self.selected = visible.first().map(|entry| entry.id.clone());
-        }
-        self.status.clear();
-    }
-
-    fn select_row(&mut self, row: i32) {
-        let id = usize::try_from(row)
-            .ok()
-            .and_then(|row| self.visible().get(row).map(|entry| entry.id.clone()));
-        if let Some(id) = id
-            && self.selected.as_ref() != Some(&id)
-        {
-            self.selected = Some(id);
-            self.status.clear();
+    pub fn poll(&self) -> Result<Option<Event>> {
+        ensure!(!self.stop.load(Ordering::Acquire), "GUI event loop stopped");
+        match self.events.try_recv() {
+            Ok(event) => Ok(Some(event)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => Err(anyhow!("GUI input disconnected")),
         }
     }
-
-    fn move_selection(&mut self, delta: i32) {
-        let visible = self.visible();
-        if visible.is_empty() {
-            return;
-        }
-        let row = visible
-            .iter()
-            .position(|entry| Some(&entry.id) == self.selected.as_ref())
-            .unwrap_or(0) as i32;
-        self.select_row((row + delta).clamp(0, visible.len() as i32 - 1));
+    pub fn hide(&self) -> Result<()> {
+        // Hide where supported; PID 1 owns device/VT restoration after exit.
+        self.ui.upgrade_in_event_loop(|ui| {
+            let _ = ui.hide();
+        })?;
+        Ok(())
     }
-
-    fn activate(&mut self) {
-        if let Some(entry) = self
-            .visible()
+}
+impl Snapshot {
+    fn apply(self, ui: &BootManager) {
+        let rows: Vec<_> = self
+            .rows
             .into_iter()
-            .find(|entry| Some(&entry.id) == self.selected.as_ref())
+            .map(|r| BootEntry {
+                title: r.title.into(),
+                subtitle: r.subtitle.into(),
+                badge: r.badge.into(),
+                recovery: r.unavailable,
+                ..Default::default()
+            })
+            .collect();
+        ui.set_selected_entry(
+            usize::try_from(self.selected)
+                .ok()
+                .and_then(|i| rows.get(i))
+                .cloned()
+                .unwrap_or_default(),
+        );
+        if !ui.get_entries().iter().eq(rows.iter().cloned()) {
+            ui.set_entries(ModelRc::new(VecModel::from(rows)));
+        }
+        ui.set_selected_row(self.selected);
+        ui.set_filter_text(self.query.into());
+        ui.set_heading(self.heading.into());
+        ui.set_details_text(self.details.into());
+        ui.set_action_status(self.status.into());
+        ui.set_primary_label(self.primary.into());
+        ui.set_primary_enabled(self.primary_enabled);
+        ui.set_security_status(self.security.into());
+        let became_editable = !ui.get_editable() && self.editable;
+        ui.set_editable(self.editable);
+        let actions: Vec<_> = self
+            .actions
+            .into_iter()
+            .map(|a| ManagerAction {
+                id: a.id,
+                label: a.label.into(),
+                enabled: a.enabled,
+                reason: a.reason.into(),
+            })
+            .collect();
+        // Replacing an unchanged model destroys repeated controls and their focus.
+        if !ui.get_actions().iter().eq(actions.iter().cloned()) {
+            ui.set_actions(ModelRc::new(VecModel::from(actions)));
+        }
+        let modal = !self.confirmation.is_empty();
+        ui.set_unlock_prompt(self.panel == Panel::Unlock);
+        ui.set_rollback_prompt(self.panel == Panel::ConfirmRollback);
+        ui.set_confirmation_text(self.confirmation.into());
+        let was_modal = ui.get_modal_open();
+        ui.set_modal_open(modal);
+        ui.set_revision(self.revision);
+        if modal && !was_modal {
+            ui.invoke_focus_prompt();
+        }
+        if !modal && (was_modal || became_editable) {
+            ui.invoke_focus_entries();
+        }
+    }
+}
+
+fn command_id(command: crate::manager::command::Command) -> i32 {
+    crate::manager::command::ALL
+        .iter()
+        .position(|c| *c == command)
+        .unwrap() as i32
+}
+
+fn callbacks(ui: &BootManager, tx: mpsc::SyncSender<Event>) {
+    macro_rules! connect {
+        ($method:ident, |$ui:ident $(, $arg:ident)*| $event:expr) => {{
+            let weak = ui.as_weak(); let tx = tx.clone();
+            ui.$method(move |$($arg),*| { if let Some($ui) = weak.upgrade() { let _ = tx.try_send($event); } });
+        }};
+    }
+    connect!(on_select_row, |ui, row| Event::Select {
+        revision: ui.get_revision(),
+        row
+    });
+    connect!(on_move_selection, |ui, delta| Event::Move {
+        revision: ui.get_revision(),
+        delta
+    });
+    connect!(on_filter_changed, |ui, text| Event::Filter {
+        revision: ui.get_revision(),
+        text: text.to_string()
+    });
+    connect!(on_activate, |ui| Event::Command {
+        revision: ui.get_revision(),
+        id: command_id(crate::manager::command::Command::Open)
+    });
+    let weak = ui.as_weak();
+    let shortcuts = tx.clone();
+    ui.on_shortcut(move |text| {
+        use crate::manager::command::Command;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let code = match text.as_str() {
+            "F4" => KeyCode::F(4),
+            "F5" => KeyCode::F(5),
+            "F6" => KeyCode::F(6),
+            "F10" => KeyCode::F(10),
+            text if text.len() == 1 => KeyCode::Char(text.chars().next().unwrap()),
+            _ => return,
+        };
+        if let Some(command) = Command::from_key(KeyEvent::new(code, KeyModifiers::NONE))
+            && !matches!(
+                command,
+                Command::Help | Command::Details | Command::Search | Command::Actions
+            )
+            && let Some(ui) = weak.upgrade()
         {
-            self.status = format!("Preview: {} — no action performed", entry.view.title);
+            let _ = shortcuts.try_send(Event::Command {
+                revision: ui.get_revision(),
+                id: command_id(command),
+            });
         }
-    }
-
-    fn sync(&self, ui: &BootManager) {
-        let visible = self.visible();
-        ui.set_entries(ModelRc::new(VecModel::from(
-            visible
-                .iter()
-                .map(|entry| entry.view.clone())
-                .collect::<Vec<_>>(),
-        )));
-        self.sync_selection(ui);
-    }
-
-    fn sync_selection(&self, ui: &BootManager) {
-        let visible = self.visible();
-        let row = visible
-            .iter()
-            .position(|entry| Some(&entry.id) == self.selected.as_ref());
-        ui.set_selected_row(row.map_or(-1, |row| row as i32));
-        ui.set_selected_entry(row.map(|row| visible[row].view.clone()).unwrap_or_default());
-        ui.set_selected_source(self.source.index() as i32);
-        ui.set_action_status(self.status.clone().into());
-    }
+    });
+    connect!(on_command, |ui, id| Event::Command {
+        revision: ui.get_revision(),
+        id
+    });
+    connect!(on_unlock, |ui, text| Event::Unlock {
+        revision: ui.get_revision(),
+        passphrase: zeroize::Zeroizing::new(text.as_bytes().to_vec())
+    });
+    connect!(on_confirm, |ui, text| Event::Confirm {
+        revision: ui.get_revision(),
+        text: text.to_string()
+    });
+    connect!(on_cancel, |ui| Event::Cancel {
+        revision: ui.get_revision()
+    });
+    let weak = ui.as_weak();
+    ui.window().on_close_requested(move || {
+        if let Some(ui) = weak.upgrade() {
+            let _ = tx.try_send(Event::Command {
+                revision: ui.get_revision(),
+                id: command_id(crate::manager::command::Command::Exit),
+            });
+        }
+        slint::CloseRequestResponse::KeepWindowShown
+    });
 }
 
-fn demo_entries() -> Vec<Entry> {
-    [
-        (
-            EntryId::Generation(42),
-            Source::Nixos,
-            "NixOS generation 42",
-            "2026-10-12 · current system",
-            "CURRENT",
-            "novafs/nixos",
-            false,
-        ),
-        (
-            EntryId::Generation(41),
-            Source::Nixos,
-            "NixOS generation 41",
-            "2026-10-10 · previous system",
-            "SIGNED",
-            "novafs/nixos",
-            false,
-        ),
-        (
-            EntryId::Snapshot("before-kernel-update".into()),
-            Source::Snapshots,
-            "@before-kernel-update",
-            "Snapshot · writable clone on boot",
-            "TRUSTED",
-            "novafs/nixos@before-kernel-update",
-            false,
-        ),
-        (
-            EntryId::Snapshot("known-good".into()),
-            Source::Snapshots,
-            "@known-good",
-            "Snapshot · 3 days ago",
-            "TRUSTED",
-            "novafs/nixos@known-good",
-            false,
-        ),
-        (
-            EntryId::Kernel("6.17.1-zfs".into()),
-            Source::Linux,
-            "Linux 6.17.1-zfs",
-            "Generic Linux boot target",
-            "SIGNED",
-            "novafs/nixos",
-            false,
-        ),
-        (
-            EntryId::Recovery,
-            Source::All,
-            "Recovery tools",
-            "Diagnostics and reboot controls",
-            "LOCAL",
-            "Not applicable",
-            true,
-        ),
-    ]
-    .into_iter()
-    .map(
-        |(id, source, title, subtitle, badge, dataset, recovery)| Entry {
-            id,
-            source,
-            view: BootEntry {
-                title: title.into(),
-                subtitle: subtitle.into(),
-                badge: badge.into(),
-                dataset: dataset.into(),
-                recovery,
-                verification: if recovery {
-                    "Demo: local recovery entry"
-                } else {
-                    "Demo: kernel, initramfs and arguments authorized"
-                }
-                .into(),
-                measurement: if recovery {
-                    "Not applicable"
-                } else {
-                    "Demo: prepared for PCR 15"
-                }
-                .into(),
-            },
-        },
-    )
-    .collect()
-}
-
-// Fixtures are confined to the GUI prototype; they never discover or change host state.
-fn fixture_entries(fixture: &str) -> Result<Vec<Entry>> {
-    let mut entries = demo_entries();
-    match fixture {
-        "demo" => {}
-        "empty" => entries.clear(),
-        "long" => {
-            entries[0].view.title =
-                "NixOS generation 42 — workstation with a very long configuration name".into();
-            entries[0].view.subtitle =
-                "2026-10-12 · configuration with additional recovery and development tools".into();
-            entries[0].view.dataset = "novafs/hosts/workstation-with-a-long-hostname/nixos@before-kernel-update-and-driver-migration".into();
-        }
-        "many" => {
-            let template = entries[0].clone();
-            entries = (1..=60)
-                .rev()
-                .map(|generation| {
-                    let mut entry = template.clone();
-                    entry.id = EntryId::Generation(generation);
-                    entry.view.title = format!("NixOS generation {generation}").into();
-                    entry.view.badge = "SIGNED".into();
-                    entry.view.subtitle =
-                        "Sample generation · scroll to inspect older entries".into();
-                    entry
-                })
-                .collect();
-        }
-        _ => bail!("Unknown GUI fixture {fixture:?}; expected demo, empty, long or many"),
+pub(crate) fn run(
+    options: Options,
+    channel: Option<Client>,
+    #[cfg(feature = "vm-test")] control: Option<crate::vm_test::Control>,
+) -> Result<()> {
+    if options.preview {
+        ensure!(
+            !options.supervised,
+            "Preview must not replace a supervised manager"
+        );
+        return preview::run();
     }
-    Ok(entries)
-}
-
-pub fn run() -> Result<()> {
+    ensure!(
+        options.supervised,
+        "Use --preview for host UI review; live GUI requires the PID 1 supervisor"
+    );
     slint::BackendSelector::new().select()?;
     let ui = BootManager::new()?;
-    ui.set_sources(ModelRc::new(VecModel::from(
-        Source::LABELS
-            .iter()
-            .map(|label| (*label).into())
-            .collect::<Vec<_>>(),
-    )));
-    let state = Rc::new(RefCell::new(Preview::new(fixture_entries(
-        &std::env::var("ZBM_GUI_FIXTURE").unwrap_or_else(|_| "demo".into()),
-    )?)));
-    state.borrow().sync(&ui);
+    ui.set_live(true);
+    ui.set_action_status("Starting boot manager…".into());
+    let (tx, events) = mpsc::sync_channel(64);
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let startup_error = std::rc::Rc::new(std::cell::RefCell::new(None));
+    // LinuxKMS opens DRM, libinput and its VT in event-loop initialization.
+    // No action callbacks or manager workers exist until privileges are dropped.
     let weak = ui.as_weak();
-    let controller = state.clone();
-    ui.on_select_source(move |index| {
-        if let Some(ui) = weak.upgrade() {
-            let mut state = controller.borrow_mut();
-            state.select_source(index);
-            state.sync(&ui);
+    let worker_slot = worker.clone();
+    let error_slot = startup_error.clone();
+    let worker_stop = stop.clone();
+    slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+        let startup = (|| -> Result<()> {
+            if options.config.security.mode == crate::config::SecurityMode::Enforce {
+                crate::broker::start()?;
+            }
+            let ui = weak
+                .upgrade()
+                .ok_or_else(|| anyhow!("GUI disappeared during startup"))?;
+            callbacks(&ui, tx);
+            ui.invoke_focus_entries();
+            let transport = Transport {
+                ui: ui.as_weak(),
+                events,
+                stop: worker_stop,
+            };
+            *worker_slot.borrow_mut() = Some(std::thread::spawn(move || {
+                let result = (|| {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?;
+                    let result = runtime.block_on(crate::manager::drive(
+                        &mut Frontend::Gui(transport),
+                        &options,
+                        channel.as_ref(),
+                        #[cfg(feature = "vm-test")]
+                        control.as_ref(),
+                    ));
+                    runtime.shutdown_timeout(std::time::Duration::from_millis(100));
+                    result
+                })();
+                let _ = slint::quit_event_loop();
+                result
+            }));
+            Ok(())
+        })();
+        if let Err(error) = startup {
+            *error_slot.borrow_mut() = Some(error);
+            let _ = slint::quit_event_loop();
         }
     });
-    let weak = ui.as_weak();
-    let controller = state.clone();
-    ui.on_select_row(move |row| {
-        if let Some(ui) = weak.upgrade() {
-            let mut state = controller.borrow_mut();
-            state.select_row(row);
-            state.sync_selection(&ui);
-        }
-    });
-    let weak = ui.as_weak();
-    let controller = state.clone();
-    ui.on_move_selection(move |delta| {
-        if let Some(ui) = weak.upgrade() {
-            let mut state = controller.borrow_mut();
-            state.move_selection(delta);
-            state.sync_selection(&ui);
-        }
-    });
-    let weak = ui.as_weak();
-    ui.on_activate(move || {
-        if let Some(ui) = weak.upgrade() {
-            let mut state = state.borrow_mut();
-            state.activate();
-            ui.set_action_status(state.status.clone().into());
-        }
-    });
-    ui.run()?;
+    let result = ui.run();
+    stop.store(true, Ordering::Release);
+    let worker_result = worker
+        .borrow_mut()
+        .take()
+        .map(|w| w.join().map_err(|_| anyhow!("Manager worker panicked")))
+        .transpose()?
+        .transpose();
+    if let Some(error) = startup_error.borrow_mut().take() {
+        return Err(error);
+    }
+    result?;
+    worker_result?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn filters_and_navigation_share_visible_rows() {
-        let mut state = Preview::new(demo_entries());
-        state.select_source(2);
-        assert_eq!(state.visible().len(), 2);
-        assert_eq!(
-            state.selected,
-            Some(EntryId::Snapshot("before-kernel-update".into()))
-        );
-        state.move_selection(1);
-        state.move_selection(1);
-        assert_eq!(state.selected, Some(EntryId::Snapshot("known-good".into())));
-        state.move_selection(-100);
-        assert_eq!(
-            state.selected,
-            Some(EntryId::Snapshot("before-kernel-update".into()))
-        );
-    }
-
-    #[test]
-    fn selection_keeps_identity_when_filter_changes_its_position() {
-        let mut state = Preview::new(demo_entries());
-        state.select_row(3);
-        state.select_source(2);
-        assert_eq!(state.selected, Some(EntryId::Snapshot("known-good".into())));
-        assert_eq!(state.visible()[1].id, state.selected.clone().unwrap());
-    }
-
-    #[test]
-    fn changing_target_or_source_clears_action_result() {
-        let mut state = Preview::new(demo_entries());
-        state.activate();
-        assert!(state.status.contains("generation 42"));
-        state.select_row(1);
-        assert!(state.status.is_empty());
-        state.activate();
-        state.select_source(1);
-        assert!(state.status.is_empty());
-        state.select_source(2);
-        state.activate();
-        assert!(state.status.contains("before-kernel-update"));
-    }
-
-    #[test]
-    fn empty_and_invalid_selection_cannot_activate_an_entry() {
-        let mut state = Preview::new(vec![]);
-        state.move_selection(1);
-        state.select_row(-1);
-        state.select_row(12);
-        state.select_source(10);
-        state.activate();
-        assert!(state.selected.is_none());
-        assert!(state.status.is_empty());
-        let mut state = Preview::new(demo_entries());
-        state.select_row(99);
-        assert_eq!(state.selected, Some(EntryId::Generation(42)));
-    }
-
-    #[test]
-    fn large_fixture_navigates_to_the_last_entry() {
-        let mut state = Preview::new(fixture_entries("many").unwrap());
-        state.move_selection(100);
-        assert_eq!(state.selected, Some(EntryId::Generation(1)));
-        state.select_source(2);
-        assert!(state.visible().is_empty());
-        assert!(state.selected.is_none());
-        state.activate();
-        assert!(state.status.is_empty());
-    }
 }

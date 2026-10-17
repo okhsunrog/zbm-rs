@@ -1,5 +1,7 @@
 //! Private bounded RPC to a root broker. The UI drops all IDs/privileges before
-//! Tokio and never receives a privileged file descriptor or a loaded-kernel handle.
+//! Tokio and never receives a ZFS/boot file descriptor or a loaded-kernel handle.
+//! LinuxKMS initializes trusted display/input handles before the drop; action
+//! callbacks and the manager worker start only after the drop succeeds.
 use crate::{
     config::{Config, SecurityMode},
     manager::{

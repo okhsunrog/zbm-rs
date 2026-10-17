@@ -26,6 +26,7 @@ let
     imaCertificate = cfg.image.imaCertificate;
     zfsUserspace = (import ./lean-userspace.nix { inherit pkgs; }).mkZfs config.boot.zfs.package;
     profile = cfg.image.profile;
+    frontend = cfg.image.frontend;
     hardwareManifest = cfg.image.hardwareManifest;
     extraModules = config.boot.initrd.availableKernelModules;
     forcedModules = config.boot.initrd.kernelModules;
@@ -56,6 +57,7 @@ in {
     settings.nixos.generationLimit = lib.mkOption { type = lib.types.ints.between 1 512; default = 20; description = "Maximum NixOS generations per root dataset."; };
     settings.kernelArgs = lib.mkOption { type = lib.types.listOf lib.types.str; default = []; description = "Additional target kernel arguments; overriding Bootspec init or whitespace/quoting is unsupported."; };
     enable = lib.mkEnableOption "build a standalone zbm-rs EFI boot manager";
+    image.frontend = lib.mkOption { type = lib.types.enum [ "tui" "gui" ]; default = "tui"; description = "Manager frontend; GUI uses LinuxKMS with Skia software rendering."; };
     image.profile = lib.mkOption { type = lib.types.enum [ "portable" "host-only" ]; default = "portable"; };
     image.hardwareManifest = lib.mkOption { type = lib.types.nullOr lib.types.path; default = null; };
     image.hostId = lib.mkOption { type = lib.types.nullOr lib.types.str; default = config.networking.hostId; description = "Explicit eight-digit ZFS host ID; embedded in the loader without copying host files."; };

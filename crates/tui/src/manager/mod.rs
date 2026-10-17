@@ -1,7 +1,5 @@
 use crate::session::{Client, Request};
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyEventKind};
-use ratatui::DefaultTerminal;
 use std::{
     fs::{File, OpenOptions},
     io::Write,
@@ -9,19 +7,21 @@ use std::{
     time::{Duration, Instant},
 };
 use zbm_core::{State, discover, preview};
-mod command;
+pub(crate) mod command;
+mod frontend;
+pub(crate) use frontend::{Frontend, FrontendEvent};
 pub(crate) mod executor;
 pub(crate) mod operation;
-mod ui;
+pub(crate) mod ui;
 use command::Command as UiCommand;
 use operation::{Action, Outcome, Workflow};
 use ui::{Input, Panel, Ui};
 
-struct Options {
-    preview: bool,
-    supervised: bool,
+pub(crate) struct Options {
+    pub(crate) preview: bool,
+    pub(crate) supervised: bool,
     events: Option<File>,
-    config: crate::config::Config,
+    pub(crate) config: crate::config::Config,
 }
 
 fn emit(options: &Options, event: &str, state: &State, ui: &Ui) -> Result<()> {
@@ -36,13 +36,13 @@ fn emit(options: &Options, event: &str, state: &State, ui: &Ui) -> Result<()> {
 }
 
 fn refresh(
-    terminal: &mut DefaultTerminal,
+    terminal: &mut Frontend,
     state: &mut State,
     options: &Options,
     ui: &mut Ui,
 ) -> Result<()> {
     ui.sync(state);
-    terminal.draw(|frame| ui.draw(frame, state, options))?;
+    terminal.draw(state, options, ui)?;
     Ok(())
 }
 
@@ -51,8 +51,8 @@ fn save_plan(plan: &zbm_core::boot::BootPlan) -> Result<()> {
     Ok(())
 }
 
-async fn tui(
-    terminal: &mut DefaultTerminal,
+pub(crate) async fn drive(
+    terminal: &mut Frontend,
     options: &Options,
     channel: Option<&Client>,
     #[cfg(feature = "vm-test")] control: Option<&crate::vm_test::Control>,
@@ -170,7 +170,7 @@ async fn tui(
                 Ok(Outcome::Boot(plan, loaded)) => {
                     save_plan(&plan)?;
                     emit(options, "kexec", &state, &ui)?;
-                    ratatui::restore();
+                    terminal.suspend()?;
                     channel.unwrap().request(Request::KexecStarting)?;
                     loaded.execute()?;
                     unreachable!("successful kexec leaves this kernel")
@@ -199,18 +199,15 @@ async fn tui(
             refresh(terminal, &mut state, options, &mut ui)?;
             last_tick = Instant::now();
         }
-        if event::poll(Duration::from_millis(50))? {
-            let input = event::read()?;
-            if matches!(input, Event::Resize(..)) {
+        if let Some(input) = terminal.poll()? {
+            if matches!(input, FrontendEvent::Resize) {
                 refresh(terminal, &mut state, options, &mut ui)?;
                 emit(options, "resize", &state, &ui)?;
             }
-            if let Event::Key(key) = input
-                && key.kind == KeyEventKind::Press
-            {
+            if !matches!(input, FrontendEvent::Resize) {
                 let mut action = None;
                 let mut observed = None;
-                match ui.input(key, &mut state) {
+                match input.apply(&mut ui, &mut state) {
                     Input::Unlock(passphrase) => {
                         if let Some(reason) = ui.reason(UiCommand::Open, &state, options) {
                             state.error = Some(reason);
@@ -249,9 +246,9 @@ async fn tui(
                                         channel.request(Request::EmergencyShell)?;
                                         break;
                                     }
-                                    ratatui::restore();
+                                    terminal.suspend()?;
                                     let result = Command::new("/bin/sh").status();
-                                    *terminal = ratatui::init();
+                                    terminal.resume()?;
                                     result?;
                                     observed = Some("shell-return");
                                 }
@@ -416,11 +413,13 @@ pub fn run(channel: Option<Client>) -> Result<()> {
         supervised: channel.is_some(),
         events: None,
     };
+    let mut graphical = cfg!(feature = "gui-prototype");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--preview" => options.preview = true,
             "--manager" => {}
+            "--tui" => graphical = false,
             "--events" => {
                 let path = args
                     .next()
@@ -430,7 +429,7 @@ pub fn run(channel: Option<Client>) -> Result<()> {
                 options.events = Some(OpenOptions::new().create(true).append(true).open(path)?);
             }
             "--help" | "-h" => {
-                println!("zbm-rs [--manager] [--preview] [--events PATH]");
+                println!("zbm-rs [--manager] [--preview] [--tui] [--events PATH]");
                 return Ok(());
             }
             _ => anyhow::bail!("Unknown option: {arg}"),
@@ -442,22 +441,34 @@ pub fn run(channel: Option<Client>) -> Result<()> {
         let loaded = Command::new("/usr/bin/modprobe").arg("zfs").status()?;
         if options.config.security.mode == crate::config::SecurityMode::Enforce {
             anyhow::ensure!(loaded.success(), "Trusted ZFS module could not be loaded");
-            crate::broker::start()?;
+            if !graphical {
+                crate::broker::start()?;
+            }
         }
     }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let mut terminal = ratatui::init();
-    let result = runtime.block_on(tui(
-        &mut terminal,
-        &options,
-        channel.as_ref(),
-        #[cfg(feature = "vm-test")]
-        control.as_ref(),
-    ));
-    ratatui::restore();
-    // A blocked filesystem read must not hold a requested recovery session open.
-    runtime.shutdown_timeout(Duration::from_millis(100));
-    result
+    #[cfg(feature = "gui-prototype")]
+    if graphical {
+        return crate::gui::run(
+            options,
+            channel,
+            #[cfg(feature = "vm-test")]
+            control,
+        );
+    }
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let mut frontend = Frontend::terminal();
+        let result = runtime.block_on(drive(
+            &mut frontend,
+            &options,
+            channel.as_ref(),
+            #[cfg(feature = "vm-test")]
+            control.as_ref(),
+        ));
+        frontend.suspend()?;
+        runtime.shutdown_timeout(Duration::from_millis(100));
+        result
+    }
 }

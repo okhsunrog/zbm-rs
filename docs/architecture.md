@@ -42,6 +42,21 @@ filesystem reads or ZFS effects on selection. The executor re-resolves and valid
 inputs before handoff. A successfully prepared plan can additionally show the real
 clone root and rewritten command line. UI telemetry is separate from core state.
 
+The Slint frontend is a presentation adapter for that same manager loop. A
+bounded input channel carries commands, selection and zeroizing unlock requests;
+a worker sends owned display snapshots to the Slint event loop. View/selection
+revisions reject stale events. Rendering never runs boot operations. Mock rows
+exist only in explicit `--preview` mode.
+
+LinuxKMS must acquire its DRM device, console and libinput context while startup
+is still privileged. A first event-loop timer starts the broker and drops IDs
+and capabilities before registering action callbacks or starting the manager
+worker. The GUI image grants the restricted manager group access only to input
+event nodes for hotplug; ZFS, disks, trust and ownership records stay protected.
+Recovery requests still go to PID 1, which terminates/reaps the manager group and
+restores the VT before opening a permitted shell or restarting the frontend.
+The GUI does not attempt to reenter a LinuxKMS event loop after recovery.
+
 Snapshot targets retain source dataset, snapshot name and GUID. Browsing mounts
 the immutable snapshot read-only and uses the same backend discovery. Clone
 preparation, identity verification and optional discard live in core, separate

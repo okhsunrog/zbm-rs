@@ -217,6 +217,10 @@ fn supervise(recovery: &mut Recovery) -> io::Result<()> {
         let (parent, socket) = UnixDatagram::pair()?;
         parent.set_nonblocking(true)?;
         let mut command = Command::new(&executable);
+        #[cfg(feature = "gui-prototype")]
+        command
+            .env("FONTCONFIG_FILE", "/etc/fonts/fonts.conf")
+            .env("XKB_CONFIG_ROOT", "/usr/share/X11/xkb");
         command
             .args(["--manager", "--events", "/dev/ttyS0"])
             .env("TERM", "linux")

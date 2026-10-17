@@ -1,6 +1,7 @@
 mod arch_smoke;
 mod boot_smoke;
 mod failures;
+mod gui_interface;
 mod interface;
 mod lifecycle;
 mod qmp;
@@ -88,6 +89,9 @@ enum Task {
         command: VmTask,
     },
     Smoke {
+        /// Validate graphical rendering and input instead of terminal cells.
+        #[arg(long)]
+        gui: bool,
         #[arg(long)]
         run: PathBuf,
         #[arg(long, default_value = "result-test")]
@@ -109,6 +113,11 @@ enum Task {
 #[derive(Subcommand)]
 enum VmTask {
     Boot {
+        /// Virtual display size for GUI review; requires both dimensions.
+        #[arg(long, requires = "height", value_parser = clap::value_parser!(u16).range(360..=8192))]
+        width: Option<u16>,
+        #[arg(long, requires = "width", value_parser = clap::value_parser!(u16).range(360..=8192))]
+        height: Option<u16>,
         #[arg(long, default_value = "result-test")]
         image: PathBuf,
         #[arg(long)]
@@ -210,6 +219,8 @@ fn main() -> Result<()> {
         }
         Task::Vm { run, command } => match command {
             VmTask::Boot {
+                width,
+                height,
                 image,
                 tcg,
                 port,
@@ -221,6 +232,7 @@ fn main() -> Result<()> {
             } => vm::boot(
                 &run,
                 vm::BootOptions {
+                    display_size: width.zip(height),
                     image: &image,
                     tcg,
                     port,
@@ -252,6 +264,7 @@ fn main() -> Result<()> {
             }
         },
         Task::Smoke {
+            gui,
             run,
             image,
             tcg,
@@ -267,6 +280,7 @@ fn main() -> Result<()> {
             port,
             direct,
             smoke::Scenarios {
+                gui,
                 lifecycle,
                 failures,
                 scsi,

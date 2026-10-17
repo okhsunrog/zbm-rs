@@ -21,6 +21,8 @@
         default = production;
         zbm-rs-efi = production;
         zbm-rs-efi-test = testing;
+        zbm-rs-efi-gui = mkImage { frontend = "gui"; };
+        zbm-rs-efi-test-gui = mkImage { frontend = "gui"; testProfile = true; };
         zbm-rs-efi-test-snapshot = mkImage { testProfile = true;
           loaderConfig = builtins.fromJSON (builtins.readFile ./config/test-snapshot.json); };
         zbm-rs = production.passthru.binary;

@@ -12,5 +12,13 @@
     "baselineEfiBytes": null
   },
   "allowedGrowthPercent": 10,
-  "growthAllowanceBytes": 2097152
+  "growthAllowanceBytes": 2097152,
+  "gui": {
+    "maxEfiBytes": 67108864,
+    "baselineEfiBytes": null
+  },
+  "gui-test": {
+    "maxEfiBytes": 83886080,
+    "baselineEfiBytes": null
+  }
 }

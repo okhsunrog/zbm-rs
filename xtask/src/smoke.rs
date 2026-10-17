@@ -97,6 +97,7 @@ fn ready(run: &Path, scans: u64, pools: usize) -> Result<Value> {
 }
 
 pub struct Scenarios {
+    pub gui: bool,
     pub lifecycle: bool,
     pub failures: bool,
     pub scsi: bool,
@@ -111,10 +112,16 @@ pub fn run(
     scenarios: Scenarios,
 ) -> Result<()> {
     let Scenarios {
+        gui,
         lifecycle,
         failures,
         scsi,
     } = scenarios;
+    let manifest: Value = serde_json::from_slice(&fs::read(image.join("manifest.json"))?)?;
+    ensure!(
+        gui == (manifest["frontend"] == "gui"),
+        "Select --gui for a GUI image"
+    );
     install_interrupt()?;
     // Re-exec this running inode even if Cargo replaces the checkout binary.
     let mut command = Command::new("/proc/self/exe");
@@ -148,13 +155,17 @@ pub fn run(
                 "uname -r; test -c /dev/zfs; test -L /etc/zbm-rs/config.json; test -r /etc/zbm-rs/config.json; test -r /etc/udev/rules.d/80-drivers.rules",
             )
         })?;
-        let console = vm::console(run)?;
-        ensure!(
-            console.contains("Rescan") && console.contains("Power off"),
-            "Missing VT controls"
-        );
-        fs::write(run.join("empty.txt"), console)?;
-        crate::interface::empty(run)?;
+        if !gui {
+            let console = vm::console(run)?;
+            ensure!(
+                console.contains("Rescan") && console.contains("Power off"),
+                "Missing VT controls"
+            );
+            fs::write(run.join("empty.txt"), console)?;
+            crate::interface::empty(run)?;
+        } else {
+            crate::gui_interface::empty(run)?;
+        }
         // Disposable guest disk only; never attach host devices to this scenario.
         let disk = vm::ssh(
             run,
@@ -227,19 +238,29 @@ pub fn run(
         })?;
         vm::screenshot(run, &run.join("environments.png"))?;
         fs::write(run.join("environments.txt"), vm::console(run)?)?;
-        crate::interface::environments(run)?;
-        vm::ssh(
+        if gui {
+            crate::gui_interface::environments(run)?;
+        } else {
+            crate::interface::environments(run)?;
+        }
+        let inspections = vm::ssh(
             run,
-            r#"test "$(zpool get -H -o value readonly zbm_fixture)" = on; test "$(awk 'index($5, "/run/zbm-rs/roots/") == 1 {n++} END {print n}' /proc/self/mountinfo)" = 2"#,
+            r#"test "$(zpool get -H -o value readonly zbm_fixture)" = on; awk 'index($5, "/run/zbm-rs/roots/") == 1 {n++} END {print n}' /proc/self/mountinfo"#,
         )?;
+        ensure!(
+            inspections.trim() == if gui { "3" } else { "2" },
+            "Unexpected candidate mounts: {inspections}"
+        );
         vm::key(run, "b")?;
         vm::screenshot(run, &run.join("pool.png"))?;
-        let console = vm::console(run)?;
-        ensure!(
-            console.contains("zbm_fixture") && console.contains("Rescan"),
-            "Incomplete pool VT"
-        );
-        fs::write(run.join("pool.txt"), console)?;
+        if !gui {
+            let console = vm::console(run)?;
+            ensure!(
+                console.contains("zbm_fixture") && console.contains("Rescan"),
+                "Incomplete pool VT"
+            );
+            fs::write(run.join("pool.txt"), console)?;
+        }
         if failures {
             crate::failures::exercise(run)?;
         }
@@ -252,6 +273,16 @@ pub fn run(
             ensure!(vm::screen(run)?["event"] == "shell", "Waiting for shell");
             Ok(())
         })?;
+        if gui {
+            wait_for(10, Some(&mut owned.0), || {
+                ensure!(
+                    vm::console(run)?.contains("Exit the shell"),
+                    "Waiting for restored recovery VT"
+                );
+                Ok(())
+            })?;
+            vm::screenshot(run, &run.join("gui-recovery-shell.png"))?;
+        }
         // Type through the same QMP keyboard device as a person at the console.
         for key in ["e", "x", "i", "t", "ret"] {
             vm::key(run, key)?;
@@ -275,11 +306,11 @@ pub fn run(
         fs::write(
             run.join("report.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
-                "passed": true, "firmware": if direct { "direct-linux" } else { "OVMF-UEFI" },
+                "passed": true, "frontend": if gui { "gui" } else { "tui" }, "firmware": if direct { "direct-linux" } else { "OVMF-UEFI" },
                 "lifecycle": lifecycle,
                 "failures": failures, "disk_bus": if scsi { "scsi" } else { "virtio-blk" },
                 "empty": empty, "pool": pool,
-                "checks": ["boot", "real-zfs-module", "ssh", "snapshot-clone-rename-promote", "native-encryption-local-key", "discovery", "BE-visibility", "inherited-active", "bootfs-selection", "encrypted-BE-diagnostic", "read-only-candidate-mounts", "rescan", "QMP-keyboard", "real-vt-rendering", "shell-return", "guest-poweroff"]
+                "checks": ["boot", "real-zfs-module", "ssh", "snapshot-clone-rename-promote", "native-encryption-local-key", "discovery", "BE-visibility", "inherited-active", "bootfs-selection", "encrypted-BE-diagnostic", "read-only-candidate-mounts", "rescan", "QMP-keyboard", if gui { "LinuxKMS-GUI" } else { "real-vt-rendering" }, "shell-return", "guest-poweroff"]
             }))?,
         )?;
         Ok(())

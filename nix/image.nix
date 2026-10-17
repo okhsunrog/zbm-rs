@@ -1,6 +1,6 @@
 { pkgs, source, runtimePkgs ? pkgs, kernelPackages ? pkgs.linuxPackages
 , zfsUserspace ? (import ./lean-userspace.nix { pkgs = runtimePkgs; }).zfs
-, testProfile ? false, profile ? "portable", hardwareManifest ? null
+, frontend ? "tui", testProfile ? false, profile ? "portable", hardwareManifest ? null
 , extraModules ? [], forcedModules ? [], loaderConfig ? null
 , extraModulePackages ? (_: []), moduleOptions ? {}, hostId ? null
 , kernelPolicy ? "validate", kernelTrustedCertificates ? []
@@ -10,6 +10,12 @@
 , udevPackage ? (import ./lean-userspace.nix { pkgs = runtimePkgs; }).udev }:
 let
   lib = pkgs.lib;
+  graphical = frontend == "gui";
+  # Pinned rust-skia release archive; builds never download from the sandbox.
+  skiaBinaries = pkgs.fetchurl {
+    url = "https://github.com/rust-skia/skia-binaries/releases/download/0.153.3/skia-binaries-b7f043e0b1e2a850e702-x86_64-unknown-linux-gnu-ganesh-gl-jpegd-jpege-pdf-vulkan.tar.gz";
+    hash = "sha256-nr5MRIzJ94m60kHL0Rc5zfdZ4n21cZwjp2NeCW1YB7M=";
+  };
   rawConfig = if loaderConfig == null then builtins.fromJSON (builtins.readFile
     (source + (if testProfile then "/config/test.json" else "/config/default.json")))
     else loaderConfig;
@@ -40,7 +46,7 @@ let
   portable = [ "nvme" "ahci" "sd_mod" "usb_storage" "uas" "usbhid" "hid_generic"
     "xhci_pci" "ehci_pci" "atkbd" "i8042" "virtio_pci" "virtio_blk" "virtio_scsi" "virtio_gpu" ];
   roots = lib.unique ([ "zfs" ] ++ (if profile == "portable" then portable else hardware.modules or [])
-    ++ extraModules ++ forcedModules ++ lib.optionals testProfile [ "e1000" ]
+    ++ extraModules ++ forcedModules ++ lib.optional graphical "evdev" ++ lib.optionals testProfile [ "e1000" ]
     ++ lib.optionals tpmEnabled [ "tpm_crb" "tpm_tis" ]);
   kernel = selectedKernelPackages.kernel;
   zfsModule = builtins.getAttr zfsUserspace.kernelModuleAttribute selectedKernelPackages;
@@ -74,13 +80,21 @@ let
     pname = "zbm-rs";
     version = "0.1.0";
     src = rustSource;
-    cargoLock.lockFile = rustSource + "/Cargo.lock";
+    cargoLock = {
+      lockFile = rustSource + "/Cargo.lock";
+      outputHashes."const-field-offset-0.2.1" = "sha256-Sf3lt8cQwVSCuRuDZPRJsAYI+HQLqpg9vrmkjUq5PVg=";
+    };
     nativeBuildInputs = [ runtimePkgs.pkg-config ];
-    buildInputs = [ runtimePkgs.openssl ];
+    buildInputs = [ runtimePkgs.openssl ] ++ lib.optionals graphical [
+      runtimePkgs.fontconfig runtimePkgs.freetype runtimePkgs.libinput
+      runtimePkgs.libxkbcommon runtimePkgs.systemd runtimePkgs.libgbm
+    ];
     cargoBuildFlags = [ "-p" "zbm-rs" ];
     cargoTestFlags = [ "-p" "zbm-rs" "-p" "zbm-core" ];
-    buildFeatures = lib.optional testProfile "vm-test";
-    env = lib.optionalAttrs (rustProfile ? optLevel) { CARGO_PROFILE_RELEASE_OPT_LEVEL = toString rustProfile.optLevel; }
+    buildFeatures = lib.optional testProfile "vm-test" ++ lib.optional graphical "gui-prototype";
+    env = lib.optionalAttrs graphical {
+      SKIA_BINARIES_URL = "file://${skiaBinaries}";
+    } // lib.optionalAttrs (rustProfile ? optLevel) { CARGO_PROFILE_RELEASE_OPT_LEVEL = toString rustProfile.optLevel; }
       // lib.optionalAttrs (rustProfile ? lto) { CARGO_PROFILE_RELEASE_LTO = rustProfile.lto; }
       // lib.optionalAttrs (rustProfile ? codegenUnits) { CARGO_PROFILE_RELEASE_CODEGEN_UNITS = toString rustProfile.codegenUnits; }
       # Share the musl already needed by C tools instead of embedding another copy.
@@ -103,6 +117,11 @@ let
     { source = "${udevPackage}/lib/udev/scsi_id"; link = "/usr/lib/udev/scsi_id"; }
     { source = "${lib.getLib runtimePkgs.kmod}/lib/libkmod.so.2"; link = "/usr/lib/libkmod.so.2"; }
     { source = "${lib.getLib runtimePkgs.util-linux}/lib/libblkid.so.1"; link = "/usr/lib/libblkid.so.1"; }
+  ] ++ lib.optionals graphical [
+    { source = "${lib.getLib runtimePkgs.libinput}/lib/libinput.so.10"; link = "/usr/lib/libinput.so.10"; }
+    { source = "${lib.getLib runtimePkgs.systemd}/lib/libudev.so.1"; link = "/usr/lib/libudev.so.1"; }
+    { source = "${lib.getLib runtimePkgs.libxkbcommon}/lib/libxkbcommon.so.0"; link = "/usr/lib/libxkbcommon.so.0"; }
+    { source = "${lib.getLib runtimePkgs.libgbm}/lib/libgbm.so.1"; link = "/usr/lib/libgbm.so.1"; }
   ] ++ lib.optionals testProfile [
     { source = "${runtimePkgs.openssh}/bin/sshd"; link = "/usr/bin/sshd"; }
     { source = "${runtimePkgs.openssh}/bin/ssh-keygen"; link = "/usr/bin/ssh-keygen"; }
@@ -124,7 +143,7 @@ let
   ];
   setup = pkgs.writeText "setup.sh" (lib.replaceStrings
     [ "# NIX_FORCED_MODULES" ]
-    [ (lib.concatMapStringsSep "\n" (name: "/usr/bin/modprobe " + lib.escapeShellArg name + " || exit 1") (lib.remove "zfs" forcedModules)) ]
+    [ (lib.concatMapStringsSep "\n" (name: "/usr/bin/modprobe " + lib.escapeShellArg name + " || exit 1") (lib.unique (lib.optional graphical "evdev" ++ lib.remove "zfs" forcedModules))) ]
     (builtins.readFile (source + "/boot/setup.sh")));
   runtimeLibc = runtimePkgs.stdenv.hostPlatform.libc;
   runtime = pkgs.runCommand "zbm-runtime-${profile}" {
@@ -183,6 +202,21 @@ let
     cp ${udevRules}/{60-persistent-storage,80-drivers}.rules root/usr/lib/udev/rules.d/
     substituteInPlace root/usr/lib/udev/rules.d/60-persistent-storage.rules \
       --replace-quiet '${udevPackage}/lib/udev' '/usr/lib/udev'
+    ${lib.optionalString graphical ''
+      cp ${udevRules}/60-input-id.rules root/usr/lib/udev/rules.d/
+      # The restricted manager can reopen hotplugged input devices, never ZFS,
+      # block devices, the EFI trust store or broker-owned files.
+      printf 'SUBSYSTEM=="input", KERNEL=="event*", GROUP="65534", MODE="0660", TAG+="seat"\n' > root/usr/lib/udev/rules.d/99-zbm-input.rules
+      mkdir -p root/usr/share/fonts root/usr/share/X11 root/etc/fonts
+      cp ${pkgs.dejavu_fonts}/share/fonts/truetype/DejaVuSans.ttf root/usr/share/fonts/
+      cp -Lr ${runtimePkgs.xkeyboard_config}/share/X11/xkb root/usr/share/X11/
+      test -f root/usr/share/X11/xkb/rules/evdev
+      cat > root/etc/fonts/fonts.conf <<'FONTS'
+    <?xml version="1.0"?>
+    <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+    <fontconfig><dir>/usr/share/fonts</dir><cachedir>/run/fontconfig</cachedir></fontconfig>
+    FONTS
+    ''}
     ${lib.optionalString testProfile ''
       mkdir -p root/etc/ssh root/root/.ssh
       ssh-keygen -q -t ed25519 -N "" -C zbm-disposable-test -f client-key
@@ -231,13 +265,15 @@ let
     ${lib.optionalString testProfile "cp ${runtime}/id_ed25519 $out/id_ed25519"}
     uv run --offline --no-project --python ${pkgs.python3}/bin/python ${source}/nix/image-metadata.py \
       $out ${lib.escapeShellArg kernel.modDirVersion} ${lib.escapeShellArg zfsModule.version} \
-      ${if testProfile then "yes" else "no"} ${lib.escapeShellArg profile} ${source}/nix/image-size-policy.json ${initramfsCompression}
+      ${if testProfile then "yes" else "no"} ${lib.escapeShellArg profile} ${source}/nix/image-size-policy.json ${initramfsCompression} ${frontend}
   '';
   sizeCheck = pkgs.runCommand "zbm-image-size-check" {} ''
     test -s ${image}/sizes.json
     cp ${image}/sizes.json $out
   '';
 in
+assert lib.assertMsg (builtins.elem frontend [ "tui" "gui" ]) "Unknown frontend";
+assert lib.assertMsg (!graphical || (runtimeLibc == "glibc" && runtimePkgs.stdenv.hostPlatform.system == "x86_64-linux")) "GUI currently supports x86_64 glibc images";
 assert lib.assertMsg (builtins.elem initramfsCompression [ "gzip" "xz" "zstd" ]) "Unknown initramfs compressor";
 assert lib.assertMsg (builtins.elem profile [ "portable" "host-only" ]) "Unknown image profile";
 assert lib.assertMsg (hostId == null || (builtins.isString hostId && builtins.match "[0-9a-fA-F]{8}" hostId != null && hostId != "00000000"))
