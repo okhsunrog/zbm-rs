@@ -3,6 +3,9 @@ mod schema;
 fn main() {
     println!("cargo::rerun-if-env-changed=ZBM_RS_CONFIG");
     println!("cargo::rerun-if-changed=src/config/schema.rs");
+    if std::env::var_os("CARGO_FEATURE_GUI_PROTOTYPE").is_some() {
+        println!("cargo::rustc-env=SLINT_STYLE=material-dark");
+    }
     let path = std::env::var_os("ZBM_RS_CONFIG")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
