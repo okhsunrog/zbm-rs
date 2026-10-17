@@ -2170,6 +2170,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "time",
  "tokio",
  "zbm-core",
  "zeroize",

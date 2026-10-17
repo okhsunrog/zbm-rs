@@ -17,6 +17,32 @@ fn panel(run: &Path, expected: &str) -> Result<()> {
     })
 }
 
+fn reading_panel_is_modal(run: &Path, key: &str, name: &str) -> Result<()> {
+    vm::key(run, key)?;
+    panel(run, name)?;
+    let before = vm::screen(run)?;
+    let pid = manager_pid(run)?;
+    for key in ["ret", "c", "d", "u", "r", "p", "q", "b", "f5", "f2"] {
+        vm::key(run, key)?;
+    }
+    // A handled scroll event acknowledges input after all blocked commands.
+    vm::key(run, "down")?;
+    wait_for(10, None, || {
+        let after = vm::screen(run)?;
+        ensure!(
+            after["event"] == "panel" && after["ui"]["panel"] == name,
+            "Reading panel lost focus: {after}"
+        );
+        ensure!(
+            after["state"] == before["state"] && manager_pid(run)? == pid,
+            "A reading panel dispatched a background command: {after}"
+        );
+        Ok(())
+    })?;
+    vm::key(run, "esc")?;
+    panel(run, "None")
+}
+
 pub fn empty(run: &Path) -> Result<()> {
     let pid = manager_pid(run)?;
     vm::key(run, "f1")?;
@@ -111,6 +137,25 @@ pub fn environments(run: &Path) -> Result<()> {
     vm::screenshot(run, &run.join("ui-compact-details.png"))?;
     vm::key(run, "esc")?;
     panel(run, "None")?;
+    vm::ssh(run, "stty cols 60 rows 20 < /dev/tty1")?;
+    wait_for(10, None, || {
+        ensure!(
+            vm::screen(run)?["terminal_size"] == serde_json::json!([60, 20]),
+            "Waiting for small console"
+        );
+        Ok(())
+    })?;
+    vm::key(run, "f2")?;
+    panel(run, "Actions")?;
+    vm::key(run, "end")?;
+    let text = vm::console(run)?;
+    ensure!(
+        text.contains("Esc Close") && (text.contains("Enter:") || text.contains("Unavailable:")),
+        "Small action menu lost its explanation: {text}"
+    );
+    vm::screenshot(run, &run.join("ui-small-actions.png"))?;
+    vm::key(run, "esc")?;
+    panel(run, "None")?;
     vm::ssh(run, "stty cols 160 rows 50 < /dev/tty1")?;
     wait_for(10, None, || {
         ensure!(
@@ -147,6 +192,19 @@ pub fn generations(run: &Path) -> Result<()> {
     })?;
     vm::screenshot(run, &run.join("ui-rejected-generation.png"))?;
     vm::key(run, "down")?;
+    reading_panel_is_modal(run, "f1", "Help")?;
+    reading_panel_is_modal(run, "f3", "Details")?;
+    vm::key(run, "slash")?;
+    wait_for(10, None, || {
+        let text = vm::console(run)?;
+        ensure!(
+            text.contains("Enter Keep filter") && text.contains("Esc Clear"),
+            "Search hints are stale: {text}"
+        );
+        Ok(())
+    })?;
+    vm::screenshot(run, &run.join("ui-search.png"))?;
+    vm::key(run, "esc")?;
     vm::key(run, "f3")?;
     panel(run, "Details")?;
     let text = vm::console(run)?;
@@ -163,7 +221,7 @@ pub fn generations(run: &Path) -> Result<()> {
     fs::write(
         run.join("interface-report.json"),
         serde_json::to_vec_pretty(
-            &serde_json::json!({"passed":true,"checks":["full-command-inventory","search-command-isolation","function-key-help","wide-and-80x25-layouts","compact-details","rejected-generation-inspection","rejected-generation-boot-blocked","real-Bootspec-input-preview"]}),
+            &serde_json::json!({"passed":true,"checks":["full-command-inventory","search-command-isolation","function-key-help","wide-and-80x25-layouts","compact-details","rejected-generation-inspection","rejected-generation-boot-blocked","real-Bootspec-input-preview","reading-panel-command-isolation","search-mode-hints","60x20-action-explanations"]}),
         )?,
     )?;
     Ok(())

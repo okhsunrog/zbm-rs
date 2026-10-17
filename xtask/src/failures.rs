@@ -3,7 +3,7 @@ use crate::{
     smoke::{manager_pid, new_manager, wait_for},
     vm,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{fs, path::Path};
 
@@ -136,8 +136,14 @@ pub fn exercise(run: &Path) -> Result<()> {
                 && state["state"]["rejected_generations"][0]["generation"] == 2,
             "Waiting for good generation: {state}"
         );
+        let console = vm::console(run)?;
+        let diagnostic = state["state"]["rejected_generations"][0]["error"]
+            .as_str()
+            .context("Rejected generation lost its diagnostic")?;
         ensure!(
-            vm::console(run)?.contains("generation 2:"),
+            console.contains("Generation 2")
+                && console.contains("UNAVAILABLE")
+                && console.contains(diagnostic),
             "Generation diagnostic is not visible at the VT"
         );
         Ok(state)

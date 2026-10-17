@@ -1,18 +1,17 @@
 //! Console-first presentation: ANSI colors, readable selection and concise summaries.
 use super::*;
-use crate::manager::status_message;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Margin, Rect},
     style::Modifier,
-    widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap},
+    widgets::{Block, Clear, List, ListItem, Padding, Paragraph, Wrap},
 };
 
 // Use the base ANSI backgrounds: bright backgrounds are not reliable on Linux VT.
 const BASE: Color = Color::Black;
 const INK: Color = Color::White;
 const MUTED: Color = Color::Gray;
-const CHROME: Color = Color::Blue;
+const CHROME: Color = Color::DarkGray;
 const FOCUS: Color = Color::Cyan;
 const SNAPSHOT: Color = Color::Magenta;
 const GOOD: Color = Color::Green;
@@ -36,16 +35,14 @@ fn field(label: &str, value: impl AsRef<str>) -> Line<'static> {
 }
 fn keycap(key: &str, label: &str, color: Color) -> Vec<Span<'static>> {
     vec![
-        Span::styled(
-            format!(" {key} "),
-            ink(if color == CHROME { INK } else { BASE }).bg(color),
-        ),
-        Span::styled(format!(" {label}  "), ink(INK)),
+        Span::styled(key.to_owned(), strong(color)),
+        Span::styled(format!(" {label}  "), ink(MUTED)),
     ]
 }
+
 fn panel(title: impl Into<String>, color: Color) -> Block<'static> {
     Block::bordered()
-        .border_style(ink(color))
+        .border_style(ink(CHROME))
         .title(Span::styled(format!(" {} ", title.into()), strong(color)))
         .padding(Padding::horizontal(1))
         .style(ink(INK).bg(BASE))
@@ -104,15 +101,6 @@ impl Ui {
                     lines.push(heading("Unavailable", NOTICE));
                     lines.push(Line::raw(clean(issue)));
                 }
-                lines.push(Line::raw(""));
-                lines.push(heading("Boot checks", FOCUS));
-                lines.push(Line::raw(
-                    if options.config.security.mode == crate::config::SecurityMode::Enforce {
-                        "Owner authorization is checked before loading."
-                    } else {
-                        "Boot inputs are rechecked before loading."
-                    },
-                ));
             }
             Some(Kind::Pool(i)) => {
                 let pool = &state.pools[i];
@@ -163,6 +151,8 @@ impl Ui {
             Some(Kind::Snapshot(i)) => {
                 let snapshot = &state.snapshots[i];
                 lines.push(heading(clean(&snapshot.source.name), SNAPSHOT));
+                lines.push(Line::raw(""));
+                lines.push(field("Created", snapshot_date(snapshot.creation)));
                 lines.push(Line::raw(""));
                 lines.push(heading("Inspect before booting", INK));
                 lines.push(Line::raw(
@@ -272,49 +262,185 @@ impl Ui {
             } else {
                 "F4 Shell, F6 Restart manager, F10 Power off work during search and operations."
             }),
-            Line::raw("Q exits the manager; PID 1 decides recovery. N restarts only the manager."),
+            Line::raw("Help/details accept only scrolling, Esc and F4/F6/F10 recovery."),
+            Line::raw("Q exits the manager; N restarts only the manager, not the machine."),
         ]);
         lines
     }
 
+    fn action_label(&self, command: Command, state: &State) -> String {
+        if command != Command::Open {
+            return command.label().into();
+        }
+        match self.selected(state).map(|row| row.kind) {
+            Some(Kind::Pool(i)) => format!("Import pool {}", clean(&state.pools[i].name)),
+            Some(Kind::Environment(i)) => format!(
+                "{} {}",
+                self.open_label(state),
+                clean(&state.environments[i].dataset)
+            ),
+            Some(Kind::Snapshot(_)) => "Inspect snapshot boot targets".into(),
+            Some(Kind::Generation(i)) => {
+                let target = &state.targets[i];
+                let name = target
+                    .generation()
+                    .map(|g| format!("generation {g}"))
+                    .unwrap_or_else(|| clean(&target.label));
+                format!(
+                    "Boot {name}{}",
+                    if target.snapshot.is_some() {
+                        " from clone"
+                    } else {
+                        ""
+                    }
+                )
+            }
+            Some(Kind::Rejected(i)) => format!(
+                "Boot generation {}",
+                state.rejected_generations[i].generation
+            ),
+            None => "Open selection".into(),
+        }
+    }
+
+    fn selection_hint(&self, state: &State, options: &Options) -> String {
+        if let Some(reason) = self.reason(Command::Open, state, options) {
+            return format!("Unavailable: {}", clean(reason));
+        }
+        match self.selected(state).map(|row| row.kind) {
+            Some(Kind::Generation(i)) if state.targets[i].snapshot.is_some() => {
+                if self.prepared_target(&state.targets[i]).is_some() {
+                    "Clone prepared. Boot uses the writable clone; the snapshot stays unchanged."
+                        .into()
+                } else {
+                    "Boot creates or reuses a writable clone; the snapshot stays unchanged.".into()
+                }
+            }
+            Some(Kind::Generation(_)) => "Ready to boot the selected system.".into(),
+            Some(Kind::Pool(_)) => {
+                "Import this pool to discover boot environments. No force import.".into()
+            }
+            Some(Kind::Environment(i)) if state.environments[i].properties.can_unlock() => {
+                "Unlock with the ZFS passphrase to discover boot targets.".into()
+            }
+            Some(Kind::Environment(_)) => {
+                "Open this environment to choose a kernel or generation.".into()
+            }
+            Some(Kind::Snapshot(_)) => {
+                "Inspect saved boot targets. F2 offers clone and rollback actions.".into()
+            }
+            _ => "Select an entry to continue.".into(),
+        }
+    }
+
+    fn primary_keys(&self, state: &State, options: &Options, compact: bool) -> Line<'static> {
+        let mut keys = Vec::new();
+        if self.panel != Panel::None {
+            if matches!(self.panel, Panel::Help | Panel::Details) {
+                keys.extend(keycap("Up/Down", "Scroll", MUTED));
+                keys.extend(keycap("Esc", "Close", FOCUS));
+            } else if self.panel == Panel::Actions {
+                keys.extend(keycap("Up/Down", "Select", MUTED));
+                keys.extend(keycap("Enter", "Run action", FOCUS));
+                keys.extend(keycap("Esc", "Close", MUTED));
+            } else {
+                keys.extend(keycap(
+                    "Enter",
+                    if self.panel == Panel::Unlock {
+                        "Unlock"
+                    } else {
+                        "Confirm"
+                    },
+                    FOCUS,
+                ));
+                keys.extend(keycap("Esc", "Cancel", MUTED));
+            }
+            return Line::from(keys);
+        }
+        if self.searching {
+            keys.extend(keycap("Enter", "Keep filter", FOCUS));
+            keys.extend(keycap("Esc", "Clear", MUTED));
+        } else {
+            let disabled = self.reason(Command::Open, state, options).is_some();
+            keys.extend(keycap(
+                "Enter",
+                if disabled {
+                    "Unavailable"
+                } else {
+                    self.open_label(state)
+                },
+                if disabled { CHROME } else { FOCUS },
+            ));
+            keys.extend(keycap(
+                "Esc",
+                if self.screens[&self.key].query.is_empty() {
+                    "Back"
+                } else {
+                    "Clear filter"
+                },
+                MUTED,
+            ));
+            if !compact && !state.environments.is_empty() && options.config.ui.show_snapshots {
+                keys.extend(keycap("T", "Snapshots", MUTED));
+            }
+            keys.extend(keycap("I", "Details", MUTED));
+            keys.extend(keycap("F2", "Actions", MUTED));
+        }
+        keys.extend(keycap("F1", "Help", MUTED));
+        Line::from(keys)
+    }
+
     pub fn draw(&mut self, frame: &mut Frame, state: &State, options: &Options) {
-        let area = frame.area();
-        frame.render_widget(Block::default().style(ink(INK).bg(BASE)), area);
-        // A boot picker should remain a compact composition on large consoles.
-        // Small consoles keep every cell; longer lists scroll within this viewport.
-        let width = area.width.min(144);
-        let height = area.height.min(38);
+        let screen = frame.area();
+        frame.render_widget(Block::default().style(ink(INK).bg(BASE)), screen);
+        let width = screen.width.min(144);
+        let height = screen.height.min(38);
         let area = Rect::new(
-            area.x + (area.width - width) / 2,
-            area.y + (area.height - height) / 2,
+            screen.x + (screen.width - width) / 2,
+            screen.y + (screen.height - height) / 2,
             width,
             height,
         );
+        let compact = area.width < 110 || area.height < 30;
         let protected = options.config.security.mode == crate::config::SecurityMode::Enforce;
-        let wide = area.width >= 110;
+        let margin = if compact { 1 } else { 2 };
+        let primary_text =
+            Paragraph::new(self.primary_keys(state, options, compact)).wrap(Wrap { trim: false });
+        let mut recovery_keys = if self.panel == Panel::None {
+            keycap("F5", "Rescan", MUTED)
+        } else {
+            vec![]
+        };
+        if !protected {
+            recovery_keys.extend(keycap("F4", "Shell", MUTED));
+        }
+        recovery_keys.extend(keycap("F6", "Restart", MUTED));
+        recovery_keys.extend(keycap("F10", "Power off", MUTED));
+        let recovery_text = Paragraph::new(Line::from(recovery_keys)).wrap(Wrap { trim: false });
+        let content_width = area.width.saturating_sub(margin * 2);
         let [header, context_area, body, status, primary, recovery] = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Length(2),
-            Constraint::Min(4),
-            Constraint::Length(3),
-            Constraint::Length(2),
-            Constraint::Length(if area.width < 76 { 3 } else { 2 }),
+            Constraint::Length(if compact { 1 } else { 2 }),
+            Constraint::Length(if compact { 1 } else { 2 }),
+            Constraint::Min(3),
+            Constraint::Length(if compact { 2 } else { 3 }),
+            Constraint::Length(primary_text.line_count(content_width) as u16),
+            Constraint::Length(recovery_text.line_count(content_width) as u16),
         ])
         .areas(area);
-        frame.render_widget(Block::default().style(ink(INK).bg(CHROME)), header);
+        let [brand, policy] = Layout::horizontal([Constraint::Min(1), Constraint::Length(22)])
+            .areas(header.inner(Margin::new(margin, 0)));
         let title = options.config.ui.title.as_deref().unwrap_or("zbm-rs");
-        let [brand, policy] = Layout::horizontal([
-            Constraint::Min(1),
-            Constraint::Length(if wide { 37 } else { 22 }),
-        ])
-        .areas(header.inner(Margin::new(2, 1)));
         frame.render_widget(
             Paragraph::new(Line::from(vec![
+                Span::styled(clean(title), strong(INK)),
                 Span::styled(
-                    format!(" {} ", clean(title)),
-                    ink(BASE).bg(FOCUS).add_modifier(Modifier::BOLD),
+                    if compact {
+                        ""
+                    } else {
+                        "   /   ZFS boot manager"
+                    },
+                    ink(MUTED),
                 ),
-                Span::styled(if wide { "   ZFS boot manager" } else { "" }, strong(INK)),
             ])),
             brand,
         );
@@ -324,7 +450,7 @@ impl Ui {
             } else {
                 "Boot policy: off"
             })
-            .style(ink(if protected { INK } else { NOTICE }))
+            .style(ink(MUTED))
             .right_aligned(),
             policy,
         );
@@ -348,41 +474,49 @@ impl Ui {
         };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("  ZFS  /  ", ink(FOCUS)),
+                Span::styled("ZFS / ", ink(MUTED)),
                 Span::styled(
                     clean(context.unwrap_or("Discover pools")),
-                    ink(if state.snapshot_view { SNAPSHOT } else { INK }),
+                    ink(if state.snapshot_view { SNAPSHOT } else { MUTED }),
                 ),
             ])),
-            context_area,
+            context_area.inner(Margin::new(margin, 0)),
         );
-        let body = body.inner(Margin::new(2, 0));
-        let columns = if wide {
+        let body = body.inner(Margin::new(margin, 0));
+        let columns = if compact {
+            vec![body]
+        } else {
             Layout::horizontal([
-                Constraint::Percentage(52),
+                Constraint::Percentage(55),
                 Constraint::Length(2),
                 Constraint::Min(1),
             ])
             .split(body)
             .to_vec()
-        } else {
-            vec![body]
         };
         let rows = self.visible(state);
-        let list_block = panel(
-            format!("{}  ({})", View::of(state).title(), rows.len()),
-            FOCUS,
-        );
+        let position = self.screens[&self.key].list.selected().map_or(0, |i| i + 1);
+        let query = &self.screens[&self.key].query;
+        let count = if query.is_empty() {
+            format!(" {position}/{} ", rows.len())
+        } else {
+            format!(
+                " {position}/{} matches ({} total) ",
+                rows.len(),
+                Self::rows(state).len()
+            )
+        };
+        let list_block = panel(View::of(state).title(), INK)
+            .title_bottom(Line::styled(count, ink(MUTED)).right_aligned());
         let inner = list_block.inner(columns[0]);
         frame.render_widget(list_block, columns[0]);
         let [filter, list] =
-            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
-        let query = &self.screens[&self.key].query;
+            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
-                    if self.searching { " / Find: " } else { " / " },
-                    strong(FOCUS),
+                    if self.searching { "/ Find: " } else { "/ " },
+                    ink(if self.searching { FOCUS } else { MUTED }),
                 ),
                 Span::styled(
                     if self.searching {
@@ -390,13 +524,14 @@ impl Ui {
                     } else if query.is_empty() {
                         "Find in this list".into()
                     } else {
-                        format!("{}   [Esc clears]", clean(query))
+                        format!("{}  [Esc clears]", clean(query))
                     },
-                    ink(if self.searching { INK } else { MUTED }),
+                    ink(MUTED),
                 ),
             ])),
             filter,
         );
+        self.page_size = (list.height as usize / 2).max(1);
         let items = if state.activity.is_scanning() {
             vec![ListItem::new("Discovering pools...")]
         } else if rows.is_empty() {
@@ -406,26 +541,30 @@ impl Ui {
                 } else {
                     "No targets match this filter"
                 }),
-                Line::raw(""),
                 Line::styled(
                     if query.is_empty() {
-                        "R Rescan    F2 Recovery actions"
+                        "F5 Rescan    F2 Actions"
                     } else {
-                        "Esc Clear filter    / Search"
+                        "Esc Clear filter"
                     },
-                    ink(FOCUS),
+                    ink(MUTED),
                 ),
             ])]
         } else {
             rows.iter()
                 .map(|row| {
+                    // Only show tags that distinguish state; ordinary backend names add noise.
+                    let tag = if matches!(row.tag, "NIXOS" | "KERNEL" | "POOL" | "BE") {
+                        String::new()
+                    } else {
+                        format!("  [{}]", row.tag)
+                    };
                     ListItem::new(vec![
                         Line::from(vec![
                             Span::styled(clean(&row.title), strong(INK)),
-                            Span::styled(format!("  [{}]", row.tag), tag_style(row.tag)),
+                            Span::styled(tag, tag_style(row.tag)),
                         ]),
                         Line::styled(format!("  {}", clean(&row.subtitle)), ink(MUTED)),
-                        Line::raw(""),
                     ])
                 })
                 .collect()
@@ -437,37 +576,38 @@ impl Ui {
             list,
             &mut self.screens.get_mut(&self.key).unwrap().list,
         );
-        if wide {
-            let block = panel(
-                "Selected target",
-                if state.snapshot_view {
-                    SNAPSHOT
-                } else {
-                    Color::LightBlue
-                },
-            );
+        if !compact {
+            let block = panel("Selection", INK);
             let inner = block.inner(columns[2]);
             frame.render_widget(block, columns[2]);
-            let [summary, hint] =
-                Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(inner);
             frame.render_widget(
                 Paragraph::new(self.summary(state, options)).wrap(Wrap { trim: false }),
-                summary,
-            );
-            frame.render_widget(
-                Paragraph::new(Line::from(keycap("I", "Full paths & boot details", FOCUS))),
-                hint,
+                inner,
             );
         }
-        let mut message = if state.error.is_none()
-            && state.activity.operation().is_none()
-            && self
-                .target(state)
-                .is_some_and(|t| self.prepared_target(t).is_some())
-        {
-            "Clone prepared. Enter boots it; I shows the full boot plan.".into()
+        let (label, color, mut message) = if state.activity.requires_restart() {
+            (
+                "Recovery required: ",
+                DANGER,
+                state
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "Restart manager to reconcile the operation.".into()),
+            )
+        } else if let Some(error) = &state.error {
+            ("Notice: ", NOTICE, format!("{}  [I Details]", clean(error)))
+        } else if let Some(operation) = state.activity.operation() {
+            ("Working: ", FOCUS, operation.to_owned())
+        } else if state.activity.is_scanning() {
+            ("Working: ", FOCUS, "Discovering ZFS pools...".into())
+        } else if self.searching {
+            (
+                "",
+                MUTED,
+                "Type to filter. Enter keeps the filter; Esc clears it.".into(),
+            )
         } else {
-            status_message(state)
+            ("", MUTED, self.selection_hint(state, options))
         };
         if let Some(started) = self
             .operation_started
@@ -478,48 +618,16 @@ impl Ui {
                 started.elapsed().as_secs()
             ));
         }
-        let (label, color) = if state.activity.requires_restart() {
-            (" Recovery required ", DANGER)
-        } else if state.error.is_some() {
-            (" Notice ", NOTICE)
-        } else if state.activity.operation().is_some() || state.activity.is_scanning() {
-            (" Working ", FOCUS)
-        } else {
-            (" > ", FOCUS)
-        };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(label, strong(color)),
-                Span::styled(
-                    clean(message),
-                    ink(if state.error.is_some() { NOTICE } else { MUTED }),
-                ),
+                Span::styled(clean(message), ink(color)),
             ]))
             .wrap(Wrap { trim: false }),
-            status.inner(Margin::new(2, 0)),
+            status.inner(Margin::new(margin, 0)),
         );
-        let mut actions = keycap("Enter", self.open_label(state), FOCUS);
-        actions.extend(keycap("Esc", "Back", MUTED));
-        if !state.environments.is_empty() && options.config.ui.show_snapshots {
-            actions.extend(keycap("T", "Snapshots", SNAPSHOT));
-        }
-        actions.extend(keycap("I", "Details", FOCUS));
-        actions.extend(keycap("F2", "Actions", FOCUS));
-        actions.extend(keycap("F1", "Help", MUTED));
-        frame.render_widget(
-            Paragraph::new(Line::from(actions)).wrap(Wrap { trim: false }),
-            primary.inner(Margin::new(2, 0)),
-        );
-        let mut actions = keycap("F5", "Rescan", CHROME);
-        if !protected {
-            actions.extend(keycap("F4", "Shell", CHROME));
-        }
-        actions.extend(keycap("F6", "Restart", CHROME));
-        actions.extend(keycap("F10", "Power off", CHROME));
-        frame.render_widget(
-            Paragraph::new(Line::from(actions)).wrap(Wrap { trim: false }),
-            recovery.inner(Margin::new(2, 0)),
-        );
+        frame.render_widget(primary_text, primary.inner(Margin::new(margin, 0)));
+        frame.render_widget(recovery_text, recovery.inner(Margin::new(margin, 0)));
         if self.panel != Panel::None {
             self.draw_panel(frame, state, options, protected);
         }
@@ -529,7 +637,7 @@ impl Ui {
         let width = area.width.saturating_sub(4).min(106);
         let height = area.height.saturating_sub(2).min(match self.panel {
             Panel::Help => 32,
-            Panel::Actions => 24,
+            Panel::Actions => 30,
             Panel::Details => 34,
             _ => 14,
         });
@@ -539,25 +647,17 @@ impl Ui {
             width,
             height,
         );
-        let shadow = Rect::new(
-            popup.x.saturating_add(1),
-            popup.y.saturating_add(1),
-            popup.width,
-            popup.height,
-        )
-        .intersection(area);
-        frame.render_widget(Block::default().style(ink(BASE).bg(CHROME)), shadow);
         frame.render_widget(Clear, popup);
         let accent = match self.panel {
             Panel::ConfirmRollback | Panel::ConfirmDiscard => DANGER,
             Panel::ConfirmPromote => NOTICE,
             _ => FOCUS,
         };
-        let mut block = panel(
+        let block = panel(
             match self.panel {
-                Panel::Help => "Keyboard help [Up/Down] scroll [Esc] close",
-                Panel::Actions => "All actions [Enter] run [Esc] close",
-                Panel::Details => "Full target details [PgUp/PgDn] scroll [Esc] close",
+                Panel::Help => "Keyboard help",
+                Panel::Actions => "Actions",
+                Panel::Details => "Full target details",
                 Panel::ConfirmDiscard => "Discard prepared clone? [Enter] confirm [Esc] cancel",
                 Panel::ConfirmRollback => "Rollback dataset [Esc] cancel",
                 Panel::ConfirmPromote => "Clone and promote [Enter] confirm [Esc] cancel",
@@ -567,51 +667,81 @@ impl Ui {
             accent,
         );
         if self.panel == Panel::Actions {
-            if popup.height < 19 {
-                block = block.borders(Borders::TOP);
-            }
-            let [menu_area, reason_area] = Layout::vertical([
+            let selected = self
+                .menu
+                .selected()
+                .and_then(|i| self.menu_commands.get(i))
+                .copied();
+            let mut commands: Vec<_> = ALL.into_iter().filter(|c| *c != Command::Actions).collect();
+            commands.sort_by_key(|c| (c.group().0, self.reason(*c, state, options).is_some()));
+            self.menu_commands = commands;
+            self.menu.select(Some(
+                selected
+                    .and_then(|c| self.menu_commands.iter().position(|v| *v == c))
+                    .unwrap_or(0),
+            ));
+            let index = self.menu.selected().unwrap_or(0);
+            let command = self.menu_commands[index];
+            let reason = self.reason(command, state, options);
+            let explanation = reason
+                .as_ref()
+                .map(|r| format!("Unavailable: {}", clean(r)))
+                .unwrap_or_else(|| format!("Enter: {}", self.action_label(command, state)));
+            let reason_text = Paragraph::new(explanation).wrap(Wrap { trim: false });
+            let inner = block.inner(popup);
+            // Reserve the explanation even at 60x20. The command list scrolls instead.
+            let reason_height = (reason_text.line_count(inner.width) as u16)
+                .max(2)
+                .min(inner.height.saturating_sub(3));
+            let [menu_area, reason_area, hints] = Layout::vertical([
                 Constraint::Min(1),
-                Constraint::Length(if popup.height >= 23 { 3 } else { 0 }),
+                Constraint::Length(reason_height),
+                Constraint::Length(1),
             ])
-            .areas(block.inner(popup));
+            .areas(inner);
             frame.render_widget(block, popup);
-            let items: Vec<_> = ALL
-                .into_iter()
-                .map(|command| {
-                    let disabled = self.reason(command, state, options).is_some();
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            format!("{:12}", command.keys()),
-                            ink(if disabled { MUTED } else { FOCUS }),
-                        ),
-                        Span::styled(command.label(), ink(if disabled { MUTED } else { INK })),
-                        Span::styled(if disabled { "  [unavailable]" } else { "" }, ink(NOTICE)),
-                    ]))
-                })
-                .collect();
+            let mut items = Vec::new();
+            let mut previous_group = None;
+            let mut selected_row = 0;
+            for (i, command) in self.menu_commands.iter().copied().enumerate() {
+                let group = command.group();
+                if previous_group != Some(group.0) {
+                    items.push(ListItem::new(Line::styled(group.1, strong(MUTED))));
+                    previous_group = Some(group.0);
+                }
+                if i == index {
+                    selected_row = items.len();
+                }
+                let disabled = self.reason(command, state, options).is_some();
+                items.push(ListItem::new(Line::from(vec![
+                    Span::styled(format!("{:12}", command.keys()), ink(MUTED)),
+                    Span::styled(
+                        self.action_label(command, state),
+                        ink(if disabled { MUTED } else { INK }),
+                    ),
+                    Span::styled(if disabled { "  [unavailable]" } else { "" }, ink(MUTED)),
+                ])));
+            }
+            self.menu_view.select(Some(selected_row));
             frame.render_stateful_widget(
                 List::new(items)
                     .highlight_symbol("> ")
                     .highlight_style(ink(BASE).bg(FOCUS).add_modifier(Modifier::BOLD)),
                 menu_area,
-                &mut self.menu,
+                &mut self.menu_view,
             );
-            let command = ALL[self.menu.selected().unwrap_or(0)];
-            let explanation = self
-                .reason(command, state, options)
-                .map(|reason| format!("Unavailable: {}", clean(reason)))
-                .unwrap_or_else(|| format!("Enter: {}", command.label()));
             frame.render_widget(
-                Paragraph::new(explanation)
-                    .style(ink(NOTICE))
-                    .block(
-                        Block::default()
-                            .borders(Borders::TOP)
-                            .border_style(ink(CHROME)),
-                    )
-                    .wrap(Wrap { trim: false }),
+                reason_text.style(ink(if reason.is_some() { NOTICE } else { MUTED })),
                 reason_area,
+            );
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "Up/Down Select  Esc Close   {}/{}",
+                    index + 1,
+                    self.menu_commands.len()
+                ))
+                .style(ink(MUTED)),
+                hints,
             );
         } else {
             let text = match self.panel {
@@ -676,13 +806,31 @@ impl Ui {
                 ],
                 _ => unreachable!(),
             };
-            frame.render_widget(
-                Paragraph::new(text)
-                    .block(block)
-                    .wrap(Wrap { trim: false })
-                    .scroll((self.scroll, 0)),
-                popup,
-            );
+            let scrollable = matches!(self.panel, Panel::Help | Panel::Details);
+            let inner = block.inner(popup);
+            let [content, hints] = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(u16::from(scrollable)),
+            ])
+            .areas(inner);
+            let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+            let total = paragraph.line_count(content.width).min(u16::MAX as usize) as u16;
+            self.scroll_max = total.saturating_sub(content.height);
+            self.scroll = self.scroll.min(self.scroll_max);
+            frame.render_widget(block, popup);
+            frame.render_widget(paragraph.scroll((self.scroll, 0)), content);
+            if scrollable {
+                frame.render_widget(
+                    Paragraph::new(format!(
+                        "Up/Down Scroll  Esc Close   {}-{}/{}",
+                        self.scroll + 1,
+                        (self.scroll + content.height).min(total),
+                        total
+                    ))
+                    .style(ink(MUTED)),
+                    hints,
+                );
+            }
         }
     }
 }
@@ -691,6 +839,49 @@ impl Ui {
 mod tests {
     use super::*;
     use zbm_core::boot::{Backend, SnapshotSource};
+
+    #[test]
+    fn footer_describes_search_filters_and_unavailable_targets() {
+        let mut state = State {
+            pools: zbm_core::preview(),
+            ..State::default()
+        };
+        let mut ui = Ui::default();
+        ui.sync(&mut state);
+        let options = Options {
+            config: crate::config::Config::default(),
+            preview: false,
+            supervised: true,
+            events: None,
+        };
+        ui.searching = true;
+        ui.input(
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+            &mut state,
+        );
+        let keys = ui.primary_keys(&state, &options, true).to_string();
+        assert!(keys.contains("Enter Keep filter") && keys.contains("Esc Clear"));
+        assert!(!keys.contains("Import"));
+        ui.input(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+        );
+        assert!(
+            ui.primary_keys(&state, &options, true)
+                .to_string()
+                .contains("Esc Clear filter")
+        );
+        let mut preview = options;
+        preview.preview = true;
+        assert!(
+            ui.primary_keys(&state, &preview, true)
+                .to_string()
+                .contains("Enter Unavailable")
+        );
+        ui.open_panel(Panel::Details);
+        let keys = ui.primary_keys(&state, &preview, true).to_string();
+        assert!(keys.contains("Esc Close") && !keys.contains("Enter"));
+    }
 
     #[test]
     fn clone_summary_tracks_the_selected_generation_and_keeps_paths_in_details() {
@@ -746,6 +937,20 @@ mod tests {
         };
         let summary = text(ui.summary(&state, &options));
         assert!(summary.contains("Clone prepared") && summary.contains("tank/nixos@good"));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 25)).unwrap();
+        terminal.draw(|f| ui.draw(f, &state, &options)).unwrap();
+        let compact = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(
+            compact.contains("Clone prepared.") && compact.contains("snapshot stays unchanged")
+        );
+
         assert!(!summary.contains("/nix/store/"));
         let details = text(ui.details(&state, &options));
         assert!(

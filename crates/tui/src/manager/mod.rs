@@ -35,30 +35,6 @@ fn emit(options: &Options, event: &str, state: &State, ui: &Ui) -> Result<()> {
     Ok(())
 }
 
-fn status_message(state: &State) -> String {
-    if let Some(message) = state.error.as_ref().or(state.activity.operation()) {
-        return message.clone();
-    }
-    if let Some(issue) = state.rejected_generations.first() {
-        return format!(
-            "{} generations unavailable; generation {}: {}. Enter boots a listed generation.",
-            state.rejected_generations.len(),
-            issue.generation,
-            issue.error
-        );
-    }
-    if !state.targets.is_empty() {
-        "Enter: boot the selected target. B: back to boot environments."
-    } else if state.snapshot_view {
-        "Enter: inspect snapshot boot targets. O: clone BE. M: clone/promote. U: rollback. B: back to boot environments."
-    } else if !state.environments.is_empty() {
-        "Enter: inspect boot targets. * marks pool bootfs. B: back to pools."
-    } else {
-        "Enter: import selected pool without force and discover boot environments."
-    }
-    .into()
-}
-
 fn refresh(
     terminal: &mut DefaultTerminal,
     state: &mut State,

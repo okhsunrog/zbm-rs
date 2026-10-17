@@ -110,7 +110,11 @@ pub struct Ui {
     resume_search: bool,
     pub panel: Panel,
     menu: ListState,
+    menu_view: ListState,
+    menu_commands: Vec<Command>,
     scroll: u16,
+    scroll_max: u16,
+    page_size: usize,
     pub prepared: Option<BootPlan>,
     pub operation_started: Option<Instant>,
     confirmation: String,
@@ -137,6 +141,23 @@ fn clean(value: impl AsRef<str>) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
 }
+fn snapshot_date(seconds: u64) -> String {
+    let date = i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| time::OffsetDateTime::from_unix_timestamp(seconds).ok());
+    match date {
+        Some(date) => format!(
+            "{:04}-{:02}-{:02} {:02}:{:02} UTC",
+            date.year(),
+            date.month() as u8,
+            date.day(),
+            date.hour(),
+            date.minute()
+        ),
+        None => "Unknown date".into(),
+    }
+}
+
 fn fuzzy(value: &str, query: &str) -> bool {
     let mut chars = value.chars().flat_map(char::to_lowercase);
     query
@@ -167,7 +188,7 @@ impl Ui {
                     id: RowId::Pool(p.guid),
                     kind: Kind::Pool(i),
                     title: p.name.clone(),
-                    subtitle: format!("{}  GUID {}", p.health, p.guid),
+                    subtitle: p.health.clone(),
                     tag: "POOL",
                 })
                 .collect(),
@@ -205,7 +226,7 @@ impl Ui {
                     id: RowId::Snapshot(s.source.guid),
                     kind: Kind::Snapshot(i),
                     title: s.source.name.clone(),
-                    subtitle: format!("created {}  GUID {}", s.creation, s.source.guid),
+                    subtitle: format!("Created {}", snapshot_date(s.creation)),
                     tag: "SNAPSHOT",
                 })
                 .collect(),
@@ -241,7 +262,7 @@ impl Ui {
                                     "SNAPSHOT"
                                 } else {
                                     if t.generation().is_some() {
-                                        "BOOTSPEC"
+                                        "NIXOS"
                                     } else {
                                         "KERNEL"
                                     }
@@ -298,7 +319,7 @@ impl Ui {
             .get(state.selected_environment)
             .map(|e| e.dataset.as_str())
             .unwrap_or("");
-        let snapshot = if state.snapshot_view && view == View::Generations {
+        let snapshot = if state.snapshot_view && matches!(view, View::Generations | View::Kernels) {
             state
                 .snapshots
                 .get(state.selected_snapshot)
@@ -518,7 +539,10 @@ impl Ui {
         self.searching = false;
         self.panel = panel;
         self.scroll = 0;
+        self.scroll_max = 0;
+        self.menu_commands = ALL.into_iter().filter(|c| *c != Command::Actions).collect();
         self.menu.select(Some(0));
+        self.menu_view = ListState::default();
     }
     pub fn input(&mut self, key: KeyEvent, state: &mut State) -> Input {
         let command = Command::from_key(key);
@@ -564,6 +588,7 @@ impl Ui {
         }
         if matches!(key.code, KeyCode::F(_))
             && let Some(command) = command
+            && (self.panel == Panel::None || command.recovery())
         {
             return Input::Command(command, false);
         }
@@ -635,7 +660,7 @@ impl Ui {
                 _ => return Input::Ignored,
             }
         }
-        if command.is_some_and(Command::recovery) {
+        if self.panel == Panel::None && command.is_some_and(Command::recovery) {
             return Input::Command(command.unwrap(), false);
         }
         if self.panel != Panel::None {
@@ -662,13 +687,22 @@ impl Ui {
             if self.panel == Panel::Actions {
                 match key.code {
                     KeyCode::Up => self.menu.select(Some(
-                        (self.menu.selected().unwrap_or(0) + ALL.len() - 1) % ALL.len(),
+                        (self.menu.selected().unwrap_or(0) + self.menu_commands.len() - 1)
+                            % self.menu_commands.len(),
                     )),
-                    KeyCode::Down => self
+                    KeyCode::Down => self.menu.select(Some(
+                        (self.menu.selected().unwrap_or(0) + 1) % self.menu_commands.len(),
+                    )),
+                    KeyCode::Home => self.menu.select(Some(0)),
+                    KeyCode::End => self.menu.select(Some(self.menu_commands.len() - 1)),
+                    KeyCode::PageDown => self.menu.select(Some(
+                        (self.menu.selected().unwrap_or(0) + 5).min(self.menu_commands.len() - 1),
+                    )),
+                    KeyCode::PageUp => self
                         .menu
-                        .select(Some((self.menu.selected().unwrap_or(0) + 1) % ALL.len())),
+                        .select(Some(self.menu.selected().unwrap_or(0).saturating_sub(5))),
                     KeyCode::Enter if command == Some(Command::Open) => {
-                        let command = ALL[self.menu.selected().unwrap_or(0)];
+                        let command = self.menu_commands[self.menu.selected().unwrap_or(0)];
                         self.panel = Panel::None;
                         self.resume_search = false;
                         return Input::Command(command, false);
@@ -685,18 +719,17 @@ impl Ui {
                 }
             } else {
                 match key.code {
-                    KeyCode::Down => self.scroll = self.scroll.saturating_add(1),
-                    KeyCode::PageDown => self.scroll = self.scroll.saturating_add(8),
+                    KeyCode::Down => {
+                        self.scroll = self.scroll.saturating_add(1).min(self.scroll_max)
+                    }
+                    KeyCode::PageDown => {
+                        self.scroll = self.scroll.saturating_add(8).min(self.scroll_max)
+                    }
                     KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
                     KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(8),
                     KeyCode::Home => self.scroll = 0,
-                    _ => {
-                        if let Some(command) = command {
-                            return Input::Command(command, false);
-                        } else {
-                            return Input::Ignored;
-                        }
-                    }
+                    KeyCode::End => self.scroll = self.scroll_max,
+                    _ => return Input::Ignored,
                 }
             }
             return Input::Changed("panel");
@@ -718,8 +751,10 @@ impl Ui {
                 KeyCode::Down => Some((current + 1) % rows.len().max(1)),
                 KeyCode::Home => Some(0),
                 KeyCode::End => Some(rows.len().saturating_sub(1)),
-                KeyCode::PageDown => Some((current + 8).min(rows.len().saturating_sub(1))),
-                KeyCode::PageUp => Some(current.saturating_sub(8)),
+                KeyCode::PageDown => {
+                    Some((current + self.page_size.max(1)).min(rows.len().saturating_sub(1)))
+                }
+                KeyCode::PageUp => Some(current.saturating_sub(self.page_size.max(1))),
                 _ => None,
             };
             if let Some(next) = next {
@@ -753,6 +788,9 @@ impl Ui {
                 Span::raw(clean(value)),
             ]));
         };
+        if let Some(error) = &state.error {
+            field("Notice", error.clone());
+        }
         match self.selected(state).map(|row| row.kind) {
             Some(Kind::Pool(i)) => {
                 let p = &state.pools[i];
@@ -804,6 +842,7 @@ impl Ui {
                 let s = &state.snapshots[i];
                 field("Source", s.source.name.clone());
                 field("GUID", s.source.guid.to_string());
+                field("Created", snapshot_date(s.creation));
                 field("Creation (Unix)", s.creation.to_string());
                 field(
                     "Action",
@@ -1052,19 +1091,138 @@ mod tests {
             terminal
                 .draw(|frame| ui.draw(frame, &state, &options()))
                 .unwrap();
-            let menu = terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect::<String>();
-            assert!(
-                menu.contains("Discard prepared clone")
-                    && menu.contains("Exit manager")
-                    && menu.contains("Restart manager")
+            // The menu may scroll, but every command and its reason must remain reachable.
+            for command in ALL.into_iter().filter(|c| *c != Command::Actions) {
+                ui.menu
+                    .select(ui.menu_commands.iter().position(|c| *c == command));
+                terminal
+                    .draw(|frame| ui.draw(frame, &state, &options()))
+                    .unwrap();
+                let menu = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect::<String>();
+                assert!(menu.contains("Esc Close"), "{width}x{height}: {menu}");
+                if ui.reason(command, &state, &options()).is_some() {
+                    assert!(menu.contains("Unavailable:"), "{width}x{height}: {menu}");
+                } else {
+                    assert!(menu.contains("Enter:"), "{width}x{height}: {menu}");
+                }
+                assert!(
+                    matches!(ui.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut state),
+                    Input::Command(actual, false) if actual == command)
+                );
+                ui.open_panel(Panel::Actions);
+                terminal
+                    .draw(|frame| ui.draw(frame, &state, &options()))
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn reading_panels_capture_commands_but_keep_function_recovery() {
+        let mut state = State {
+            pools: zbm_core::preview(),
+            ..State::default()
+        };
+        let mut ui = Ui::default();
+        ui.sync(&mut state);
+        for panel in [Panel::Help, Panel::Details] {
+            ui.open_panel(panel);
+            for code in [
+                KeyCode::Enter,
+                KeyCode::Char('b'),
+                KeyCode::Char('p'),
+                KeyCode::Char('q'),
+                KeyCode::Char('c'),
+                KeyCode::Char('d'),
+                KeyCode::Char('r'),
+                KeyCode::Char('u'),
+                KeyCode::Char('/'),
+                KeyCode::F(2),
+                KeyCode::F(5),
+            ] {
+                assert!(
+                    matches!(
+                        ui.input(KeyEvent::new(code, KeyModifiers::NONE), &mut state),
+                        Input::Ignored
+                    ),
+                    "{panel:?} {code:?}"
+                );
+                assert_eq!(ui.panel, panel);
+            }
+            for (code, expected) in [
+                (KeyCode::F(4), Command::Shell),
+                (KeyCode::F(6), Command::Restart),
+                (KeyCode::F(10), Command::PowerOff),
+            ] {
+                assert!(
+                    matches!(ui.input(KeyEvent::new(code, KeyModifiers::NONE), &mut state),
+                    Input::Command(actual, false) if actual == expected)
+                );
+            }
+            ui.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+            assert_eq!(ui.panel, Panel::None);
+        }
+    }
+
+    #[test]
+    fn compact_list_shows_more_entries_and_pages_by_viewport() {
+        let pool = zbm_core::preview().remove(0);
+        let mut state = State {
+            pools: (0..20)
+                .map(|i| {
+                    let mut pool = pool.clone();
+                    pool.guid = i;
+                    pool.name = format!("pool-{i:02}");
+                    pool
+                })
+                .collect(),
+            ..State::default()
+        };
+        let mut ui = Ui::default();
+        ui.sync(&mut state);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 25)).unwrap();
+        terminal.draw(|f| ui.draw(f, &state, &options())).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("pool-05"), "{text}");
+        ui.input(
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            &mut state,
+        );
+        assert_eq!(state.selected, ui.page_size);
+        ui.open_panel(Panel::Help);
+        terminal.draw(|f| ui.draw(f, &state, &options())).unwrap();
+        ui.input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &mut state);
+        let end = ui.scroll;
+        assert!(end > 0);
+        for _ in 0..100 {
+            ui.input(
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+                &mut state,
             );
         }
+        assert_eq!(ui.scroll, end);
+        terminal.draw(|f| ui.draw(f, &state, &options())).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("not the machine"));
     }
 
     #[test]

@@ -43,6 +43,21 @@ pub const ALL: [Command; 17] = [
 ];
 
 impl Command {
+    pub fn group(self) -> (u8, &'static str) {
+        match self {
+            Self::Snapshots
+            | Self::Prepare
+            | Self::Discard
+            | Self::Clone
+            | Self::ClonePromote
+            | Self::Rollback => (1, "Snapshots"),
+            Self::Rescan | Self::Shell | Self::Restart | Self::PowerOff | Self::Exit => {
+                (2, "Recovery & power")
+            }
+            _ => (0, "Boot & navigation"),
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Open => "Open / Boot",

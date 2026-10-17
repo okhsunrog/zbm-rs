@@ -104,20 +104,32 @@ Restart before further boot actions; the next manager reconciles recorded
 resource intent. Blocking OS-root reads run outside the input loop, and shutdown
 does not wait indefinitely for those reads.
 
-The TUI uses a candidate list and a concise selection summary on wide consoles
-(110 columns or more). The summary shows the boot source, generation and snapshot
-clone state; full store paths and arguments stay in the I/F3 details panel.
-Smaller consoles keep the list, details shortcut and recovery controls.
-The layout uses base ANSI background colors for Linux-console compatibility,
-with cyan selection, magenta snapshot labels and explicit text for every state.
+The TUI uses a candidate list with two-line entries and a selection summary on
+consoles at least 110 columns wide and 30 rows high. Smaller consoles use a
+one-line header and keep the selected action's explanation below the list,
+including writable-clone behavior for snapshot boot. The list shows the selected
+position and result count; Page Up/Down move by the visible page size.
+Snapshot creation times use UTC; GUIDs and full paths stay in I/F3 details.
+
+The layout uses ANSI colors for Linux-console compatibility: cyan selection,
+neutral borders, magenta snapshot labels and explicit text for every state.
 The header reports the configured boot policy, not a verification result.
 Bootspec previews show the generation's actual kernel, initrd, init and arguments. Execution still
 revalidates the boot inputs. Rejected generations can be inspected but cannot boot.
 
 - `/` starts fuzzy search in the current list. Enter accepts the filter without
   booting; Esc clears it. Filters and selection survive navigation back to a list.
-- F1/`?` shows keyboard help; F2 opens all actions, including unavailable actions
-  with their reasons. Both use the same command inventory as dispatch.
+- F1/`?` shows keyboard help; F2 groups actions by navigation, snapshots and
+  recovery, with available actions first within each group. Unavailable actions
+  retain their explanations even on a 60×20 console. Both views use the command
+  inventory shared with dispatch.
+- Help and details capture Enter and letter shortcuts. Only scrolling, Esc and
+  F4/F6/F10 recovery shortcuts act while reading them. Home/End jump to the start
+  or end; the footer shows the visible line range. Closing help restores search
+  focus if it was opened while typing.
+- Footer hints follow the active mode: Enter keeps a search filter, Esc clears
+  it, and unavailable primary actions are labelled explicitly. Long notices can
+  be read in full in Details.
 - Existing Enter/B/T/C/D/R/S/N/P/Q bindings remain available outside search.
   F4 Shell, F5 Rescan, F6 Restart manager and F10 Power off provide function-key
   alternatives; recovery remains available during search and pending operations.
