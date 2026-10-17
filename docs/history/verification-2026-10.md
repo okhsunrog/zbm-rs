@@ -5,6 +5,57 @@ statements and superseded loader-owned NvPCR experiments describe their original
 runs. Use [current verification](../verification.md) and [TPM ownership](../tpm.md)
 for supported behavior.
 
+## Encrypted Arch and Framework image integration — 2026-10-17
+
+Implemented explicit passphrase unlock through zfskit's secret stdin, with an
+unprivileged UI/private broker in enforced images. Discovery does not load keys;
+already available keys allow read-only inspection. The owner policy/index now
+supports Arch's `zfs=` root selector and rejects mixed `root=`/`zfs=` arguments.
+The read-only `--linux-plans` utility and `authorize-linux.py` reuse loader planning
+for installed-system authorizations without changing kernels or initramfs bytes.
+
+Evidence lives in `~/tmp_zfs/codex_tmp/zbm-rs-readiness/`:
+
+- `arch-encrypted-live-002/arch-report.json` and
+  `arch-encrypted-snapshot-002/arch-report.json`: ordinary encrypted Arch and
+  writable snapshot-clone boot. Both exercise cancellation, wrong passphrase,
+  hidden input, target root/content, actual handoff and guest poweroff.
+- `arch-protected-live-003/arch-report.json` and
+  `arch-protected-snapshot-003/arch-report.json`: the same encrypted roots through
+  signed OVMF, enforced kernel/module signatures, IMA and CMS authorization.
+  Unauthorized arguments are refused with no loaded kernel; authorized ordinary
+  and clone roots reach the Arch multi-user proof and power off.
+- `arch-protected-recovery-004/arch-report.json`: additionally refuses a shell
+  after unlock and restarts/reconciles the manager and owned unlocked pool before
+  the argument refusal and successful Arch handoff.
+- `final-lifecycle-002/{report,lifecycle,failure-report,interface-report}.json`:
+  ordinary discovery, UI, fault isolation, timeouts and supervised recovery.
+- `module-options-check`: a Nix check of actual staged modprobe configuration and
+  fail-closed required-module startup. Nix/Rust module configuration parity passes.
+- `insyde-module`: the maintained DMI-scoped module built against Nix Linux 7.2.9;
+  modinfo confirms its ABI and `expose` parameter. The first attempt exposed its
+  dependency on newer Rust module APIs; the package now explicitly requires 7.2.
+
+The protected fixture uses loader Linux 6.18.55/ZFS 2.4.4 and Arch target
+6.18.53-1-lts. Its original disposable PE certificate expired on October 14:
+native kexec correctly rejected a new signature outside its validity window.
+A renewed disposable certificate for the same fixture key/identity allowed the
+checks to pass without weakening enforcement. The fixture signer now refuses an
+expired kernel-signing certificate before creating new signatures. Private
+signing keys never enter the guest or Git.
+
+Rust formatting, 50 workspace tests, warnings-denied all-feature Clippy,
+seven owner-tool boundary checks, Cargo configuration/input tracking and runtime
+ELF audit checks pass. The hidden-input screenshot was visually inspected.
+
+The production Framework profile was evaluated with a read-only hardware probe
+and disposable public trust inputs. The complete configured production image was
+**not** built or signed with the laptop's credentials, installed or booted. The
+module build is not physical efivarfs recovery acceptance. Physical boot/recovery,
+the target OS's v262 signed NvPCR policy and PCR15 log transport remain separate
+gates. No host pool was imported/mounted for these tests and the installed boot
+chain was not changed.
+
 ## OS-owned TPM setup and loader PCR15 measurement — 2026-10-08
 
 The loader now performs only a read-only TPM2/PCR15 readiness probe and records

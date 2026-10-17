@@ -19,6 +19,11 @@ pub enum Mode {
     Clone,
     Promote,
 }
+pub struct Policy<'a> {
+    pub encrypted: bool,
+    pub secure_vars: Option<&'a Path>,
+    pub signing_profile: Option<&'a Path>,
+}
 impl Mode {
     fn name(self) -> &'static str {
         match self {
@@ -38,7 +43,9 @@ pub fn run(
     tcg: bool,
     port: u16,
     mode: Mode,
+    policy: Policy<'_>,
 ) -> Result<()> {
+    let encrypted = policy.encrypted;
     crate::smoke::install_interrupt()?;
     let provenance: serde_json::Value =
         serde_json::from_slice(&fs::read(fixture.join("arch-fixture.json"))?)?;
@@ -57,6 +64,9 @@ pub fn run(
     if tcg {
         command.arg("--tcg");
     }
+    if let Some(vars) = policy.secure_vars {
+        command.arg("--secure-vars").arg(vars);
+    }
     let mut owned = OwnedVm(command.stdout(Stdio::null()).spawn()?);
     wait_for(90, Some(&mut owned.0), || {
         ensure!(vm::screen(run)?["event"] == "ready", "Waiting for loader");
@@ -64,9 +74,22 @@ pub fn run(
         Ok(())
     })?;
     println!("Deploying sanitized archinstall_zfs staging root onto disposable /dev/vda");
+    if encrypted {
+        vm::ssh(
+            run,
+            "printf 'fixture-passphrase' > /run/fixture-key; chmod 600 /run/fixture-key",
+        )?;
+    }
+    let encryption = if encrypted {
+        "-O encryption=aes-256-gcm -O keyformat=passphrase -O keylocation=file:///run/fixture-key"
+    } else {
+        ""
+    };
     vm::ssh(
         run,
-        "set -eu; zpool create -o cachefile=none -O compression=lz4 -O mountpoint=none zbm_arch /dev/vda; zfs create -o mountpoint=none -o canmount=off zbm_arch/arch0; zfs create -o mountpoint=/ -o canmount=noauto -o org.zfsbootmenu:commandline='spl.spl_hostid=0x00bab10c zswap.enabled=0 rw' -o org.zfsbootmenu:rootprefix=zfs= zbm_arch/arch0/root; zpool set bootfs=zbm_arch/arch0/root zbm_arch; mkdir -p /arch-root; mount -t zfs zbm_arch/arch0/root /arch-root",
+        &format!(
+            "set -eu; zpool create -o cachefile=none -O compression=lz4 -O mountpoint=none {encryption} zbm_arch /dev/vda; zfs create -o mountpoint=none -o canmount=off zbm_arch/arch0; zfs create -o mountpoint=/ -o canmount=noauto -o org.zfsbootmenu:commandline='spl.spl_hostid=0x00bab10c zswap.enabled=0 rw' -o org.zfsbootmenu:rootprefix=zfs= zbm_arch/arch0/root; zpool set bootfs=zbm_arch/arch0/root zbm_arch; mkdir -p /arch-root; mount -t zfs zbm_arch/arch0/root /arch-root"
+        ),
     )?;
     vm::ssh_timeout(run, "tar -xf /dev/vdb -C /arch-root", 900)?;
     // Mirror the repository's deploy-zfs-be.sh mkinitcpio path. Host identity,
@@ -75,6 +98,13 @@ pub fn run(
         run,
         "set -eu; mkdir -p /arch-root/boot /arch-root/etc/zfs /arch-root/dev /arch-root/proc /arch-root/sys /arch-root/run /arch-root/tmp /arch-root/root; cp /arch-root/usr/lib/modules/6.18.53-1-lts/vmlinuz /arch-root/boot/vmlinuz-linux-lts; printf '\\014\\261\\272\\000' > /arch-root/etc/hostid; printf 'zbm_arch/arch0/root / zfs defaults 0 0\\n' > /arch-root/etc/fstab; rm -f /arch-root/etc/mkinitcpio.conf.d/archiso.conf; printf 'FILES=(/etc/hostid)\\nHOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block zfs filesystems)\\nCOMPRESSION=zstd\\nCOMPRESSION_OPTIONS=(-T1 -3)\\n' > /arch-root/etc/mkinitcpio.conf.d/zfs-root.conf; mount --bind /dev /arch-root/dev; mount --bind /proc /arch-root/proc; mount --bind /sys /arch-root/sys",
     )?;
+    if encrypted {
+        // Only the disposable target initramfs receives its synthetic key.
+        vm::ssh(
+            run,
+            "mkdir -p /arch-root/etc/zfs; cp /run/fixture-key /arch-root/etc/zfs/fixture.key; zfs set keylocation=file:///etc/zfs/fixture.key zbm_arch; printf 'FILES+=(/etc/zfs/fixture.key)\\n' >> /arch-root/etc/mkinitcpio.conf.d/zfs-root.conf",
+        )?;
+    }
     let build = vm::ssh_timeout(
         run,
         "chroot /arch-root /usr/bin/mkinitcpio -k 6.18.53-1-lts -g /boot/initramfs-linux-lts.img",
@@ -82,6 +112,9 @@ pub fn run(
     )?;
     fs::write(run.join("arch-initramfs-build.log"), build)?;
     install_proof(run, mode)?;
+    if let Some(profile) = policy.signing_profile {
+        authorize_fixture(run, profile)?;
+    }
     let inputs = vm::ssh(
         run,
         "set -eu; chroot /arch-root /usr/bin/lsinitcpio /boot/initramfs-linux-lts.img | grep -E 'hooks/zfs|zfs.ko|etc/hostid'; cat /arch-root/usr/lib/os-release; ls -l /arch-root/boot; test ! -e /arch-root/nix/var/nix/profiles/system; echo snapshot-original > /arch-root/arch-proof; zfs snapshot zbm_arch/arch0/root@known-good; echo live-changed > /arch-root/arch-proof; zfs snapshot zbm_arch/arch0/root@newer; umount /arch-root/sys; umount /arch-root/proc; umount /arch-root/dev; umount /arch-root; zpool export zbm_arch",
@@ -95,6 +128,9 @@ pub fn run(
     vm::key(run, "r")?;
     event(run, "ready")?;
     vm::key(run, "ret")?;
+    if encrypted {
+        unlock_checks(run)?;
+    }
     let environments = event(run, "boot-environments")?;
     let be = &environments["state"]["environments"][0];
     ensure!(
@@ -108,6 +144,63 @@ pub fn run(
         "Linux target must not invent a NixOS generation"
     );
     vm::screenshot(run, &run.join("arch-environment.png"))?;
+    if policy.secure_vars.is_some() {
+        ensure!(
+            environments["config"]["security"]["mode"] == "enforce",
+            "Protected Arch requires enforced image policy"
+        );
+        let pid = manager_pid(run)?;
+        vm::ssh(
+            run,
+            &format!("test \"$(awk '/^Uid:/{{print $2}}' /proc/{pid}/status)\" = 65534"),
+        )?;
+        vm::key(run, "f4")?;
+        let recovery = event(run, "command-disabled")?;
+        ensure!(
+            recovery["state"]["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("shell")),
+            "Unlock must not enable an unrestricted recovery shell"
+        );
+        vm::key(run, "f6")?;
+        event(run, "ready")?;
+        ensure!(
+            manager_pid(run)? != pid,
+            "Manager did not restart after unlock"
+        );
+        vm::key(run, "ret")?;
+        let reconciled = event(run, "boot-environments")?;
+        ensure!(
+            reconciled["state"]["environments"][0]["properties"]["keystatus"] == "available",
+            "Restart must reconcile the owned unlocked pool"
+        );
+        vm::key(run, "ret")?;
+        event(run, "boot-targets")?;
+        vm::ssh(
+            run,
+            &format!(
+                "zfs set org.zfsbootmenu:commandline='%{{parent}} zbm.arch-mode={} unauthorized=1' zbm_arch/arch0/root",
+                mode.name()
+            ),
+        )?;
+        vm::key(run, "ret")?;
+        let refused = event(run, "boot-error")?;
+        ensure!(
+            refused["state"]["error"]
+                .as_str()
+                .is_some_and(|s| s.contains("authorization") || s.contains("authorized")),
+            "Expected argument authorization refusal: {refused}"
+        );
+        vm::ssh(run, "test \"$(cat /sys/kernel/kexec_loaded)\" = 0")?;
+        vm::ssh(
+            run,
+            &format!(
+                "zfs set org.zfsbootmenu:commandline='%{{parent}} zbm.arch-mode={}' zbm_arch/arch0/root",
+                mode.name()
+            ),
+        )?;
+        vm::key(run, "b")?;
+    }
     if !matches!(mode, Mode::Live) {
         vm::key(run, "t")?;
         let snapshots = event(run, "snapshots")?;
@@ -187,7 +280,7 @@ pub fn run(
     fs::write(
         run.join("arch-report.json"),
         serde_json::to_vec_pretty(
-            &json!({ "passed": true, "mode":mode.name(), "arch_boot_supported":true, "arch_boot_attempted":true, "proof":proof, "fixture":provenance, "checks":["real-Arch-root-and-ZFS-initramfs", "ZBM-kernel-pair", "no-NixOS-generation-required", "parent-KCL-expansion", "conflicting-root-arguments-suppressed", "real-keyboard-and-details", "exact-root-and-state", "kexec_file_load", "multi-user", "guest-poweroff"] }),
+            &json!({ "passed": true, "mode":mode.name(), "encrypted":encrypted, "enforced":policy.secure_vars.is_some(), "arch_boot_supported":true, "arch_boot_attempted":true, "proof":proof, "fixture":provenance, "checks":["real-Arch-root-and-ZFS-initramfs", "ZBM-kernel-pair", "no-NixOS-generation-required", "parent-KCL-expansion", "conflicting-root-arguments-suppressed", "real-keyboard-and-details", "exact-root-and-state", "kexec_file_load", "multi-user", "guest-poweroff"] }),
         )?,
     )?;
     println!("Arch {} boot acceptance passed", mode.name());
@@ -203,6 +296,65 @@ fn event(run: &Path, expected: &str) -> Result<serde_json::Value> {
         );
         Ok(state)
     })
+}
+
+fn authorize_fixture(run: &Path, profile: &Path) -> Result<()> {
+    let inputs = run.join("boot-inputs");
+    fs::create_dir(&inputs)?;
+    let plans = vm::ssh(
+        run,
+        "/bin/zbm-rs --linux-plans /arch-root zbm_arch/arch0/root /etc/zbm-rs/config.json",
+    )?;
+    fs::write(inputs.join("plans.json"), plans)?;
+    fs::write(
+        inputs.join("kernel"),
+        vm::ssh_bytes(run, "cat /arch-root/boot/vmlinuz-linux-lts", 120)?,
+    )?;
+    fs::write(
+        inputs.join("initrd"),
+        vm::ssh_bytes(run, "cat /arch-root/boot/initramfs-linux-lts.img", 120)?,
+    )?;
+    ensure!(
+        Command::new("uv")
+            .args([
+                "run",
+                "--no-project",
+                "python",
+                "xtask/fixtures/authorize_arch.py"
+            ])
+            .arg(&inputs)
+            .arg(profile)
+            .status()?
+            .success(),
+        "Disposable Arch authorization failed"
+    );
+    vm::write_file(
+        run,
+        "/arch-root/boot/vmlinuz-linux-lts",
+        &fs::read(inputs.join("kernel.signed"))?,
+    )?;
+    for directory in fs::read_dir(inputs.join("authorizations"))? {
+        let directory = directory?.path();
+        let artifact = directory.file_name().unwrap().to_str().unwrap();
+        ensure!(
+            artifact.len() == 64 && artifact.bytes().all(|b| b.is_ascii_hexdigit()),
+            "Invalid fixture artifact ID"
+        );
+        vm::ssh(
+            run,
+            &format!("mkdir -p /arch-root/boot/zbm-rs/authorizations/{artifact}"),
+        )?;
+        for file in fs::read_dir(&directory)? {
+            let file = file?.path();
+            let name = file.file_name().unwrap().to_str().unwrap();
+            vm::write_file(
+                run,
+                &format!("/arch-root/boot/zbm-rs/authorizations/{artifact}/{name}"),
+                &fs::read(&file)?,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn rollback_checks(run: &Path) -> Result<()> {
@@ -407,5 +559,44 @@ PROOF
 chmod 755 /arch-root/usr/local/bin/zbm-arch-proof
 "###,
     )?;
+    Ok(())
+}
+
+/// The only passphrases here belong to fresh disposable pools, never the host.
+fn unlock_checks(run: &Path) -> Result<()> {
+    let locked = event(run, "boot-environments")?;
+    ensure!(
+        locked["state"]["environments"][0]["properties"]["keystatus"] == "unavailable",
+        "Expected locked BE: {locked}"
+    );
+    vm::ssh(run, "rm -f /run/fixture-key; test ! -e /run/fixture-key")?;
+    vm::key(run, "ret")?;
+    event(run, "unlock-prompt")?;
+    vm::key(run, "esc")?;
+    event(run, "unlock-cancelled")?;
+    vm::ssh(
+        run,
+        "test \"$(zfs get -H -o value keystatus zbm_arch)\" = unavailable",
+    )?;
+    vm::key(run, "ret")?;
+    event(run, "unlock-prompt")?;
+    for key in ["w", "r", "o", "n", "g", "ret"] {
+        vm::key(run, key)?;
+    }
+    event(run, "unlock-error")?;
+    vm::ssh(
+        run,
+        "test \"$(zfs get -H -o value keystatus zbm_arch)\" = unavailable",
+    )?;
+    vm::key(run, "ret")?;
+    event(run, "unlock-prompt")?;
+    for key in [
+        "f", "i", "x", "t", "u", "r", "e", "minus", "p", "a", "s", "s", "p", "h", "r", "a", "s",
+        "e",
+    ] {
+        vm::key(run, key)?;
+    }
+    vm::screenshot(run, &run.join("hidden-unlock.png"))?;
+    vm::key(run, "ret")?;
     Ok(())
 }

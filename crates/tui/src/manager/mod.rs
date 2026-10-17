@@ -235,6 +235,26 @@ async fn tui(
                 let mut action = None;
                 let mut observed = None;
                 match ui.input(key, &mut state) {
+                    Input::Unlock(passphrase) => {
+                        if let Some(reason) = ui.reason(UiCommand::Open, &state, options) {
+                            state.error = Some(reason);
+                            observed = Some("command-disabled");
+                        } else if let Some(environment) =
+                            state.environments.get(state.selected_environment)
+                            && environment.properties.can_unlock()
+                        {
+                            action = Some(Action::Unlock {
+                                pool: state.pools[state.selected].clone(),
+                                dataset: environment.dataset.clone(),
+                                passphrase,
+                                readonly: matches!(
+                                    options.config.zfs.import_policy,
+                                    crate::config::ImportPolicy::ReadOnly
+                                ),
+                                limit: options.config.nixos.generation_limit,
+                            });
+                        }
+                    }
                     Input::Ignored => {}
                     Input::Changed(event) => observed = Some(event),
                     Input::Command(command, confirmed) => {
@@ -355,6 +375,13 @@ async fn tui(
                                     } else if !state.environments.is_empty() {
                                         let environment =
                                             &state.environments[state.selected_environment];
+                                        if environment.properties.can_unlock() {
+                                            ui.open_panel(Panel::Unlock);
+                                            state.error = None;
+                                            refresh(terminal, &mut state, options, &mut ui)?;
+                                            emit(options, "unlock-prompt", &state, &ui)?;
+                                            continue;
+                                        }
                                         state.error = environment.unavailable.clone();
                                         state.targets = environment.targets.clone();
                                         state.rejected_generations =

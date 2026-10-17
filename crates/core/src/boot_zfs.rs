@@ -177,7 +177,8 @@ async fn read_targets(
     .map_err(failure)?
 }
 
-async fn properties(zfs: &Zfs, dataset: &str) -> io::Result<BootProperties> {
+/// Read effective properties and expand inherited command lines; no ZFS effects.
+pub async fn properties(zfs: &Zfs, dataset: &str) -> io::Result<BootProperties> {
     let entries = zfskit::dataset::get(
         zfs.command_runner(),
         &GetOptions {
@@ -266,6 +267,64 @@ pub async fn refresh_target(zfs: &Zfs, target: &boot::BootTarget) -> io::Result<
         .ok_or_else(|| failure("Selected Linux kernel/initramfs pair changed"))?;
     refreshed.snapshot = target.snapshot.clone();
     Ok(refreshed)
+}
+
+/// Explicit selected-BE unlock only. Never consult an on-disk keylocation,
+/// recurse into other encryption roots, or change persistent ZFS properties.
+pub async fn unlock_environment(
+    zfs: &Zfs,
+    pool: &Pool,
+    dataset: &str,
+    passphrase: &[u8],
+) -> io::Result<()> {
+    load(pool)?;
+    if !managed_pools(zfs).await?.iter().any(|p| p == pool) {
+        return Err(failure("Unlock requires an owned imported pool"));
+    }
+    zfskit::names::DatasetName::parse(dataset).map_err(failure)?;
+    if dataset != pool.name && !dataset.starts_with(&format!("{}/", pool.name)) {
+        return Err(failure("Unlock dataset is outside selected pool"));
+    }
+    let properties = properties(zfs, dataset).await?;
+    if !properties.visible() || properties.canmount == "off" {
+        return Err(failure(
+            "Unlock requires a visible mountable boot environment",
+        ));
+    }
+    if !properties.locked() {
+        return Ok(());
+    }
+    if !properties.can_unlock() {
+        return Err(failure(
+            "Interactive unlock requires a passphrase encryption root",
+        ));
+    }
+    if passphrase.is_empty()
+        || passphrase.len() > 1024
+        || passphrase
+            .iter()
+            .any(|byte| matches!(byte, 0 | b'\n' | b'\r'))
+    {
+        return Err(failure("Invalid passphrase length or control bytes"));
+    }
+    let root = properties.encryptionroot.as_deref().unwrap();
+    zfskit::names::DatasetName::parse(root).map_err(failure)?;
+    if !(dataset == root || dataset.starts_with(&format!("{root}/")))
+        || !(root == pool.name || root.starts_with(&format!("{}/", pool.name)))
+    {
+        return Err(failure(
+            "Encryption root is outside selected dataset ancestry",
+        ));
+    }
+    // OpenZFS accepts piped passphrases with EOF. zfskit marks stdin secret;
+    // it never puts the passphrase in argv or invokes an interactive terminal.
+    zfskit::encryption::load_key_with_passphrase(zfs.command_runner(), root, passphrase)
+        .await
+        .map_err(failure)?;
+    if self::properties(zfs, dataset).await?.locked() {
+        return Err(failure("Encryption key is still unavailable after unlock"));
+    }
+    Ok(())
 }
 pub async fn environments(
     zfs: &Zfs,

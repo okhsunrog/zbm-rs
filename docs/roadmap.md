@@ -8,6 +8,7 @@ listed in [verification](verification.md); design details live in
 ## Working features
 
 - Generic Linux kernel/initramfs discovery and ordinary ZFS-root boot.
+- Explicit hidden passphrase unlock, including encrypted Arch root and snapshot-clone boot.
 - NixOS Bootspec generation selection with `/nix` in the selected root.
 - Snapshot inspection, owned writable boot clones, and ordinary-mode rollback,
   persistent clones and promotion.
@@ -15,23 +16,22 @@ listed in [verification](verification.md); design details live in
 - PID 1 supervision, console restoration and bounded recovery after failure.
 - Reproducible Nix images, portable/host-only profiles and a persistent VM harness.
 - Enforced boot inputs and protected recovery, with signed OVMF acceptance for
-  synthetic targets, installed NixOS roots and authorized snapshot clones.
+  synthetic targets, installed NixOS/Arch roots and authorized snapshot clones.
 - Read-only TPM readiness and verified prepared-target measurement in PCR15.
+- Explicit Framework/Insyde recovery-module image profile; physical acceptance remains separate.
 
 These features have source and VM validation. They do not establish physical
 deployment acceptance or full ZFSBootMenu feature parity.
 
 ## Secure Boot and TPM milestone
 
-The enforced NixOS path is implemented. Remaining work includes:
+The enforced NixOS and Arch paths are implemented. Remaining work includes:
 
-- Generic-Linux verified boot through the same authorization boundary.
-- Encrypted-root passphrase UI and protected recovery on that path.
 - Automated embedded-certificate inventory and signing-profile checks.
 - PCR15 event/plan transport across kexec for independent replay in the OS.
 - OS-owned signed NvPCR policy integration with a systemd v262 target.
 - Physical Secure Boot, trusted snapshot boot and recovery on the intended hardware.
-- DMI-scoped Insyde EFI-variable enumeration recovery where required.
+- Physical acceptance of DMI-scoped Insyde EFI-variable enumeration recovery.
 
 The loader does not initialize SRK/NvPCR objects or extend OS phases in PCR11.
 Those operations belong to the selected OS. See [TPM ownership](tpm.md),
@@ -40,7 +40,7 @@ Those operations belong to the selected OS. See [TPM ownership](tpm.md),
 
 ## Boot support and release work
 
-- Interactive encrypted boot-environment unlock and key-source handling.
+- Automatic key-source handling and raw/hex-key input beyond passphrase unlock.
 - NixOS specialisations, separate `/nix` layouts and a defined `initrdSecrets` flow.
 - Locked/degraded pool recovery and clear diagnostics for unsupported layouts.
 - Explicit autoboot policy and timeout behavior.

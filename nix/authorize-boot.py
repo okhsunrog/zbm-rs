@@ -15,9 +15,9 @@ def argument_id(arguments):
     for argument in arguments:
         if not argument or len(argument.encode()) > 4096 or "\0" in argument:
             raise ValueError("Invalid authorization lookup argument")
-        if argument.startswith("root="):
+        if argument.startswith(("root=", "zfs=")):
             roots += 1
-            argument = next(prefix for prefix in ("root=ZFS=", "root=zfs:", "root=") if argument.startswith(prefix))
+            argument = next(prefix for prefix in ("root=ZFS=", "root=zfs:", "root=", "zfs=") if argument.startswith(prefix))
         token = argument.encode()
         digest.update(len(token).to_bytes(4, "big"))
         digest.update(token)
@@ -47,7 +47,7 @@ def main():
     for name in ("kernel", "initramfs", "ima-signature", "arguments", "authority-key", "authority-cert", "output"):
         parser.add_argument(f"--{name}", required=True, type=Path)
     parser.add_argument("--dataset", required=True)
-    parser.add_argument("--root-prefix", choices=("root=ZFS=", "root=zfs:", "root="), default="root=ZFS=")
+    parser.add_argument("--root-prefix", choices=("root=ZFS=", "root=zfs:", "root=", "zfs="), default="root=ZFS=")
     parser.add_argument("--allow-snapshot-clones", action="store_true")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]*(/[A-Za-z0-9_.:-]+)*", args.dataset):
@@ -56,7 +56,7 @@ def main():
     if not isinstance(arguments, list) or not 1 <= len(arguments) <= 65 or any(
             not isinstance(value, str) or not value or len(value.encode()) > 4096 or "\0" in value for value in arguments):
         raise ValueError("Expected bounded ordered argument array")
-    roots = [index for index, value in enumerate(arguments) if value.startswith("root=")]
+    roots = [index for index, value in enumerate(arguments) if value.startswith(("root=", "zfs="))]
     if len(roots) != 1 or arguments[roots[0]] != args.root_prefix + args.dataset:
         raise ValueError("One typed root must match the authorized source dataset")
     if args.root_prefix == "root=" and "rootfstype=zfs" not in arguments:

@@ -2,6 +2,7 @@
 , zfsUserspace ? (import ./lean-userspace.nix { pkgs = runtimePkgs; }).zfs
 , testProfile ? false, profile ? "portable", hardwareManifest ? null
 , extraModules ? [], forcedModules ? [], loaderConfig ? null
+, extraModulePackages ? (_: []), moduleOptions ? {}
 , kernelPolicy ? "validate", kernelTrustedCertificates ? []
 , targetAuthorities ? [], imaCertificate ? null
 , tpmProvider ? pkgs.systemd
@@ -53,7 +54,7 @@ let
   imaPolicy = pkgs.writeText "zbm-ima-policy" ''
     appraise func=KEXEC_INITRAMFS_CHECK appraise_type=imasig
   '';
-  moduleTree = pkgs.aggregateModules [ kernel.modules zfsModule ];
+  moduleTree = pkgs.aggregateModules ([ kernel.modules zfsModule ] ++ extraModulePackages selectedKernelPackages);
   modules = pkgs.makeModulesClosure {
     kernel = moduleTree;
     firmware = pkgs.linux-firmware;
@@ -123,7 +124,7 @@ let
   ];
   setup = pkgs.writeText "setup.sh" (lib.replaceStrings
     [ "# NIX_FORCED_MODULES" ]
-    [ (lib.concatMapStringsSep "\n" (name: "/usr/bin/modprobe " + lib.escapeShellArg name) (lib.remove "zfs" forcedModules)) ]
+    [ (lib.concatMapStringsSep "\n" (name: "/usr/bin/modprobe " + lib.escapeShellArg name + " || exit 1") (lib.remove "zfs" forcedModules)) ]
     (builtins.readFile (source + "/boot/setup.sh")));
   runtimeLibc = runtimePkgs.stdenv.hostPlatform.libc;
   runtime = pkgs.runCommand "zbm-runtime-${profile}" {
@@ -138,6 +139,14 @@ let
     ln -s usr/sbin root/sbin
     cp -r ${modules}/lib/. root/usr/lib/
     cp ${setup} root/etc/zbm-rs/setup.sh
+    ${lib.optionalString (moduleOptions != {}) ''
+      mkdir -p root/etc/modprobe.d
+      cp ${pkgs.writeText "zbm-module-options.conf" (lib.concatStringsSep "\n"
+        (lib.mapAttrsToList (name: options:
+          assert lib.assertMsg (builtins.match "[a-zA-Z0-9_-]+" name != null && builtins.match "[^\n\r]*" options != null)
+            "Module options require a module name and a single line";
+          "options ${name} ${options}") moduleOptions) + "\n")} root/etc/modprobe.d/zbm-rs.conf
+    ''}
     ${lib.optionalString tpmEnabled ''
       printf 'ID=zbm-rs\n' > root/etc/initrd-release
     ''}

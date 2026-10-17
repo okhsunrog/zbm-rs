@@ -17,6 +17,13 @@ const DEADLINE: Duration = Duration::from_secs(30);
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Action {
+    Unlock {
+        pool: Pool,
+        dataset: String,
+        passphrase: zeroize::Zeroizing<Vec<u8>>,
+        readonly: bool,
+        limit: u32,
+    },
     Rollback {
         pool: Pool,
         source: SnapshotSource,
@@ -81,6 +88,7 @@ impl Action {
     }
     fn description(&self) -> &'static str {
         match self {
+            Self::Unlock { .. } => "Unlocking selected boot environment",
             Self::Rollback { .. } => "Rolling back selected dataset",
             Self::Clone { .. } => "Creating persistent boot environment",
             Self::Environments { .. } => "Inspecting selected pool",
@@ -94,6 +102,7 @@ impl Action {
 
     fn error_event(&self) -> &'static str {
         match self {
+            Self::Unlock { .. } => "unlock-error",
             Self::Rollback { .. } => "rollback-error",
             Self::Clone { .. } => "clone-error",
             Self::Environments { .. } => "boot-environments",
@@ -136,6 +145,17 @@ impl Action {
             .await??;
         }
         Ok(match self {
+            Self::Unlock {
+                pool,
+                dataset,
+                passphrase,
+                readonly,
+                limit,
+            } => {
+                boot_zfs::unlock_environment(&zfs, &pool, &dataset, &passphrase).await?;
+                drop(passphrase);
+                Outcome::Environments(boot_zfs::environments(&zfs, &pool, readonly, limit).await?)
+            }
             Self::Rollback {
                 pool,
                 source,

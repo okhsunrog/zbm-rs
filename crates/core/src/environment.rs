@@ -8,6 +8,9 @@ pub const PROPERTIES: &[&str] = &[
     "mountpoint",
     "canmount",
     "encryption",
+    "encryptionroot",
+    "keystatus",
+    "keyformat",
     "org.zfsbootmenu:active",
     "org.zfsbootmenu:commandline",
     "org.zfsbootmenu:kernel",
@@ -30,6 +33,9 @@ pub struct BootProperties {
     pub mountpoint: String,
     pub canmount: String,
     pub encryption: String,
+    pub encryptionroot: Option<String>,
+    pub keystatus: String,
+    pub keyformat: String,
     pub active: String,
     // Retain these for future generic Linux support. Bootspec remains authoritative.
     pub commandline: Option<String>,
@@ -55,6 +61,9 @@ impl BootProperties {
             mountpoint: required("mountpoint")?,
             canmount: required("canmount")?,
             encryption: required("encryption")?,
+            encryptionroot: optional("encryptionroot"),
+            keystatus: required("keystatus")?,
+            keyformat: required("keyformat")?,
             active: required("org.zfsbootmenu:active")?,
             commandline: optional("org.zfsbootmenu:commandline"),
             kernel: optional("org.zfsbootmenu:kernel"),
@@ -70,11 +79,26 @@ impl BootProperties {
     pub fn unavailable(&self) -> Option<String> {
         if self.canmount == "off" {
             Some("canmount=off; dataset is not mountable".into())
-        } else if self.encryption != "off" {
-            Some("Encrypted boot environments are not supported yet".into())
+        } else if self.locked() {
+            Some(if self.can_unlock() {
+                "Encryption key is unavailable; press Enter to unlock with a passphrase"
+            } else {
+                "Encryption key is unavailable; interactive unlock requires keyformat=passphrase"
+            }.into())
         } else {
             None
         }
+    }
+
+    pub fn locked(&self) -> bool {
+        self.encryption != "off" && self.keystatus != "available"
+    }
+
+    pub fn can_unlock(&self) -> bool {
+        self.canmount != "off"
+            && self.locked()
+            && self.keyformat == "passphrase"
+            && self.encryptionroot.is_some()
     }
 }
 
@@ -86,6 +110,9 @@ mod tests {
             mountpoint: mountpoint.into(),
             canmount: "noauto".into(),
             encryption: "off".into(),
+            encryptionroot: None,
+            keystatus: "-".into(),
+            keyformat: "-".into(),
             active: active.into(),
             commandline: None,
             kernel: None,
@@ -103,7 +130,13 @@ mod tests {
         assert!(properties("/", "-").unavailable().is_none());
         let mut encrypted = properties("/", "on");
         encrypted.encryption = "aes-256-gcm".into();
-        assert!(encrypted.unavailable().unwrap().contains("Encrypted"));
+        assert!(encrypted.unavailable().unwrap().contains("Encryption"));
+        encrypted.encryptionroot = Some("tank".into());
+        encrypted.keyformat = "passphrase".into();
+        assert!(encrypted.can_unlock());
+        encrypted.keystatus = "available".into();
+        assert!(encrypted.unavailable().is_none());
+        assert!(!encrypted.can_unlock());
         encrypted.canmount = "off".into();
         assert!(encrypted.unavailable().unwrap().contains("canmount"));
     }
@@ -115,6 +148,8 @@ mod tests {
             ("mountpoint", "legacy"),
             ("canmount", "noauto"),
             ("encryption", "off"),
+            ("keystatus", "-"),
+            ("keyformat", "-"),
             ("org.zfsbootmenu:active", "on"),
             ("org.zfsbootmenu:commandline", "quiet debug"),
         ] {

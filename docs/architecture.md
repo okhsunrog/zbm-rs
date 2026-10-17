@@ -3,9 +3,13 @@
 Boot environment discovery reads effective ZFS properties through zfskit after
 an explicit selected-pool import. Visibility uses mountpoint and inherited
 org.zfsbootmenu:active, with bootfs selecting the default environment. Only
-mountable unencrypted candidates are mounted read-only under the ownership
-ledger. Non-boot filesystems are left alone. The TUI separates pools, boot
-environments, Linux kernel pairs and NixOS generations. Boot targets have an
+mountable candidates with available encryption keys are mounted read-only under the ownership
+ledger. Non-boot filesystems are left alone.
+Locked passphrase environments offer explicit hidden-input unlock through the
+broker, with pool/encryption-root validation and secret stdin. No discovery path
+loads keys or consults keylocations automatically. The selected OS still owns
+its own unlock after kexec; loaded keys are not transferred across kernels.
+The TUI separates pools, boot environments, Linux kernel pairs and NixOS generations. Boot targets have an
 explicit Linux or NixOS backend; generation, toplevel and init are optional for
 Linux. ZBM kernel/commandline/rootprefix properties drive Linux selection and
 root arguments; Bootspec remains authoritative for NixOS.

@@ -90,6 +90,8 @@ All paths below are relative to `programs.zbm-rs`:
 | `settings.security.targetAuthorities` | Public certificate list; nonempty for `enforce` | Authorities allowed to sign BootAuthorization; copied into the immutable trust store. |
 | `image.kernelPolicy` | `validate`; `validate` or `configure` | Validate the selected final loader kernel, or build a separate configured loader-kernel variant. |
 | `image.kernelPackages` | Module defaults to `boot.kernelPackages` | Explicit loader kernel/ZFS package set; independent override does not change the host kernel. |
+| `image.extraModulePackages` | Function returning `[]` | Build external modules from the final loader kernelPackages; do not reuse host module binaries. |
+| `image.moduleOptions` | `{}` | Immutable module-name to single-line modprobe options map. Required forced modules stop bootstrap on failure. |
 | `image.kernelTrustedCertificates` | Public certificate list, sufficient for selected policy | Required target-kernel/module/IMA certificate trust; validate actual kernel integration. |
 | `image.imaCertificate` | Public certificate required for initial `enforce` profile | Authenticated certificate used for target-initramfs appraisal. |
 | `settings.security.tpm.policy` | `off`; `optional` or `required` | Read-only TPM2/PCR15 readiness and prepared-target measurement policy; never weakens verified boot. |

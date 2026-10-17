@@ -344,6 +344,51 @@ pub fn ssh_timeout(run: &Path, command: &str, seconds: u32) -> Result<String> {
     Ok(String::from_utf8(ssh_bytes(run, command, seconds)?)?)
 }
 pub fn ssh_bytes(run: &Path, command: &str, seconds: u32) -> Result<Vec<u8>> {
+    let output = ssh_process(run, command, seconds)?.output()?;
+    ensure!(
+        output.status.success(),
+        "Guest SSH failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(output.stdout)
+}
+
+/// Upload only an explicit fixture artifact; signing keys never enter a guest.
+pub fn write_file(run: &Path, path: &str, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    ensure!(
+        path.starts_with('/')
+            && path
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"/_-.".contains(&b))
+            && !path.split('/').any(|part| part == ".."),
+        "Invalid guest fixture path"
+    );
+    let mut child = ssh_process(run, &format!("cat > '{path}'"), 120)?
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let written = child
+        .stdin
+        .take()
+        .context("Missing upload pipe")?
+        .write_all(bytes);
+    if written.is_err() {
+        let _ = child.kill();
+    }
+    let output = child.wait_with_output()?;
+    written?;
+    ensure!(
+        output.status.success(),
+        "Fixture upload failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+fn ssh_process(run: &Path, command: &str, seconds: u32) -> Result<Command> {
     let info: Value = serde_json::from_slice(&fs::read(run.join("connection.json"))?)?;
     if info["test_ssh"] != true {
         bail!("SSH unavailable: rebuild with cargo xtask image --test-ssh");
@@ -352,7 +397,8 @@ pub fn ssh_bytes(run: &Path, command: &str, seconds: u32) -> Result<Vec<u8>> {
         "timeout {seconds} /bin/sh -c '{}'",
         command.replace('\'', "'\\''")
     );
-    let output = Command::new("timeout")
+    let mut process = Command::new("timeout");
+    process
         .args(["--kill-after=2", &(seconds + 5).to_string(), "ssh"])
         .args([
             "-F",
@@ -380,15 +426,8 @@ pub fn ssh_bytes(run: &Path, command: &str, seconds: u32) -> Result<Vec<u8>> {
                 .context("Invalid port")?
                 .to_string(),
         )
-        .args(["root@127.0.0.1", &bounded])
-        .output()?;
-    ensure!(
-        output.status.success(),
-        "Guest SSH failed ({}): {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(output.stdout)
+        .args(["root@127.0.0.1", &bounded]);
+    Ok(process)
 }
 
 /// Read the actual Linux VT, independent of application instrumentation and GPU.

@@ -23,11 +23,15 @@ jobs:
         working-directory: zbm-rs
       - run: nix develop -c uv run --no-project nix/check-runtime-audit.py
         working-directory: zbm-rs
+      - run: nix develop -c uv run --no-project nix/check-security-tools.py
+        working-directory: zbm-rs
       - run: nix build .#checks.x86_64-linux.hardware-probe --out-link result-hardware-probe
         working-directory: zbm-rs
       - run: nix build .#zbm-rs-efi .#checks.x86_64-linux.image-size --out-link result
         working-directory: zbm-rs
       - run: nix build .#checks.x86_64-linux.module-config --out-link result-module-config
+        working-directory: zbm-rs
+      - run: nix build .#checks.x86_64-linux.module-options --out-link result-module-options
         working-directory: zbm-rs
       - run: nix build .#zbm-rs-efi-test --out-link result-test
         working-directory: zbm-rs

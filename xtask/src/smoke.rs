@@ -214,7 +214,9 @@ pub fn run(
             ensure!(
                 environments[1]["unavailable"]
                     .as_str()
-                    .is_some_and(|e| e.contains("Encrypted")),
+                    .is_some_and(|e| e.contains("Encryption key is unavailable"))
+                    && environments[1]["properties"]["keystatus"] == "unavailable"
+                    && environments[1]["properties"]["keyformat"] == "passphrase",
                 "Missing encrypted-root diagnostic"
             );
             fs::write(

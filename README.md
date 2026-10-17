@@ -15,9 +15,9 @@
 ---
 
 > [!NOTE]
-> Enforced NixOS root and snapshot-clone boot have passed OVMF Secure Boot tests.
-> Physical Secure Boot acceptance, generic-Linux verified boot and interactive
-> encrypted-root unlock are still pending. Default images are unsigned and use
+> Enforced NixOS and passphrase-encrypted Arch root/snapshot-clone boot have passed OVMF Secure Boot tests.
+> Physical Secure Boot acceptance is still pending. Passphrase-encrypted Arch
+> root and snapshot-clone boot have disposable VM coverage. Default images are unsigned and use
 > `security.mode = "off"`. See [tested scope](docs/verification.md).
 
 ## Overview
@@ -71,7 +71,7 @@ and [signing workflow](docs/security-testing.md).
 An enabled TPM policy measures the verified prepared boot plan in PCR15 after
 successful input loading. The event records preparation, not successful OS
 execution. SRK/NvPCR setup and OS phase measurements belong to the selected OS.
-Disk unlock, remote attestation, rollback resistance and PCR15 log transport into
+TPM-based disk unlock, remote attestation, rollback resistance and PCR15 log transport into
 the selected OS are not implemented. See [TPM ownership and evidence](docs/tpm.md).
 
 ## Relationship to ZFSBootMenu
@@ -118,6 +118,7 @@ for fixtures and VM controls.
 - [TPM measurements](docs/tpm.md)
 - [Boot environments, snapshots and controls](docs/usage.md)
 - [Building](docs/build.md) and [configuration](docs/configuration.md)
+- [Arch and Framework deployment](docs/arch-deployment.md)
 - [Architecture](docs/architecture.md) and [development](docs/development.md)
 - [Verification](docs/verification.md) and [roadmap](docs/roadmap.md)
 

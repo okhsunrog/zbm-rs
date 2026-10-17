@@ -39,6 +39,13 @@ enum Task {
     },
     /// Boot real Arch roots, snapshot clones and rolled-back datasets.
     ArchSmoke {
+        #[arg(long, requires = "signing_profile")]
+        secure_vars: Option<PathBuf>,
+        #[arg(long, requires = "secure_vars")]
+        signing_profile: Option<PathBuf>,
+        /// Exercise an encrypted root using only a synthetic fixture key.
+        #[arg(long)]
+        encrypted: bool,
         #[arg(long)]
         run: PathBuf,
         #[arg(long)]
@@ -156,13 +163,28 @@ fn main() -> Result<()> {
             port,
         } => security_smoke::run(&run, &image, &secure_vars, port, tcg, swtpm, expect_tpm)?,
         Task::ArchSmoke {
+            secure_vars,
+            signing_profile,
+            encrypted,
             run,
             image,
             fixture,
             tcg,
             port,
             mode,
-        } => arch_smoke::run(&run, &image, &fixture, tcg, port, mode)?,
+        } => arch_smoke::run(
+            &run,
+            &image,
+            &fixture,
+            tcg,
+            port,
+            mode,
+            arch_smoke::Policy {
+                encrypted,
+                secure_vars: secure_vars.as_deref(),
+                signing_profile: signing_profile.as_deref(),
+            },
+        )?,
         Task::Image { test_ssh } => {
             ensure!(
                 Command::new("nix")

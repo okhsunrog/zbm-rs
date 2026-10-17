@@ -20,6 +20,7 @@ def load(name):
 kernel = load("check-security-kernel")
 publisher = load("publish-loader")
 authorizer = load("authorize-boot")
+linux_publisher = load("authorize-linux")
 spec = importlib.util.spec_from_file_location("nixos", Path(__file__).parents[1] / "xtask/fixtures/authorize_nixos.py")
 nixos = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(nixos)
@@ -37,6 +38,32 @@ def record(name, mode, body=b"", links=1):
 
 
 class Boundaries(unittest.TestCase):
+    def test_linux_publication_is_idempotent_and_rejects_corrupt_existing_signatures(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            key, cert = root / "fixture.key", root / "fixture.pem"
+            publisher.command(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                               "-keyout", key, "-out", cert, "-subj", "/CN=disposable/", "-days", "1"])
+            source = root / "source" / "artifact"
+            source.mkdir(parents=True)
+            payload = source / "arguments.json"
+            payload.write_text('{"disposable":true}')
+            publisher.command(["openssl", "cms", "-sign", "-binary", "-in", payload,
+                               "-signer", cert, "-inkey", key, "-outform", "DER",
+                               "-out", payload.with_suffix(".cms")])
+            output = root / "published"
+            linux_publisher.publish(source.parent, output, cert)
+            signature = output / "artifact/arguments.cms"
+            original = signature.read_bytes()
+            # Reuse existing valid signed policy even if a fresh CMS differs.
+            payload.with_suffix(".cms").write_bytes(b"unused fresh CMS")
+            linux_publisher.publish(source.parent, output, cert)
+            self.assertEqual(signature.read_bytes(), original)
+            signature.write_bytes(b"invalid CMS")
+            with self.assertRaises(RuntimeError):
+                linux_publisher.publish(source.parent, output, cert)
+            self.assertEqual((output / "artifact/arguments.json").read_bytes(), payload.read_bytes())
+
     def test_tpm_replay_rejects_loader_phases_and_changed_target_records(self):
         with tempfile.TemporaryDirectory() as temporary:
             run = Path(temporary)
@@ -74,6 +101,12 @@ class Boundaries(unittest.TestCase):
         self.assertNotEqual(authorizer.argument_id(args), authorizer.argument_id(["init=/another", *args[1:]]))
         with self.assertRaises(ValueError):
             authorizer.argument_id(args + ["root=another"])
+        self.assertEqual(authorizer.argument_id(["rw", "zfs=tank/root"]),
+                         authorizer.argument_id(["rw", "zfs=tank/clone"]))
+        self.assertEqual(authorizer.argument_id(["rw", "zfs=tank/root"]),
+                         "180032b6c4aa9e3028344c95f0fa9f152873278fe66d78c09908b115b625f734")
+        with self.assertRaises(ValueError):
+            authorizer.argument_id(["root=ZFS=tank/root", "zfs=tank/other"])
 
     def test_target_tar_never_follows_a_guest_symlink_or_extracts_devices(self):
         for names in [[("../outside", tarfile.REGTYPE, "")],

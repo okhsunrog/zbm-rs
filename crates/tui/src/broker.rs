@@ -55,7 +55,7 @@ enum Reply {
 }
 
 fn send<T: Serialize>(socket: &mut UnixStream, value: &T) -> Result<()> {
-    let data = serde_json::to_vec(value)?;
+    let data = zeroize::Zeroizing::new(serde_json::to_vec(value)?);
     ensure!(data.len() <= LIMIT, "Broker message exceeds bounds");
     socket.write_all(&(data.len() as u32).to_be_bytes())?;
     socket.write_all(&data)?;
@@ -66,7 +66,7 @@ fn receive<T: serde::de::DeserializeOwned>(socket: &mut UnixStream) -> Result<T>
     socket.read_exact(&mut size)?;
     let size = u32::from_be_bytes(size) as usize;
     ensure!(size > 0 && size <= LIMIT, "Invalid broker message length");
-    let mut data = vec![0; size];
+    let mut data = zeroize::Zeroizing::new(vec![0; size]);
     socket.read_exact(&mut data)?;
     Ok(serde_json::from_slice(&data)?)
 }
@@ -260,6 +260,18 @@ async fn normalize(action: Action, config: &Config) -> Result<Action> {
         crate::config::ImportPolicy::ReadOnly
     );
     Ok(match action {
+        Action::Unlock {
+            pool: p,
+            dataset,
+            passphrase,
+            ..
+        } => Action::Unlock {
+            pool: pool(&zfs, p.guid).await?,
+            dataset,
+            passphrase,
+            readonly,
+            limit,
+        },
         Action::Environments { pool: p, .. } => Action::Environments {
             pool: pool(&zfs, p.guid).await?,
             readonly,

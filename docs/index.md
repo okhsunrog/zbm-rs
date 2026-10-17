@@ -7,6 +7,8 @@
 - [Building images](build.md): Nix outputs, hardware profiles, NixOS integration
   and userspace choices.
 - [Configuration](configuration.md): immutable JSON, Nix options and defaults.
+- [Arch and Framework deployment](arch-deployment.md): encrypted roots, owner
+  authorization and the Insyde recovery module profile.
 
 ## Architecture and security
 

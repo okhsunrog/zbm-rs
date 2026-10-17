@@ -192,7 +192,9 @@ real handoff. Installed NixOS scenarios also verify the selected system closure,
 writable clone root and preservation of the source snapshot.
 
 See [current coverage and remaining gates](verification.md) and
-[dated run records](history/verification-2026-10.md). Generic-Linux verified boot,
-encrypted-root unlock, physical recovery, PCR15 log transport and OS-owned v262
+[dated run records](history/verification-2026-10.md). Encrypted Arch ordinary and
+snapshot-clone boot also pass through the generic-Linux broker path under OVMF
+Secure Boot; see [Arch acceptance](arch-deployment.md#disposable-acceptance).
+Physical recovery, PCR15 log transport and OS-owned v262
 signed NvPCR policy integration require separate acceptance. Synthetic target
 success does not establish attestation or whole-root integrity.

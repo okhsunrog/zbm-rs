@@ -9,9 +9,11 @@ Enter on a pool explicitly imports it without force and discovers boot environme
 The list follows ZFSBootMenu visibility: `mountpoint=/` unless
 `org.zfsbootmenu:active=off`, or `mountpoint=legacy` with `active=on` (including
 inherited values). `bootfs` marks and selects the default BE; it never triggers
-automatic boot. Eligible unencrypted datasets are mounted read-only; hidden and
-non-root datasets are not mounted. Encrypted or `canmount=off` candidates remain
-visible with a diagnostic. Enter on a BE opens its Linux kernels or NixOS generations; B goes back.
+automatic boot. Eligible datasets with available keys are mounted read-only; hidden and
+non-root datasets are not mounted. Locked or `canmount=off` candidates remain
+visible with a diagnostic. Enter on a locked passphrase BE opens hidden unlock
+input; Escape cancels and no stored keylocation is opened. After unlock, Enter
+opens its Linux kernels or NixOS generations; B goes back.
 An individual mount or Bootspec failure leaves other BEs and generations
 available. Rejected generations retain their generation number and diagnostic.
 Enter on a generation resolves its Bootspec,
@@ -28,7 +30,7 @@ clones. Existing initramfs images are used unchanged. Paths and matching pairs
 are checked again before handoff; ZFS properties are freshly read.
 
 The NixOS backend assumes that /nix/store and /nix/var/nix/profiles are in the
-selected root filesystem. Separate /nix datasets, encrypted roots, initrdSecrets,
+selected root filesystem. Separate /nix datasets, initrdSecrets,
 specialisations and kernel arguments requiring whitespace/quoting are unsupported.
 A configured root different from the selected dataset requires an automatically
 recognized systemd initrd for root override; scripted NixOS initrd root override
@@ -38,7 +40,7 @@ preview mode. Autoboot is not implemented.
 
 Linux ZBM properties do not override NixOS Bootspec. Pool
 `org.zfsbootmenu:readonly` and the image import policy govern mutations.
-Encrypted BE unlock/keysource, duplicate via send/receive and some other ZBM
+Automatic ZBM keysource handling, raw/hex key input, duplicate via send/receive and some other ZBM
 features are still unimplemented; this is not full ZBM feature parity.
 
 ## Snapshots and recovery
@@ -133,7 +135,7 @@ status, kernel-argument editing, diff or other unimplemented ZBM actions.
 | Generic Linux kernel/initramfs pairs in `/boot` | Discovery and ordinary boot. |
 | NixOS Bootspec generations with `/nix` in the selected root | Ordinary boot and verified VM boot. |
 | Snapshot clone with a recognized systemd initramfs | Explicit writable-clone boot for the supported root layout. |
-| Encrypted boot environment requiring interactive unlock | Pending. |
+| Encrypted boot environment requiring interactive unlock | Passphrase input; ordinary Arch root and writable snapshot-clone boot tested in disposable VMs. The target initramfs must support its own unlock after kexec. |
 | Separate `/nix`, NixOS specialisations or `initrdSecrets` | Pending. |
 | Automatic boot timeout | Reserved configuration; not implemented. |
 

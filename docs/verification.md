@@ -11,6 +11,8 @@ are separate observations.
 | Rust and immutable configuration | Unit/integration checks, formatting, Clippy, Cargo input tracking and Nix/Rust configuration parity. |
 | Nix images | Kernel/ZFS matching, staged ELF dependencies, public trust inputs and size limits. |
 | Generic Linux | Arch ZFS-root boot and snapshot, rollback, clone and promotion scenarios. |
+| Encrypted Arch | Hidden passphrase input, cancellation/wrong-key refusal, ordinary and writable snapshot-clone boot; also through enforced OVMF Secure Boot, CMS/IMA and `zfs=` root authorization. |
+| Framework image integration | DMI-scoped recovery module built for Linux 7.2.9, immutable module options and required early loading checked in staged images. Physical deployment is not established. |
 | NixOS | Exact-generation ZFS-root boot and writable snapshot-clone boot, preserving the source dataset and snapshot. |
 | Protected loader | OVMF Secure Boot; forced kernel/module signatures, lockdown, signed IMA policy, sealed boot inputs and an unprivileged UI. |
 | Target authorization | Kernel/initramfs/argument rejection, pinned CMS policy, authorized root selection and actual signed second-kernel boot. |
@@ -18,8 +20,7 @@ are separate observations.
 | Native OS TPM setup | The NixOS fixture creates its own SRK and initializes native v261 NvPCRs without masks or loader-policy conflicts. |
 | Recovery and lifecycle | Manager faults, console restoration, process reaping, restart, protected recovery and clean poweroff. |
 
-These are isolated VM and source checks. Physical Framework deployment, encrypted
-boot-environment unlock, generic-Linux verified boot, target v262 signed NvPCR
+These are isolated VM and source checks. Physical Framework deployment, target v262 signed NvPCR
 integration and across-kexec PCR15 log transport remain open gates.
 
 ## Reproduction and records

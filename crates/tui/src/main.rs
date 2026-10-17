@@ -19,6 +19,32 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--linux-plans") {
+        anyhow::ensure!(
+            args.len() == 4,
+            "usage: zbm-rs --linux-plans ROOT DATASET IMAGE_CONFIG"
+        );
+        let root = std::path::Path::new(&args[1]).canonicalize()?;
+        let dataset = args[2]
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Dataset must be UTF-8"))?;
+        let config = config::parse(&std::fs::read_to_string(&args[3])?)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let properties = runtime.block_on(zbm_core::boot_zfs::properties(
+            &zbm_core::Zfs::new(),
+            dataset,
+        ))?;
+        let discovery = zbm_core::linux::discover(&root, dataset, &properties)?;
+        let plans = discovery
+            .targets
+            .iter()
+            .map(|target| zbm_core::boot::BootPlan::resolve_verified(target, &config.kernel_args))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        println!("{}", serde_json::to_string(&plans)?);
+        return Ok(());
+    }
     if args.first().is_some_and(|arg| arg == "--broker") {
         anyhow::ensure!(args.len() == 1, "Invalid broker arguments");
         return broker::run();

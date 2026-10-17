@@ -46,8 +46,9 @@ signed OVMF acceptance, including actual IMA appraisal of sealed read-only memfd
 and a file-based handoff to a signed synthetic second kernel. Unsigned kernels,
 bad IMA signatures, altered CMS/content/arguments and legacy kexec are rejected.
 Real NixOS ZFS-root and authorized snapshot-clone boot also pass through the menu
-and privileged broker. Generic-Linux, encrypted-root and physical acceptance are
-still pending; the selected root's ordinary runtime integrity is not authenticated.
+and privileged broker. Passphrase-encrypted Arch ordinary and snapshot-clone boot
+also pass that boundary in disposable OVMF tests. Physical acceptance remains
+pending; the selected root's ordinary runtime integrity is not authenticated.
 TPM startup is read-only; verified prepared-target measurements use PCR15.
 SRK/NvPCR setup and PCR11 OS phases belong to the selected OS. The
 persistent swtpm harness checks PCR replay and no loader NV/persistent allocation;

@@ -561,6 +561,7 @@ impl Ui {
                 Panel::ConfirmDiscard => "Discard prepared clone? [Enter] confirm [Esc] cancel",
                 Panel::ConfirmRollback => "Rollback dataset [Esc] cancel",
                 Panel::ConfirmPromote => "Clone and promote [Enter] confirm [Esc] cancel",
+                Panel::Unlock => "Unlock boot environment [Enter] unlock [Esc] cancel",
                 Panel::None => unreachable!(),
             },
             accent,
@@ -614,6 +615,19 @@ impl Ui {
             );
         } else {
             let text = match self.panel {
+                Panel::Unlock => vec![
+                    Line::raw(
+                        state
+                            .environments
+                            .get(state.selected_environment)
+                            .map(|e| clean(&e.dataset))
+                            .unwrap_or_default(),
+                    ),
+                    Line::raw(""),
+                    Line::raw("Enter the ZFS encryption passphrase."),
+                    Line::raw("Input is hidden and is not saved. Escape cancels."),
+                    Line::raw("Passphrase: [hidden]"),
+                ],
                 Panel::Help => self.help(protected),
                 Panel::Details => self.details(state, options),
                 Panel::ConfirmRollback => vec![

@@ -112,9 +112,9 @@ pub fn argument_id(arguments: &[String]) -> io::Result<String> {
         if argument.is_empty() || argument.len() > 4096 || argument.contains('\0') {
             return Err(invalid("Invalid authorization lookup argument"));
         }
-        let token = if argument.starts_with("root=") {
+        let token = if argument.starts_with("root=") || argument.starts_with("zfs=") {
             roots += 1;
-            ["root=ZFS=", "root=zfs:", "root="]
+            ["root=ZFS=", "root=zfs:", "root=", "zfs="]
                 .into_iter()
                 .find(|prefix| argument.starts_with(prefix))
                 .unwrap()
@@ -140,7 +140,7 @@ impl BootAuthorization {
         zfskit::names::DatasetName::parse(&self.root.source_dataset).map_err(invalid)?;
         if !matches!(
             self.root.prefix.as_str(),
-            "root=ZFS=" | "root=zfs:" | "root="
+            "root=ZFS=" | "root=zfs:" | "root=" | "zfs="
         ) || (self.root.prefix == "root="
             && !self
                 .fixed_arguments
@@ -148,10 +148,12 @@ impl BootAuthorization {
                 .any(|arg| arg == "rootfstype=zfs"))
             || self.root.argument_index > self.fixed_arguments.len()
             || self.fixed_arguments.len() > 64
-            || self
-                .fixed_arguments
-                .iter()
-                .any(|s| s.len() > 4096 || s.contains('\0') || s.starts_with("root="))
+            || self.fixed_arguments.iter().any(|s| {
+                s.len() > 4096
+                    || s.contains('\0')
+                    || s.starts_with("root=")
+                    || s.starts_with("zfs=")
+            })
             || !(9..=8192).contains(&self.initramfs_ima_signature.len())
         {
             return Err(invalid("Invalid signed argument/root/IMA signature policy"));
@@ -231,8 +233,14 @@ impl Authorization {
         let path = crate::boot::rooted_path(
             &plan.target.root,
             &std::path::PathBuf::from(format!("/boot/zbm-rs/authorizations/{id}/{arguments}.json")),
-        )?;
-        let payload = read_bounded(&path, AUTHORIZATION_LIMIT)?;
+        )
+        .map_err(|error| {
+            invalid(format!(
+                "No owner authorization for selected boot inputs and arguments: {error}"
+            ))
+        })?;
+        let payload = read_bounded(&path, AUTHORIZATION_LIMIT)
+            .map_err(|error| invalid(format!("Cannot read owner authorization: {error}")))?;
         let signature = read_bounded(&path.with_extension("cms"), AUTHORIZATION_LIMIT)?;
         let authorities = authority_paths
             .iter()
@@ -516,6 +524,21 @@ mod tests {
         clone.push("root=another".into());
         assert!(argument_id(&clone).is_err());
         assert!(argument_id(&args[2..]).is_err());
+        let arch = vec!["rw".into(), "zfs=tank/root".into()];
+        assert_eq!(
+            argument_id(&arch).unwrap(),
+            "180032b6c4aa9e3028344c95f0fa9f152873278fe66d78c09908b115b625f734"
+        );
+        assert_eq!(
+            argument_id(&arch).unwrap(),
+            argument_id(&["rw".into(), "zfs=tank/clone".into()]).unwrap()
+        );
+        assert!(argument_id(&["root=ZFS=tank/root".into(), "zfs=tank/other".into()]).is_err());
+        let mut arch_policy = policy();
+        arch_policy.root.prefix = "zfs=".into();
+        assert!(arch_policy.validate().is_ok());
+        arch_policy.fixed_arguments.push("zfs=tank/other".into());
+        assert!(arch_policy.validate().is_err());
     }
     #[test]
     fn cms_requires_exact_payload_and_pinned_signer() {

@@ -99,6 +99,7 @@ pub enum Panel {
     ConfirmDiscard,
     ConfirmRollback,
     ConfirmPromote,
+    Unlock,
 }
 
 #[derive(Default)]
@@ -113,9 +114,11 @@ pub struct Ui {
     pub prepared: Option<BootPlan>,
     pub operation_started: Option<Instant>,
     confirmation: String,
+    passphrase: zeroize::Zeroizing<String>,
 }
 
 pub enum Input {
+    Unlock(zeroize::Zeroizing<Vec<u8>>),
     Changed(&'static str),
     Command(Command, bool),
     Ignored,
@@ -145,6 +148,8 @@ fn fuzzy(value: &str, query: &str) -> bool {
 
 impl Ui {
     pub fn reset_after_mutation(&mut self) {
+        use zeroize::Zeroize;
+        self.passphrase.zeroize();
         self.screens.clear();
         self.key.clear();
         self.panel = Panel::None;
@@ -473,6 +478,7 @@ impl Ui {
                 "generation {}: {}",
                 state.rejected_generations[i].generation, state.rejected_generations[i].error
             )),
+            Some(Kind::Environment(i)) if state.environments[i].properties.can_unlock() => None,
             Some(Kind::Environment(i)) if state.environments[i].root.is_none() => state
                 .environments[i]
                 .unavailable
@@ -484,6 +490,14 @@ impl Ui {
     pub fn open_label(&self, state: &State) -> &'static str {
         match View::of(state) {
             View::Pools => "Import",
+            View::Environments
+                if state
+                    .environments
+                    .get(state.selected_environment)
+                    .is_some_and(|e| e.properties.can_unlock()) =>
+            {
+                "Unlock"
+            }
             View::Environments => "Open",
             View::Snapshots => "Open",
             View::Generations | View::Kernels if state.snapshot_view => "Boot clone",
@@ -491,6 +505,12 @@ impl Ui {
         }
     }
     pub fn open_panel(&mut self, panel: Panel) {
+        use zeroize::Zeroize;
+        self.passphrase.zeroize();
+        if panel == Panel::Unlock && self.passphrase.capacity() < 1024 {
+            // Reserve before the first secret byte, avoiding growth copies.
+            self.passphrase.reserve_exact(1024);
+        }
         self.confirmation.clear();
         if self.panel == Panel::None && self.searching {
             self.resume_search = true;
@@ -502,6 +522,46 @@ impl Ui {
     }
     pub fn input(&mut self, key: KeyEvent, state: &mut State) -> Input {
         let command = Command::from_key(key);
+        if self.panel == Panel::Unlock {
+            use zeroize::Zeroize;
+            match key.code {
+                KeyCode::Esc => {
+                    self.passphrase.zeroize();
+                    self.panel = Panel::None;
+                    return Input::Changed("unlock-cancelled");
+                }
+                KeyCode::Enter if command == Some(Command::Open) && !self.passphrase.is_empty() => {
+                    let bytes = zeroize::Zeroizing::new(self.passphrase.as_bytes().to_vec());
+                    self.passphrase.zeroize();
+                    self.panel = Panel::None;
+                    return Input::Unlock(bytes);
+                }
+                KeyCode::Backspace => {
+                    // Clear the removed character too, including the allocation's tail.
+                    if let Some((index, _)) = self.passphrase.char_indices().next_back() {
+                        let prefix = zeroize::Zeroizing::new(self.passphrase[..index].to_owned());
+                        self.passphrase.zeroize();
+                        self.passphrase.push_str(&prefix);
+                    }
+                }
+                KeyCode::Char(c)
+                    if !c.is_control()
+                        && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() =>
+                {
+                    if self.passphrase.len() + c.len_utf8() <= 1024 {
+                        self.passphrase.push(c);
+                    }
+                }
+                KeyCode::F(_) if command.is_some_and(Command::recovery) => {
+                    self.passphrase.zeroize();
+                    self.panel = Panel::None;
+                    return Input::Command(command.unwrap(), false);
+                }
+                _ => return Input::Ignored,
+            }
+            // Do not emit a telemetry record for each secret keystroke.
+            return Input::Ignored;
+        }
         if matches!(key.code, KeyCode::F(_))
             && let Some(command) = command
         {
@@ -1056,11 +1116,16 @@ mod tests {
                 is_default: true,
                 targets: vec![],
                 rejected_generations: vec![],
-                unavailable: Some("Encrypted boot environments are not supported yet".into()),
+                unavailable: Some(
+                    "Encryption key is unavailable; press Enter to unlock with a passphrase".into(),
+                ),
                 properties: BootProperties {
                     mountpoint: "/".into(),
                     canmount: "noauto".into(),
                     encryption: "aes-256-gcm".into(),
+                    encryptionroot: Some("tank".into()),
+                    keystatus: "unavailable".into(),
+                    keyformat: "passphrase".into(),
                     active: "on".into(),
                     commandline: None,
                     kernel: None,
@@ -1086,7 +1151,52 @@ mod tests {
         assert!(
             text.contains("* tank/ROOT/encrypted")
                 && text.contains("BOOTFS")
-                && text.contains("Encrypted boot environments")
+                && text.contains("Encryption key is unavailable")
         );
+        assert!(ui.reason(Command::Open, &state, &options()).is_none());
+        ui.open_panel(Panel::Unlock);
+        for c in "secret-snpq".chars() {
+            assert!(matches!(ui.input(key(c), &mut state), Input::Ignored));
+        }
+        assert_eq!(ui.panel, Panel::Unlock);
+        terminal
+            .draw(|frame| ui.draw(frame, &state, &options()))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!text.contains("secret-snpq"));
+        assert!(
+            !serde_json::to_string(&ui.telemetry(&state))
+                .unwrap()
+                .contains("secret-snpq")
+        );
+        assert!(matches!(
+            ui.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT), &mut state),
+            Input::Ignored
+        ));
+        let Input::Unlock(secret) = ui.input(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+        ) else {
+            panic!("Expected unlock input");
+        };
+        assert_eq!(secret.as_slice(), b"secret-snpq");
+        assert!(ui.passphrase.is_empty());
+        ui.open_panel(Panel::Unlock);
+        ui.input(key('x'), &mut state);
+        ui.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+        assert!(ui.passphrase.is_empty());
+        ui.open_panel(Panel::Unlock);
+        ui.input(key('x'), &mut state);
+        assert!(matches!(
+            ui.input(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE), &mut state),
+            Input::Command(Command::Restart, false)
+        ));
+        assert!(ui.passphrase.is_empty());
     }
 }

@@ -52,6 +52,12 @@ the caller's configuration; derivations never read /sys. Module names must exist
 in the selected kernel, so incompatible manifests fail rather than being ignored.
 `zbm-rs-efi-host-only-example` is explicitly a QEMU fixture, not a probe of your host.
 
+External modules use `extraModulePackages = kernelPackages: [ matchingPackage ]`
+so they build for the final selected loader ABI. `moduleOptions` installs immutable
+modprobe options; `forcedModules` loads required modules before readiness and stops
+bootstrap on a failure. See [Arch and Framework deployment](arch-deployment.md)
+for the DMI-scoped Insyde recovery profile and owner signing requirements.
+
 Import `nixosModules.default`, enable `programs.zbm-rs.enable` and select its
 `image.profile`. `system.build.zbm-rs-efi` then uses the same builder with
 `boot.kernelPackages`, `boot.zfs.package`, `boot.initrd.availableKernelModules`

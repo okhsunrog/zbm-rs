@@ -40,6 +40,18 @@
         zbm-rs-efi-test-host-only-scsi = mkImage { testProfile = true; profile = "host-only"; hardwareManifest = ./nix/scsi-hardware-example.json; };
       };
       checks.${system} = {
+        module-options = let appliance = mkImage {
+          forcedModules = [ "nvme" ];
+          moduleOptions.zfs = "zfs_arc_max=67108864";
+        }; in pkgs.runCommand "zbm-required-module-options-check" {
+          nativeBuildInputs = [ pkgs.cpio ];
+        } ''
+          cpio --quiet -i --to-stdout etc/modprobe.d/zbm-rs.conf < ${appliance.runtime}/root.cpio > options
+          grep -Fx 'options zfs zfs_arc_max=67108864' options
+          cpio --quiet -i --to-stdout etc/zbm-rs/setup.sh < ${appliance.runtime}/root.cpio > setup
+          grep -Fx '/usr/bin/modprobe nvme || exit 1' setup
+          touch $out
+        '';
         hardware-probe = pkgs.runCommand "zbm-hardware-probe-check" { nativeBuildInputs = [ pkgs.uv pkgs.python3 ]; } ''
           export UV_CACHE_DIR="$TMPDIR/uv-cache"
           uv run --offline --no-project --python ${pkgs.python3}/bin/python ${self}/nix/check-hardware-probe.py
