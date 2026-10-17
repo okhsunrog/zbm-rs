@@ -2,7 +2,7 @@
 , zfsUserspace ? (import ./lean-userspace.nix { pkgs = runtimePkgs; }).zfs
 , testProfile ? false, profile ? "portable", hardwareManifest ? null
 , extraModules ? [], forcedModules ? [], loaderConfig ? null
-, extraModulePackages ? (_: []), moduleOptions ? {}
+, extraModulePackages ? (_: []), moduleOptions ? {}, hostId ? null
 , kernelPolicy ? "validate", kernelTrustedCertificates ? []
 , targetAuthorities ? [], imaCertificate ? null
 , tpmProvider ? pkgs.systemd
@@ -139,6 +139,10 @@ let
     ln -s usr/sbin root/sbin
     cp -r ${modules}/lib/. root/usr/lib/
     cp ${setup} root/etc/zbm-rs/setup.sh
+    ${lib.optionalString (hostId != null) ''
+      uv run --offline --no-project --python ${pkgs.python3}/bin/python python -c \
+        'import pathlib, struct; pathlib.Path("root/etc/hostid").write_bytes(struct.pack("<I", int("${hostId}", 16)))'
+    ''}
     ${lib.optionalString (moduleOptions != {}) ''
       mkdir -p root/etc/modprobe.d
       cp ${pkgs.writeText "zbm-module-options.conf" (lib.concatStringsSep "\n"
@@ -200,7 +204,8 @@ let
       else "zstd -q -T1 -19"} < ${runtime}/root.cpio > $out/initramfs.img
   '';
   osRelease = pkgs.writeText "zbm-os-release" "ID=zbm-rs\nNAME=zbm-rs\nVERSION_ID=0.1.0\n";
-  cmdline = "console=ttyS0,115200 console=tty0 loglevel=3 panic=${if enforced then "0" else "-1"}";
+  cmdline = "console=ttyS0,115200 console=tty0 loglevel=3 panic=${if enforced then "0" else "-1"}"
+    + lib.optionalString (hostId != null) " spl.spl_hostid=0x${hostId}";
   image = pkgs.runCommand "zbm-rs-efi-${profile}${lib.optionalString testProfile "-test"}" {
     nativeBuildInputs = [ pkgs.systemdUkify pkgs.python3 pkgs.uv ];
     passthru = { inherit binary kernel zfsModule zfsUserspace udevPackage modules initramfs configJson runtime runtimeLibc; inherit sizeCheck kernelCheck; };
@@ -235,6 +240,8 @@ let
 in
 assert lib.assertMsg (builtins.elem initramfsCompression [ "gzip" "xz" "zstd" ]) "Unknown initramfs compressor";
 assert lib.assertMsg (builtins.elem profile [ "portable" "host-only" ]) "Unknown image profile";
+assert lib.assertMsg (hostId == null || (builtins.isString hostId && builtins.match "[0-9a-fA-F]{8}" hostId != null && hostId != "00000000"))
+  "hostId must be null or eight hexadecimal digits identifying this ZFS host";
 assert lib.assertMsg (builtins.elem kernelPolicy [ "validate" "configure" ]) "Unknown loader kernel policy";
 assert lib.assertMsg (!enforced || (targetAuthorities != [] && imaCertificate != null)) "Enforced image needs public authorization and IMA certificates";
 assert lib.assertMsg (!tpmEnabled || runtimeLibc == "glibc") "Current TPM provider requires the glibc userspace profile";

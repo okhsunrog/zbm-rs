@@ -1,8 +1,8 @@
 # Explicit Framework 13 Core Ultra / Insyde profile. Owner signing is external.
 { pkgs, source, moduleSource, hardwareManifest
-, kernelTrustedCertificates, targetAuthorities, imaCertificate }:
+, kernelTrustedCertificates, targetAuthorities, imaCertificate, hostId ? null }:
 import ./image.nix {
-  inherit pkgs source hardwareManifest kernelTrustedCertificates targetAuthorities imaCertificate;
+  inherit pkgs source hardwareManifest kernelTrustedCertificates targetAuthorities imaCertificate hostId;
   kernelPackages = pkgs.linuxPackages_latest;
   kernelPolicy = "configure";
   profile = "host-only";

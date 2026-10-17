@@ -89,6 +89,7 @@ All paths below are relative to `programs.zbm-rs`:
 | `settings.security.requireFirmwareSecureBoot` | `false` | Also require confirmed enabled firmware Secure Boot before OS handoff. Does not control target verification. |
 | `settings.security.targetAuthorities` | Public certificate list; nonempty for `enforce` | Authorities allowed to sign BootAuthorization; copied into the immutable trust store. |
 | `image.kernelPolicy` | `validate`; `validate` or `configure` | Validate the selected final loader kernel, or build a separate configured loader-kernel variant. |
+| `image.hostId` | `networking.hostId` in the NixOS module; `null` in `lib.mkImage` | Explicit nonzero eight-digit ZFS identity, embedded as `/etc/hostid` and `spl.spl_hostid` in the loader. Never reads the host file implicitly or enables forced import. |
 | `image.kernelPackages` | Module defaults to `boot.kernelPackages` | Explicit loader kernel/ZFS package set; independent override does not change the host kernel. |
 | `image.extraModulePackages` | Function returning `[]` | Build external modules from the final loader kernelPackages; do not reuse host module binaries. |
 | `image.moduleOptions` | `{}` | Immutable module-name to single-line modprobe options map. Required forced modules stop bootstrap on failure. |

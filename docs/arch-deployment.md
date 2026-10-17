@@ -74,6 +74,13 @@ This repository does not install a hook or alter `/boot` automatically.
 
 ## Framework EFI enumeration recovery
 
+Pass the installed host's explicit eight-digit `hostId` to `lib.mkImage` or the
+Framework profile (for example, `hostId = "1234abcd";`). It creates `/etc/hostid`
+and the matching `spl.spl_hostid` loader argument. No host file is read implicitly,
+and this does not enable forced pool import. The NixOS module defaults
+`image.hostId` to `networking.hostId`. Keep the same identity across alternative
+loaders and the installed OS; zero and malformed IDs are refused.
+
 `nix/framework-image.nix` is an explicit production profile for Framework Laptop
 13 Intel Core Ultra Series 1 with Insyde firmware. Supply reviewed hardware JSON,
 public trust certificates and `moduleSource`, the public source directory of the

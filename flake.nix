@@ -43,6 +43,7 @@
         module-options = let appliance = mkImage {
           forcedModules = [ "nvme" ];
           moduleOptions.zfs = "zfs_arc_max=67108864";
+          hostId = "1234abcd";
         }; in pkgs.runCommand "zbm-required-module-options-check" {
           nativeBuildInputs = [ pkgs.cpio ];
         } ''
@@ -50,6 +51,9 @@
           grep -Fx 'options zfs zfs_arc_max=67108864' options
           cpio --quiet -i --to-stdout etc/zbm-rs/setup.sh < ${appliance.runtime}/root.cpio > setup
           grep -Fx '/usr/bin/modprobe nvme || exit 1' setup
+          cpio --quiet -i --to-stdout etc/hostid < ${appliance.runtime}/root.cpio > hostid
+          test "$(od -An -tx1 hostid | tr -d ' \n')" = cdab3412
+          grep -F 'spl.spl_hostid=0x1234abcd' ${appliance}/cmdline
           touch $out
         '';
         hardware-probe = pkgs.runCommand "zbm-hardware-probe-check" { nativeBuildInputs = [ pkgs.uv pkgs.python3 ]; } ''

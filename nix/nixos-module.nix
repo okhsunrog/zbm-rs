@@ -31,6 +31,7 @@ let
     forcedModules = config.boot.initrd.kernelModules;
     extraModulePackages = cfg.image.extraModulePackages;
     moduleOptions = cfg.image.moduleOptions;
+    hostId = cfg.image.hostId;
   };
 in {
   imports = [ ./snapshot-boot.nix ] ++ map (pair: lib.mkRenamedOptionModule
@@ -57,6 +58,7 @@ in {
     enable = lib.mkEnableOption "build a standalone zbm-rs EFI boot manager";
     image.profile = lib.mkOption { type = lib.types.enum [ "portable" "host-only" ]; default = "portable"; };
     image.hardwareManifest = lib.mkOption { type = lib.types.nullOr lib.types.path; default = null; };
+    image.hostId = lib.mkOption { type = lib.types.nullOr lib.types.str; default = config.networking.hostId; description = "Explicit eight-digit ZFS host ID; embedded in the loader without copying host files."; };
     image.kernelPackages = lib.mkOption { type = lib.types.raw; default = config.boot.kernelPackages; description = "Separate loader kernel/ZFS package set; does not change the installed OS kernel."; };
     image.extraModulePackages = lib.mkOption { type = lib.types.raw; default = _: []; description = "Function from final loader kernelPackages to matching out-of-tree module packages."; };
     image.moduleOptions = lib.mkOption { type = lib.types.attrsOf lib.types.str; default = {}; description = "Immutable modprobe options in the loader, not target OS configuration."; };
