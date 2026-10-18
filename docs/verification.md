@@ -9,6 +9,8 @@ are separate observations.
 | Area | Recorded validation |
 | --- | --- |
 | Rust and immutable configuration | Unit/integration checks, formatting, Clippy, Cargo input tracking and Nix/Rust configuration parity. |
+| Startup and direct boot | Automatic catalog, startup passphrase with cancellation/retry, resumed kernel selection, single-Enter encrypted Arch boot, countdown cancellation and immediate Arch boot in disposable VMs. |
+| Local key dependencies | An encrypted non-BE keysource unlocks a dependent BE, resumes its requested kernel chooser and leaves no temporary key file or passphrase in serial diagnostics. |
 | Nix images | Kernel/ZFS matching, staged ELF dependencies, public trust inputs and size limits. |
 | Generic Linux | Arch ZFS-root boot and snapshot, rollback, clone and promotion scenarios. |
 | Encrypted Arch | Hidden passphrase input, cancellation/wrong-key refusal, ordinary and writable snapshot-clone boot; also through enforced OVMF Secure Boot, CMS/IMA and `zfs=` root authorization. |

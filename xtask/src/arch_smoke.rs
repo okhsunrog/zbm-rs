@@ -132,7 +132,9 @@ pub fn run(
     );
     fs::write(run.join("arch-inputs.txt"), inputs)?;
     let original_boot = vm::ssh(run, "cat /proc/sys/kernel/random/boot_id")?;
-    vm::key(run, "r")?;
+    // Exercise cold-start policy against the provisioned disk, rather than a
+    // rescan of the manager that already completed its empty startup catalog.
+    vm::key(run, "f6")?;
     event(run, "ready")?;
     if encrypted {
         unlock_checks(run)?;
@@ -616,8 +618,19 @@ fn unlock_checks(run: &Path) -> Result<()> {
     }
     vm::screenshot(run, &run.join("hidden-unlock.png"))?;
     vm::key(run, "ret")?;
-    event(run, "boot-environments")?;
+    wait_for(30, None, || {
+        let state = vm::screen(run)?;
+        ensure!(
+            state["ui"]["view"] == "Kernels"
+                && state["state"]["targets"]
+                    .as_array()
+                    .is_some_and(|t| !t.is_empty()),
+            "Unlock must resume the requested kernel chooser: {state}"
+        );
+        Ok(())
+    })?;
     vm::key(run, "esc")?;
+    event(run, "boot-environments")?;
     Ok(())
 }
 
