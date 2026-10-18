@@ -20,6 +20,7 @@ pub enum Mode {
     Promote,
 }
 pub struct Policy<'a> {
+    pub autoboot: bool,
     pub encrypted: bool,
     pub secure_vars: Option<&'a Path>,
     pub signing_profile: Option<&'a Path>,
@@ -123,7 +124,7 @@ pub fn run(
     }
     let inputs = vm::ssh(
         run,
-        "set -eu; chroot /arch-root /usr/bin/lsinitcpio /boot/initramfs-linux-lts.img | grep -E 'hooks/zfs|zfs.ko|etc/hostid'; cat /arch-root/usr/lib/os-release; ls -l /arch-root/boot; test ! -e /arch-root/nix/var/nix/profiles/system; echo snapshot-original > /arch-root/arch-proof; zfs snapshot zbm_arch/arch0/root@known-good; echo live-changed > /arch-root/arch-proof; zfs snapshot zbm_arch/arch0/root@newer; umount /arch-root/sys; umount /arch-root/proc; umount /arch-root/dev; umount /arch-root; zpool export zbm_arch",
+        "set -eu; chroot /arch-root /usr/bin/lsinitcpio /boot/initramfs-linux-lts.img | grep -E 'hooks/zfs|zfs.ko|etc/hostid'; cat /arch-root/usr/lib/os-release; ls -l /arch-root/boot; test ! -e /arch-root/nix/var/nix/profiles/system; echo snapshot-original > /arch-root/arch-proof; zfs snapshot zbm_arch/arch0/root@known-good; echo live-changed > /arch-root/arch-proof; zfs snapshot zbm_arch/arch0/root@newer; umount /arch-root/sys; umount /arch-root/proc; umount /arch-root/dev; umount /arch-root; zpool set bootfs=zbm_arch/arch0/root zbm_arch; zpool export zbm_arch",
     )?;
     ensure!(
         inputs.contains("hooks/zfs") && inputs.contains("zfs.ko"),
@@ -259,7 +260,14 @@ pub fn run(
     vm::key(run, "esc")?;
     ensure!(manager_pid(run)? == pid, "Inspection replaced manager");
     println!("Booting Arch mode={} via kexec_file_load", mode.name());
-    vm::key(run, "ret")?;
+    if matches!(mode, Mode::Live) && policy.secure_vars.is_none() {
+        autoboot_checks(run, policy.autoboot)?;
+        if !policy.autoboot {
+            vm::key(run, "ret")?;
+        }
+    } else {
+        vm::key(run, "ret")?;
+    }
     let proof = wait_for(180, None, || {
         let log = fs::read_to_string(run.join("serial.log"))?;
         let line = log
@@ -297,7 +305,11 @@ fn event(run: &Path, expected: &str) -> Result<serde_json::Value> {
         ensure!(
             state["event"] == expected
                 || expected == "ready" && state["event"] == "catalog-ready"
-                || expected == "boot-environments" && state["event"] == "catalog-ready"
+                || expected == "boot-environments"
+                    && state["ui"]["view"] == "Environments"
+                    && state["state"]["environments"]
+                        .as_array()
+                        .is_some_and(|envs| !envs.is_empty())
                 || expected == "boot-targets" && state["event"] == "navigation",
             "Waiting for {expected}: {state}"
         );
@@ -606,5 +618,64 @@ fn unlock_checks(run: &Path) -> Result<()> {
     vm::key(run, "ret")?;
     event(run, "boot-environments")?;
     vm::key(run, "esc")?;
+    Ok(())
+}
+
+/// All edits are confined to a disposable off-mode initramfs, never host settings.
+fn autoboot_checks(run: &Path, immediate: bool) -> Result<()> {
+    vm::ssh(run, "cp -L /etc/zbm-rs/config.json /run/ux-menu.json")?;
+    let write_mode = |mode: &str| -> Result<()> {
+        vm::ssh(
+            run,
+            &format!(
+                r#"set -eu; sed 's/"mode":"menu"/"mode":"{mode}"/; s/"timeout_secs":[0-9]*/"timeout_secs":3/' /run/ux-menu.json > /run/ux-next.json; rm -f /etc/zbm-rs/config.json; cp /run/ux-next.json /etc/zbm-rs/config.json"#
+            ),
+        )?;
+        Ok(())
+    };
+    write_mode("countdown")?;
+    vm::key(run, "f6")?;
+    wait_for(20, None, || {
+        let state = vm::screen(run)?;
+        ensure!(
+            state["event"] == "autoboot-armed" && state["state"]["countdown_secs"].is_number(),
+            "Waiting for countdown after catalog readiness"
+        );
+        Ok(())
+    })?;
+    vm::screenshot(run, &run.join("autoboot-countdown.png"))?;
+    vm::key(run, "k")?;
+    wait_for(5, None, || {
+        let state = vm::screen(run)?;
+        ensure!(
+            state["state"]["countdown_secs"].is_null() && state["ui"]["view"] == "Kernels",
+            "Any menu action must cancel autoboot"
+        );
+        Ok(())
+    })?;
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    vm::ssh(run, "test \"$(cat /sys/kernel/kexec_loaded)\" = 0")?;
+    write_mode(if immediate { "immediate" } else { "menu" })?;
+    let old = manager_pid(run)?;
+    vm::key(run, "f6")?;
+    if !immediate {
+        wait_for(20, None, || {
+            let state = vm::screen(run)?;
+            ensure!(
+                manager_pid(run)? != old
+                    && state["event"] == "catalog-ready"
+                    && state["ui"]["view"] == "Environments",
+                "Menu mode must stop at systems"
+            );
+            Ok(())
+        })?;
+        vm::screenshot(run, &run.join("arch-one-enter.png"))?;
+    }
+    fs::write(
+        run.join("autoboot-report.json"),
+        serde_json::to_vec(
+            &json!({"passed":true,"countdown_cancelled":true,"final_mode":if immediate {"immediate"} else {"menu"}}),
+        )?,
+    )?;
     Ok(())
 }

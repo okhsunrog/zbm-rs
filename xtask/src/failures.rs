@@ -47,6 +47,7 @@ pub fn start_hung_mount(run: &Path) -> Result<u32> {
         }
     }
     mount_wrapper(run, true)?;
+    vm::key(run, "f8")?;
     vm::key(run, "ret")?;
     wait_for(10, None, || {
         let state = vm::screen(run)?;
@@ -90,16 +91,16 @@ pub fn exercise(run: &Path) -> Result<()> {
     wait_for(20, None, || {
         let state = vm::screen(run)?;
         ensure!(
-            state["event"] == "ready" && state["state"]["error"].is_null(),
+            matches!(state["event"].as_str(), Some("ready" | "catalog-ready"))
+                && state["state"]["error"].is_null(),
             "Waiting for rescan"
         );
         Ok(())
     })?;
-    vm::key(run, "ret")?;
     let isolation = wait_for(30, None, || {
         let state = vm::screen(run)?;
         ensure!(
-            state["event"] == "boot-environments" && state["state"]["error"].is_null(),
+            state["event"] == "catalog-ready" && state["state"]["error"].is_null(),
             "Waiting for isolated BE failures: {state}"
         );
         let environments = state["state"]["environments"].as_array().unwrap();
@@ -127,11 +128,11 @@ pub fn exercise(run: &Path) -> Result<()> {
         Ok(state)
     })?;
     vm::screenshot(run, &run.join("fault-isolation.png"))?;
-    vm::key(run, "ret")?;
+    vm::key(run, "k")?;
     let generations = wait_for(10, None, || {
         let state = vm::screen(run)?;
         ensure!(
-            state["event"] == "boot-targets"
+            state["event"] == "navigation"
                 && state["state"]["targets"][0]["generation"] == 1
                 && state["state"]["rejected_generations"][0]["generation"] == 2,
             "Waiting for good generation: {state}"

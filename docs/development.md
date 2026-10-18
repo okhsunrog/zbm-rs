@@ -91,6 +91,12 @@ cargo xtask arch-smoke --image result-snapshot --fixture target/arch-fixture-new
   --run target/vm/arch-live-new --mode live
 ```
 
+The ordinary smoke includes demand-driven encrypted keysource unlock and RAM-key
+cleanup. Live Arch acceptance also checks countdown cancellation and then boots
+the system directly from the environment menu. Add `--autoboot` to finish the
+same live fixture through immediate boot instead. These are disposable initramfs
+configuration changes; the harness never changes host loader settings.
+
 Use fresh run directories with `--mode snapshot`, `rollback`, `clone` or `promote`
 for the other Arch paths. This tests a staged boot environment, rather than the
 installer wizard. Rollback checks cancellation, modified Enter, dependent-clone

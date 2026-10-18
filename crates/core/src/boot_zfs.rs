@@ -6,6 +6,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 use zfskit::{
@@ -122,6 +123,9 @@ async fn mount_environment(
     let component: String = dataset.bytes().map(|b| format!("{b:02x}")).collect();
     let root = PathBuf::from(format!("/run/zbm-rs/roots/{}/{component}", pool.guid));
     fs::create_dir_all(&root)?;
+    // A keysource file can itself be world-readable. The unprivileged UI must
+    // never traverse broker-owned inspection mounts, regardless of guest modes.
+    fs::set_permissions("/run/zbm-rs/roots", fs::Permissions::from_mode(0o700))?;
     if let Some(source) = mount_source(&root)? {
         if source != *dataset {
             return Err(failure("Boot mount dataset mismatch"));

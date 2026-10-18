@@ -39,6 +39,9 @@ enum Task {
     },
     /// Boot real Arch roots, snapshot clones and rolled-back datasets.
     ArchSmoke {
+        /// Finish the live fixture through immediate automatic boot.
+        #[arg(long)]
+        autoboot: bool,
         #[arg(long, requires = "signing_profile")]
         secure_vars: Option<PathBuf>,
         #[arg(long, requires = "secure_vars")]
@@ -163,6 +166,7 @@ fn main() -> Result<()> {
             port,
         } => security_smoke::run(&run, &image, &secure_vars, port, tcg, swtpm, expect_tpm)?,
         Task::ArchSmoke {
+            autoboot,
             secure_vars,
             signing_profile,
             encrypted,
@@ -180,6 +184,7 @@ fn main() -> Result<()> {
             port,
             mode,
             arch_smoke::Policy {
+                autoboot,
                 encrypted,
                 secure_vars: secure_vars.as_deref(),
                 signing_profile: signing_profile.as_deref(),

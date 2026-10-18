@@ -572,6 +572,7 @@ async fn tui(
                         && environment.default_target.is_some()
                         && environment.unavailable.is_none()
                     {
+                        let newly_armed = auto_deadline.is_none();
                         let deadline = *auto_deadline.get_or_insert_with(|| {
                             Instant::now()
                                 + Duration::from_secs(
@@ -603,8 +604,18 @@ async fn tui(
                                 state.activity = workflow.view();
                             }
                         }
-                        if last_tick.elapsed() >= Duration::from_secs(1) {
+                        if newly_armed || last_tick.elapsed() >= Duration::from_secs(1) {
                             refresh(terminal, &mut state, options, &mut ui)?;
+                            emit(
+                                options,
+                                if newly_armed {
+                                    "autoboot-armed"
+                                } else {
+                                    "autoboot-tick"
+                                },
+                                &state,
+                                &ui,
+                            )?;
                             last_tick = Instant::now();
                         }
                     } else if !environment.properties.locked() {

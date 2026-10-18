@@ -49,7 +49,7 @@ fn panel(title: impl Into<String>, color: Color) -> Block<'static> {
 }
 fn tag_style(tag: &str) -> Style {
     ink(
-        if tag.contains("UNAVAILABLE") || tag.contains("LOCKED") || tag == "ERROR" {
+        if tag.contains("UNAVAILABLE") || tag.contains("LOCKED") || tag.contains("ERROR") {
             NOTICE
         } else if tag == "SNAPSHOT" {
             SNAPSHOT
@@ -329,11 +329,11 @@ impl Ui {
             Some(Kind::Pool(_)) => {
                 "Import this pool to discover boot environments. No force import.".into()
             }
-            Some(Kind::Environment(i)) if state.environments[i].properties.can_unlock() => {
-                "Unlock with the ZFS passphrase to discover boot targets.".into()
+            Some(Kind::Environment(i)) if state.environments[i].properties.locked() => {
+                "Unlock the required encryption root, then continue the selected action.".into()
             }
             Some(Kind::Environment(_)) => {
-                "Open this environment to choose a kernel or generation.".into()
+                "Enter boots the default. K chooses a kernel or generation.".into()
             }
             Some(Kind::Snapshot(_)) => {
                 "Inspect saved boot targets. F2 offers clone and rollback actions.".into()

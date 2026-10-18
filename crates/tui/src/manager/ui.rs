@@ -236,7 +236,11 @@ impl Ui {
                                 })
                         }),
                     tag: if e.is_default && e.unavailable.is_some() {
-                        "BOOTFS / LOCKED"
+                        if e.properties.locked() {
+                            "BOOTFS / LOCKED"
+                        } else {
+                            "BOOTFS / ERROR"
+                        }
                     } else if e.unavailable.is_some() {
                         if e.properties.locked() {
                             "LOCKED"
@@ -577,7 +581,7 @@ impl Ui {
                 if state
                     .environments
                     .get(state.selected_environment)
-                    .is_some_and(|e| e.properties.can_unlock()) =>
+                    .is_some_and(|e| e.properties.locked()) =>
             {
                 "Unlock"
             }
