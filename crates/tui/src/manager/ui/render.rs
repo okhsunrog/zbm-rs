@@ -852,7 +852,7 @@ mod tests {
             config: crate::config::Config::default(),
             preview: false,
             supervised: true,
-            events: None,
+            events: crate::diagnostics::Events::default(),
         };
         ui.searching = true;
         ui.input(
@@ -918,7 +918,7 @@ mod tests {
             config: crate::config::Config::default(),
             preview: false,
             supervised: true,
-            events: None,
+            events: crate::diagnostics::Events::default(),
         };
         let mut ui = Ui::default();
         ui.sync(&mut state);

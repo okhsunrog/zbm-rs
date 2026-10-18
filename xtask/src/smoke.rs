@@ -272,6 +272,9 @@ pub fn run(
             );
             Ok(())
         })?;
+        if lifecycle {
+            crate::lifecycle::check_persistent_report(run)?;
+        }
         fs::write(
             run.join("report.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
@@ -286,6 +289,11 @@ pub fn run(
     })();
     if let Err(error) = &result {
         let _ = vm::screenshot(run, &run.join("failure.png"));
+        for name in ["events.jsonl", "manager-stderr.log", "supervisor.log"] {
+            if let Ok(log) = vm::ssh(run, &format!("tail -c 131072 /run/zbm-rs/{name}")) {
+                let _ = fs::write(run.join(format!("failure-{name}")), log);
+            }
+        }
         if let Ok(console) = vm::console(run) {
             let _ = fs::write(run.join("failure.txt"), console);
         }

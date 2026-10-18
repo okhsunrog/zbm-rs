@@ -924,7 +924,7 @@ mod tests {
             config: crate::config::Config::default(),
             preview: false,
             supervised: true,
-            events: None,
+            events: crate::diagnostics::Events::default(),
         }
     }
     fn key(c: char) -> KeyEvent {

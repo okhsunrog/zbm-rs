@@ -7,6 +7,7 @@ let
     loaderConfig = {
       ui = { timeout_secs = cfg.settings.ui.timeout; show_snapshots = cfg.settings.ui.showSnapshots; title = cfg.settings.ui.title; };
       manager.restart_limit = cfg.settings.manager.restartLimit;
+      diagnostics.esp_partuuid = cfg.settings.diagnostics.espPartuuid;
       zfs.import_policy = cfg.settings.zfs.importPolicy;
       nixos.generation_limit = cfg.settings.nixos.generationLimit;
       kernel_args = cfg.settings.kernelArgs;
@@ -52,6 +53,7 @@ in {
     settings.ui.showSnapshots = lib.mkOption { type = lib.types.bool; default = true; description = "Enable the snapshot browser; creating a clone still requires an explicit action and writable pool."; };
     settings.ui.title = lib.mkOption { type = lib.types.nullOr lib.types.str; default = null; description = "Optional TUI heading."; };
     settings.manager.restartLimit = lib.mkOption { type = lib.types.ints.between 0 8; default = 2; description = "Rapid failure count that enters recovery; 0 and 1 recover on the first failure."; };
+    settings.diagnostics.espPartuuid = lib.mkOption { type = lib.types.nullOr lib.types.str; default = null; description = "Explicit GPT ESP partition UUID for bounded failure reports; null disables disk writes."; };
     settings.zfs.importPolicy = lib.mkOption { type = lib.types.enum [ "host-id" "read-only" ]; default = "host-id"; description = "Policy for explicit selected-pool import; discovery never imports or forces import."; };
     settings.nixos.generationLimit = lib.mkOption { type = lib.types.ints.between 1 512; default = 20; description = "Maximum NixOS generations per root dataset."; };
     settings.kernelArgs = lib.mkOption { type = lib.types.listOf lib.types.str; default = []; description = "Additional target kernel arguments; overriding Bootspec init or whitespace/quoting is unsupported."; };

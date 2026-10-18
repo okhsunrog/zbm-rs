@@ -62,6 +62,10 @@ mod tests {
             ),
             (r#"{"typo":1}"#, "unknown field"),
             (r#"{"ui":{"title":"\n"}}"#, "ui.title"),
+            (
+                r#"{"diagnostics":{"esp_partuuid":"../../sda"}}"#,
+                "diagnostics.esp_partuuid",
+            ),
             (r#"{"kernel_args":["\u0000"]}"#, "kernel_args"),
         ] {
             assert!(
@@ -69,6 +73,15 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    #[test]
+    fn persistent_diagnostics_are_opt_in_and_use_only_explicit_gpt_ids() {
+        assert!(parse("{}").unwrap().diagnostics.esp_partuuid.is_none());
+        assert!(
+            parse(r#"{"diagnostics":{"esp_partuuid":"ed5d4b72-0aac-48d3-8f89-43362d952ca0"}}"#)
+                .is_ok()
+        );
     }
 
     #[test]

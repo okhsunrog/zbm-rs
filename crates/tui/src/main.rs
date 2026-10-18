@@ -1,5 +1,6 @@
 mod broker;
 mod config;
+mod diagnostics;
 mod manager;
 mod security;
 mod session;

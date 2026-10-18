@@ -17,6 +17,7 @@ let
   enforced = (security.mode or "off") == "enforce";
   tpmConfig = security.tpm or {};
   tpmEnabled = (tpmConfig.policy or "off") != "off";
+  persistentDiagnostics = (rawConfig.diagnostics.esp_partuuid or null) != null;
   publicInput = path:
     let content = builtins.readFile path;
     in assert lib.assertMsg (builtins.stringLength content <= 65536 && !(lib.hasInfix "PRIVATE KEY" content))
@@ -41,7 +42,8 @@ let
     "xhci_pci" "ehci_pci" "atkbd" "i8042" "virtio_pci" "virtio_blk" "virtio_scsi" "virtio_gpu" ];
   roots = lib.unique ([ "zfs" ] ++ (if profile == "portable" then portable else hardware.modules or [])
     ++ extraModules ++ forcedModules ++ lib.optionals testProfile [ "e1000" ]
-    ++ lib.optionals tpmEnabled [ "tpm_crb" "tpm_tis" ]);
+    ++ lib.optionals tpmEnabled [ "tpm_crb" "tpm_tis" ]
+    ++ lib.optionals persistentDiagnostics [ "vfat" "nls_cp437" "nls_iso8859_1" ]);
   kernel = selectedKernelPackages.kernel;
   zfsModule = builtins.getAttr zfsUserspace.kernelModuleAttribute selectedKernelPackages;
   kernelCheck = pkgs.runCommand "zbm-loader-security-capabilities" {
@@ -124,7 +126,8 @@ let
   ];
   setup = pkgs.writeText "setup.sh" (lib.replaceStrings
     [ "# NIX_FORCED_MODULES" ]
-    [ (lib.concatMapStringsSep "\n" (name: "/usr/bin/modprobe " + lib.escapeShellArg name + " || exit 1") (lib.remove "zfs" forcedModules)) ]
+    [ ((lib.concatMapStringsSep "\n" (name: "/usr/bin/modprobe " + lib.escapeShellArg name + " || exit 1") (lib.remove "zfs" forcedModules))
+      + lib.optionalString persistentDiagnostics "\n/usr/bin/modprobe -a vfat nls_cp437 nls_iso8859_1 || true") ]
     (builtins.readFile (source + "/boot/setup.sh")));
   runtimeLibc = runtimePkgs.stdenv.hostPlatform.libc;
   runtime = pkgs.runCommand "zbm-runtime-${profile}" {
@@ -204,7 +207,8 @@ let
       else "zstd -q -T1 -19"} < ${runtime}/root.cpio > $out/initramfs.img
   '';
   osRelease = pkgs.writeText "zbm-os-release" "ID=zbm-rs\nNAME=zbm-rs\nVERSION_ID=0.1.0\n";
-  cmdline = "console=ttyS0,115200 console=tty0 loglevel=3 panic=${if enforced then "0" else "-1"}"
+  cmdline = lib.optionalString testProfile "console=ttyS0,115200 "
+    + "console=tty0 loglevel=3 panic=${if enforced then "0" else "-1"}"
     + lib.optionalString (hostId != null) " spl.spl_hostid=0x${hostId}";
   image = pkgs.runCommand "zbm-rs-efi-${profile}${lib.optionalString testProfile "-test"}" {
     nativeBuildInputs = [ pkgs.systemdUkify pkgs.python3 pkgs.uv ];

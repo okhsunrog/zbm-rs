@@ -100,6 +100,17 @@ Protected acceptance uses [the separate signing workflow](security-testing.md).
 
 ## Observing a VM
 
+Production keeps root-only supervisor and manager stderr logs under
+`/run/zbm-rs/`, with a bounded event log at `events.jsonl`. Optional VM serial
+mirroring is best effort; an absent or unusable UART must never terminate the
+manager. Enforced recovery offers `L` + Enter for a read-only paged viewer.
+RAM logs disappear after reboot. Enable `diagnostics.esp_partuuid` to retain a
+bounded failure report on the explicitly selected ESP; see
+[configuration](configuration.md). The lifecycle scenario hotplugs a disposable
+GPT/FAT disk, injects errors, shuts the VM down, then reads the report from the
+disk image on the host. It also verifies readiness with an unusable UART node.
+Host tools `sfdisk`, `mkfs.fat` and `mtype` are required for this scenario.
+
 `screen` returns instrumented application state. `screen --text` reads the actual
 virtual terminal through `/dev/vcs1`; PNG capture is a separate observation.
 The screenshot command pauses a running guest while capturing stable frames and

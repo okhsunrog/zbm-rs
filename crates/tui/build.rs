@@ -14,6 +14,10 @@ fn main() {
         let config: schema::Config = serde_json::from_str(&input)?;
         config.validate()?;
         println!(
+            "cargo::rustc-env=ZBM_DIAGNOSTIC_ESP_PARTUUID={}",
+            config.diagnostics.esp_partuuid.as_deref().unwrap_or("")
+        );
+        println!(
             "cargo::rustc-env=ZBM_IMAGE_SECURITY_MODE={}",
             match config.security.mode {
                 schema::SecurityMode::Off => "off",

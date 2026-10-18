@@ -3,8 +3,6 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::DefaultTerminal;
 use std::{
-    fs::{File, OpenOptions},
-    io::Write,
     process::Command,
     time::{Duration, Instant},
 };
@@ -20,18 +18,14 @@ use ui::{Input, Panel, Ui};
 struct Options {
     preview: bool,
     supervised: bool,
-    events: Option<File>,
+    events: crate::diagnostics::Events,
     config: crate::config::Config,
 }
 
 fn emit(options: &Options, event: &str, state: &State, ui: &Ui) -> Result<()> {
-    if let Some(mut file) = options.events.as_ref() {
-        let value = serde_json::json!({"event": event, "state": state, "pid": std::process::id(), "terminal_size": crossterm::terminal::size().ok(), "config": options.config, "ui": ui.telemetry(state)});
-        // Construct a complete record before touching the shared serial device.
-        // The leading separator also recovers from another writer's partial line.
-        let record = format!("\n{value}\n");
-        file.write_all(record.as_bytes())?;
-    }
+    let value = serde_json::json!({"event": event, "state": state, "pid": std::process::id(), "terminal_size": crossterm::terminal::size().ok(), "config": options.config, "ui": ui.telemetry(state)});
+    // The leading separator also recovers from another writer's partial line.
+    options.events.write(format!("\n{value}\n").as_bytes());
     Ok(())
 }
 
@@ -414,7 +408,7 @@ pub fn run(channel: Option<Client>) -> Result<()> {
         config: crate::config::load(channel.is_some())?,
         preview: false,
         supervised: channel.is_some(),
-        events: None,
+        events: crate::diagnostics::Events::default(),
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -427,7 +421,10 @@ pub fn run(channel: Option<Client>) -> Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("--events requires a path"))?;
                 // Keep the output descriptor across privilege dropping; the UI
                 // never needs to reopen a root-owned serial device or directory.
-                options.events = Some(OpenOptions::new().create(true).append(true).open(path)?);
+                options.events = crate::diagnostics::Events::open(
+                    std::path::Path::new(&path),
+                    options.supervised,
+                );
             }
             "--help" | "-h" => {
                 println!("zbm-rs [--manager] [--preview] [--events PATH]");

@@ -40,6 +40,7 @@ normalizes defaults; `--validate-config` prints validated JSON.
 | `ui.show_snapshots` | `true` | enable snapshot browsing from the BE list |
 | `ui.title` | `null` | optional heading; <=256 bytes, no control characters |
 | `manager.restart_limit` | `2` | 0..8; rapid failure threshold entering recovery |
+| `diagnostics.esp_partuuid` | `null` | opt-in GPT partition UUID for failure-only FAT reports; compiled into the image as well as validated JSON |
 | `zfs.import_policy` | `host-id` | host-id or read-only; explicit import only, never force |
 | `nixos.generation_limit` | `20` | 1..512; maximum generations per root or snapshot |
 | `kernel_args` | `[]` | <=64 strings, <=4096 bytes each, no NUL; additional target arguments |
@@ -54,6 +55,20 @@ second. Values 0 and 1 enter recovery on the first failure. Controlled restarts
 and explicit shell returns reset the counter; an interval of 30 seconds between
 failures resets it. Unknown fields and enum values are errors. JSON uses snake_case
 field names and kebab-case enum variants, with defaults for omitted fields/sections.
+
+With `diagnostics.esp_partuuid` set (`settings.diagnostics.espPartuuid` in the
+NixOS module), PID 1 saves unexpected manager exits and supervisor failures to
+`/EFI/zbm-rs/last-failure.log` on that exact partition. It mounts FAT only for
+the export, with nodev/nosuid/noexec and root-only permissions, writes a temporary
+file, syncs and replaces the previous report, syncs the filesystem and unmounts.
+It never searches other ESPs, imports a pool or changes boot entries for logging.
+The image includes the needed FAT modules automatically. This is bounded to
+128 KiB and contains recent supervisor messages, stderr and kernel messages;
+it does not export keys, passphrase input or full UI/session telemetry.
+The report is plaintext and unauthenticated; do not treat it as trust evidence.
+Disk/full/read-only/missing-device failures are reported in RAM but never fail
+boot or recovery. A kernel panic, power loss before export, or storage failure
+can still prevent persistence. A successful boot leaves the last failure intact.
 
 ## Nix integration
 

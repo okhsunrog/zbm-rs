@@ -9,8 +9,15 @@ pub struct Config {
     pub zfs: Zfs,
     pub nixos: Nixos,
     pub security: Security,
+    pub diagnostics: Diagnostics,
     /// Additional target kernel arguments, validated again by the boot backend.
     pub kernel_args: Vec<String>,
+}
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Diagnostics {
+    /// Explicit GPT partition identity; never search or write arbitrary ESPs.
+    pub esp_partuuid: Option<String>,
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -100,6 +107,18 @@ impl Default for Nixos {
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
         self.security.validate()?;
+        if self.diagnostics.esp_partuuid.as_ref().is_some_and(|id| {
+            id.len() != 36
+                || id.bytes().enumerate().any(|(i, ch)| {
+                    if [8, 13, 18, 23].contains(&i) {
+                        ch != b'-'
+                    } else {
+                        !ch.is_ascii_hexdigit()
+                    }
+                })
+        }) {
+            return Err("diagnostics.esp_partuuid must be a GPT partition UUID".into());
+        }
         if self.ui.timeout_secs > 300 {
             return Err("ui.timeout_secs must be in 0..=300".into());
         }

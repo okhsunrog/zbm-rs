@@ -4,7 +4,76 @@ use crate::{
     vm,
 };
 use anyhow::{Result, ensure};
-use std::{fs, path::Path};
+use std::{
+    fs,
+    io::Write,
+    path::Path,
+    process::{Command, Stdio},
+};
+
+const DIAGNOSTIC_UUID: &str = "ed5d4b72-0aac-48d3-8f89-43362d952ca0";
+
+fn attach_diagnostic_esp(run: &Path) -> Result<()> {
+    let disk = vm::absolute(run)?.join("diagnostic-esp.img");
+    fs::File::create(&disk)?.set_len(64 * 1024 * 1024)?;
+    let mut partition = Command::new("sfdisk")
+        .arg(&disk)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()?;
+    write!(
+        partition.stdin.take().unwrap(),
+        "label: gpt\nstart=2048,size=126976,type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B,uuid={DIAGNOSTIC_UUID}\n"
+    )?;
+    ensure!(
+        partition.wait()?.success(),
+        "Disposable diagnostic partitioning failed"
+    );
+    ensure!(
+        Command::new("mkfs.fat")
+            .args(["--offset", "2048"])
+            .arg(&disk)
+            .arg("63488")
+            .stdout(Stdio::null())
+            .status()?
+            .success(),
+        "Diagnostic FAT fixture failed"
+    );
+    let mut qmp = vm::qmp(run)?;
+    qmp.request("blockdev-add", serde_json::json!({"driver":"raw","node-name":"diagnostic-esp", "file":{"driver":"file","filename":disk}}))?;
+    qmp.request("device_add", serde_json::json!({"driver":"virtio-blk-pci","bus":"zbm-fixture-slot","drive":"diagnostic-esp","id":"diagnostic-esp","serial":"zbm-disposable-diagnostic-esp"}))?;
+    wait_for(10, None, || {
+        vm::ssh(
+            run,
+            &format!("test -b /dev/disk/by-partuuid/{DIAGNOSTIC_UUID}"),
+        )?;
+        Ok(())
+    })
+}
+
+pub fn check_persistent_report(run: &Path) -> Result<()> {
+    let output = Command::new("mtype")
+        .arg("-i")
+        .arg(format!(
+            "{}@@1048576",
+            run.join("diagnostic-esp.img").display()
+        ))
+        .arg("::/EFI/zbm-rs/last-failure.log")
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "Cannot read failure report after guest shutdown"
+    );
+    let text = String::from_utf8(output.stdout)?;
+    ensure!(
+        text.contains("failure report")
+            && text.contains("supervisor panic caught")
+            && text.contains("kernel log"),
+        "Incomplete persistent failure report"
+    );
+    fs::write(run.join("persisted-failure.log"), text)?;
+    Ok(())
+}
 
 fn send(run: &Path, action: &str) -> Result<()> {
     vm::ssh(run, &format!("/bin/zbm-rs --test-send {action}"))?;
@@ -47,6 +116,43 @@ pub fn exercise(run: &Path) -> Result<()> {
         run,
         "test /init -ef /bin/zbm-rs; test /proc/1/exe -ef /bin/zbm-rs",
     )?;
+
+    attach_diagnostic_esp(run)?;
+    // Reproduce a present device node without usable UART hardware. The
+    // readiness event must reach RAM even when the optional serial mirror fails.
+    // sshd's own test logfile uses ttyS0 too. Keep one already-open SSH
+    // session across replacement, manager restart, RAM readiness and restore.
+    let without_uart: u32 = vm::ssh(
+        run,
+        &format!(
+            r#"set -eu
+mv /dev/ttyS0 /dev/zbm-test-uart
+trap 'rm -f /dev/ttyS0; mv /dev/zbm-test-uart /dev/ttyS0' EXIT
+mknod /dev/ttyS0 c 4 95
+if echo uart-probe > /dev/ttyS0; then exit 1; fi
+/bin/zbm-rs --test-send restart
+for attempt in $(seq 1 100); do
+    pid=$(cat /run/zbm-rs/manager.pid 2>/dev/null || true)
+    if [ -n "$pid" ] && [ "$pid" != "{first}" ] &&
+       grep '"event":"ready"' /run/zbm-rs/events.jsonl | grep -q '"pid":'"$pid"','; then
+        echo "$pid"
+        exit 0
+    fi
+    sleep 0.1
+done
+exit 1"#
+        ),
+    )?
+    .trim()
+    .parse()?;
+    ensure!(
+        vm::console(run)?.contains("Rescan"),
+        "No usable TUI without UART"
+    );
+    vm::screenshot(run, &run.join("no-uart.png"))?;
+    send(run, "restart")?;
+    changed(run, without_uart)?;
+    let first = manager_pid(run)?;
 
     send(run, "probe-fd")?;
     wait_for(5, None, || {
@@ -172,7 +278,7 @@ pub fn exercise(run: &Path) -> Result<()> {
     fs::write(
         run.join("lifecycle.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
-            "passed": true, "checks": ["one-ELF", "PID1-survives", "CLOEXEC", "orphan-reaping", "dirty-abort-console-restoration",
+            "passed": true, "checks": ["unavailable-UART-not-fatal", "one-ELF", "PID1-survives", "CLOEXEC", "orphan-reaping", "dirty-abort-console-restoration",
             "controlled-restart", "leaked-FD-no-hang", "PID1-SIGTERM-forwarding", "manager-SIGINT", "panic", "SIGSEGV", "crash-loop-recovery", "failed-kexec-classification", "supervisor-error-recovery", "supervisor-panic-recovery", "last-ditch-keyboard"],
             "actual_kexec": "covered by the separate boot-smoke scenario"
         }))?,

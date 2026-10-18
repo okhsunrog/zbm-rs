@@ -289,6 +289,18 @@ pub fn run(
             Ok(())
         })?;
         vm::screenshot(run, &run.join("protected-recovery.png"))?;
+        vm::key(run, "l")?;
+        vm::key(run, "ret")?;
+        wait_for(10, Some(&mut owned.0), || {
+            ensure!(
+                vm::console(run)?.contains("zbm-rs diagnostics"),
+                "Read-only diagnostics viewer missing"
+            );
+            Ok(())
+        })?;
+        vm::screenshot(run, &run.join("protected-recovery-logs.png"))?;
+        vm::key(run, "q")?;
+        vm::key(run, "ret")?;
         vm::key(run, "m")?;
         vm::key(run, "ret")?;
         wait_for(30, Some(&mut owned.0), || {

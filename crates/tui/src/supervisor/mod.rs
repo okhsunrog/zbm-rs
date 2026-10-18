@@ -7,8 +7,8 @@ mod signals;
 use crate::session::{self, Request};
 use console::Console;
 use std::{
-    fs::{self, OpenOptions},
-    io::{self, Read, Write},
+    fs,
+    io::{self, Read},
     os::{
         fd::AsRawFd,
         unix::{net::UnixDatagram, process::ExitStatusExt},
@@ -18,17 +18,7 @@ use std::{
 };
 
 pub fn log(message: &str) {
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/run/zbm-rs/supervisor.log")
-    {
-        let _ = writeln!(file, "{message}");
-    }
-    if let Ok(mut file) = OpenOptions::new().write(true).open("/dev/ttyS0") {
-        let record = format!("ZBM_SUPERVISOR {message}\n");
-        let _ = file.write_all(record.as_bytes());
-    }
+    crate::diagnostics::supervisor(message);
 }
 
 #[derive(Default)]
@@ -40,6 +30,7 @@ struct Recovery {
 }
 
 pub fn run() -> ! {
+    std::panic::set_hook(Box::new(|info| log(&format!("supervisor panic: {info}"))));
     // Keep console baseline and child identity outside the unwind boundary.
     let mut recovery = Recovery::default();
     loop {
@@ -85,6 +76,7 @@ pub fn run() -> ! {
 
 fn last_ditch(recovery: &mut Recovery) -> io::Result<()> {
     log("last-ditch-recovery");
+    crate::diagnostics::persist_failure();
     signals::install()?;
     if let Some(pid) = recovery.active {
         // The leader has not been reaped, so the process-group ID is reserved.
@@ -190,6 +182,10 @@ fn supervise(recovery: &mut Recovery) -> io::Result<()> {
             .env("PATH", "/usr/bin:/usr/sbin:/bin:/sbin")
             .env("TERM", "linux")
             .env("LD_LIBRARY_PATH", "/usr/lib");
+        if let Ok(file) = crate::diagnostics::open(std::path::Path::new(crate::diagnostics::STDERR))
+        {
+            bootstrap.stderr(file);
+        }
         let pid = child::spawn(console, &mut bootstrap, None)?;
         *active = Some(pid);
         let (status, _) = wait(pid, None, active)?;
@@ -218,15 +214,26 @@ fn supervise(recovery: &mut Recovery) -> io::Result<()> {
         parent.set_nonblocking(true)?;
         let mut command = Command::new(&executable);
         command
-            .args(["--manager", "--events", "/dev/ttyS0"])
+            .args(["--manager", "--events", crate::diagnostics::EVENTS])
             .env("TERM", "linux")
             .env("LD_LIBRARY_PATH", "/usr/lib")
             .env("PATH", "/usr/bin:/usr/sbin:/bin:/sbin")
             .env(session::FD_ENV, socket.as_raw_fd().to_string());
+        // Keep the preceding failure and capture stderr before a manager can
+        // drop privileges. Diagnostics are optional even if storage fails.
+        let _ = fs::rename(
+            crate::diagnostics::STDERR,
+            crate::diagnostics::PREVIOUS_STDERR,
+        );
+        if let Ok(file) = crate::diagnostics::open(std::path::Path::new(crate::diagnostics::STDERR))
+        {
+            command.stderr(file);
+        }
         let pid = match child::spawn(console, &mut command, Some(socket.as_raw_fd())) {
             Ok(pid) => pid,
             Err(error) => {
                 log(&format!("manager spawn failed: {error}"));
+                crate::diagnostics::persist_failure();
                 emergency(console, active)?;
                 continue;
             }
@@ -247,6 +254,14 @@ fn supervise(recovery: &mut Recovery) -> io::Result<()> {
             status.code(),
             status.signal()
         ));
+        if !status.success()
+            && let Ok(error) =
+                crate::diagnostics::tail(std::path::Path::new(crate::diagnostics::STDERR), 4096)
+            && !error.trim().is_empty()
+        {
+            log(&format!("manager stderr: {}", error.trim()));
+            console.notice(&format!("Manager error: {}", error.trim()));
+        }
         // Requests are accepted only after clean manager termination.
         match (status.success(), request) {
             (true, Some(Request::Restart)) => {
@@ -277,10 +292,12 @@ fn supervise(recovery: &mut Recovery) -> io::Result<()> {
             (_, Some(Request::KexecStarting)) => {
                 // A successful kexec never returns to this kernel. Returning is a failed handoff.
                 log("kexec-returned; recovery required");
+                crate::diagnostics::persist_failure();
                 emergency(console, active)?;
                 policy.reset();
             }
             _ => {
+                crate::diagnostics::persist_failure();
                 console.notice(&format!("Manager terminated: {status}. PID 1 is alive."));
                 if policy.failed(Instant::now()) {
                     log("crash-restart");
@@ -401,6 +418,7 @@ fn protected_recovery(console: &mut Console) -> io::Result<()> {
     if crate::security::ready() {
         console.notice("M + Enter: restart the manager with the same protection.");
     }
+    console.notice("L + Enter: view diagnostic logs (read-only; no shell).");
     loop {
         let mut input = [0u8; 1];
         if console.file.read(&mut input)? == 0 {
@@ -408,6 +426,7 @@ fn protected_recovery(console: &mut Console) -> io::Result<()> {
             continue;
         }
         match input[0].to_ascii_lowercase() {
+            b'l' => show_logs(console)?,
             b'm' if crate::security::ready() => return Ok(()),
             b'r' | b'p' => {
                 let how = if input[0].eq_ignore_ascii_case(&b'r') {
@@ -426,6 +445,61 @@ fn protected_recovery(console: &mut Console) -> io::Result<()> {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+fn show_logs(console: &mut Console) -> io::Result<()> {
+    let mut lines = Vec::new();
+    for path in [
+        crate::diagnostics::PREVIOUS_STDERR,
+        crate::diagnostics::STDERR,
+        crate::diagnostics::SUPERVISOR,
+    ] {
+        lines.push(format!("--- {path} ---"));
+        match crate::diagnostics::tail(std::path::Path::new(path), 16 * 1024) {
+            Ok(content) => lines.extend(content.lines().map(str::to_owned)),
+            Err(error) => lines.push(format!("Unavailable: {error}")),
+        }
+    }
+    // Start at the latest supervisor events; older pages remain accessible.
+    let pages: Vec<_> = lines.chunks(12).collect();
+    let mut page = pages.len().saturating_sub(1);
+    loop {
+        console.restore()?;
+        console.notice(&format!(
+            "zbm-rs diagnostics — page {}/{}. Failure report: see supervisor log for ESP save status.",
+            page + 1,
+            pages.len()
+        ));
+        for line in pages[page] {
+            console.notice(line);
+        }
+        console.notice("N + Enter: next; B + Enter: previous; Q + Enter: recovery menu.");
+        let mut input = [0u8; 1];
+        loop {
+            if console.file.read(&mut input)? == 0 {
+                return Ok(());
+            }
+            match input[0].to_ascii_lowercase() {
+                b'n' => {
+                    page = (page + 1).min(pages.len() - 1);
+                    break;
+                }
+                b'b' => {
+                    page = page.saturating_sub(1);
+                    break;
+                }
+                b'q' => {
+                    console.restore()?;
+                    console.notice("Protected recovery. L + Enter: logs; R + Enter: reboot; P + Enter: power off.");
+                    if crate::security::ready() {
+                        console.notice("M + Enter: restart manager.");
+                    }
+                    return Ok(());
+                }
+                _ => {}
+            }
         }
     }
 }

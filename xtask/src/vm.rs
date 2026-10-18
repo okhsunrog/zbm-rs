@@ -223,6 +223,12 @@ pub fn boot(run: &Path, options: BootOptions<'_>) -> Result<()> {
         ]);
     }
     if manifest["test_ssh"] == true {
+        // Q35's root bus itself cannot hotplug. Reserve an explicit fixture
+        // slot before boot for the lifecycle scenario's disposable FAT disk.
+        cmd.args([
+            "-device",
+            "pcie-root-port,id=zbm-fixture-slot,slot=10,chassis=10",
+        ]);
         cmd.args([
             "-nic",
             &format!("user,model=e1000,hostfwd=tcp:127.0.0.1:{port}-:22"),
