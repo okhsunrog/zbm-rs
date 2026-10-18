@@ -80,7 +80,8 @@ pub(crate) fn wait_for<T>(
 fn ready(run: &Path, scans: u64, pools: usize) -> Result<Value> {
     let state = vm::screen(run)?;
     ensure!(
-        state["event"] == "ready" && state["state"]["scans"].as_u64().unwrap_or(0) >= scans,
+        matches!(state["event"].as_str(), Some("ready" | "catalog-ready"))
+            && state["state"]["scans"].as_u64().unwrap_or(0) >= scans,
         "Waiting for scan {scans}: {state}"
     );
     ensure!(
@@ -136,7 +137,7 @@ pub fn run(
     let result = (|| {
         let empty = wait_for(90, Some(&mut owned.0), || ready(run, 1, 0))?;
         ensure!(
-            empty["config"]["ui"]["timeout_secs"] == 0
+            empty["config"]["boot"]["mode"] == "menu"
                 && empty["config"]["zfs"]["import_policy"] == "read-only"
                 && empty["config"]["ui"]["title"] == "zbm-rs test",
             "Manager did not load the immutable test config: {empty}"
@@ -171,7 +172,7 @@ pub fn run(
         if scsi {
             ensure!(disk.starts_with("/dev/sd"), "Expected a SCSI disk: {disk}");
         }
-        let provision = r#"zpool create -f -o cachefile=none -m none zbm_fixture DISPOSABLE_DISK && zfs create -o mountpoint=none zbm_fixture/ROOT && zfs snapshot zbm_fixture/ROOT@fresh && zfs clone -o mountpoint=none zbm_fixture/ROOT@fresh zbm_fixture/clone && zfs rename zbm_fixture/clone zbm_fixture/renamed && zfs promote zbm_fixture/renamed && printf '%s\n' disposable-zbm-test-passphrase > /run/zbm-test-key && zfs create -o encryption=aes-256-gcm -o keyformat=passphrase -o keylocation=file:///run/zbm-test-key -o mountpoint=none zbm_fixture/crypt && zfs unload-key zbm_fixture/crypt && zfs load-key zbm_fixture/crypt && test "$(zfs get -H -o value keystatus zbm_fixture/crypt)" = available && zpool export zbm_fixture"#;
+        let provision = r#"zpool create -f -o cachefile=none -m none zbm_fixture DISPOSABLE_DISK && zfs create -o mountpoint=none zbm_fixture/ROOT && zfs snapshot zbm_fixture/ROOT@fresh && zfs clone -o mountpoint=none zbm_fixture/ROOT@fresh zbm_fixture/clone && zfs rename zbm_fixture/clone zbm_fixture/renamed && zfs promote zbm_fixture/renamed && printf '%s\n' disposable-zbm-test-passphrase > /run/zbm-test-key && zfs create -o encryption=aes-256-gcm -o keyformat=passphrase -o keylocation=file:///run/zbm-test-key -o mountpoint=none zbm_fixture/crypt && zfs unload-key zbm_fixture/crypt && zfs load-key zbm_fixture/crypt && test "$(zfs get -H -o value keystatus zbm_fixture/crypt)" = available && zfs set canmount=noauto mountpoint=/ zbm_fixture/ROOT; zfs set org.zfsbootmenu:active=on zbm_fixture; zfs create -o canmount=noauto -o mountpoint=legacy zbm_fixture/default; zfs create -o canmount=noauto -o mountpoint=/ -o org.zfsbootmenu:active=off zbm_fixture/hidden; zfs create -o canmount=noauto -o mountpoint=/home zbm_fixture/data; zfs set canmount=noauto mountpoint=/ zbm_fixture/crypt; zpool set bootfs=zbm_fixture/default zbm_fixture; printf '%s' source-passphrase > /run/zbm-source-key; zfs create -o encryption=aes-256-gcm -o keyformat=passphrase -o keylocation=file:///run/zbm-source-key -o mountpoint=/keystore zbm_fixture/keystore; mkdir -p /keystore/keys; cp /run/zbm-test-key /keystore/keys/crypt.key; zfs unmount zbm_fixture/keystore; zfs set keylocation=prompt zbm_fixture/keystore; zfs set keylocation=file:///keys/crypt.key org.zfsbootmenu:keysource=zbm_fixture/keystore zbm_fixture/crypt; zpool export zbm_fixture"#;
         vm::ssh(run, &provision.replace("DISPOSABLE_DISK", disk))?;
         vm::key(run, "r")?;
         let pool = wait_for(20, Some(&mut owned.0), || ready(run, 2, 1))?;
@@ -179,17 +180,10 @@ pub fn run(
             pool["state"]["pools"][0]["name"] == "zbm_fixture",
             "Wrong pool: {pool}"
         );
-        // BE policy fixture: inherited active, hidden roots, explicit legacy,
-        // non-root filesystems and an encrypted candidate with a useful diagnostic.
-        vm::ssh(
-            run,
-            "set -eu; zpool import -N -o cachefile=none zbm_fixture; zfs set canmount=noauto mountpoint=/ zbm_fixture/ROOT; zfs set org.zfsbootmenu:active=on zbm_fixture; zfs create -o canmount=noauto -o mountpoint=legacy zbm_fixture/default; zfs create -o canmount=noauto -o mountpoint=/ -o org.zfsbootmenu:active=off zbm_fixture/hidden; zfs create -o canmount=noauto -o mountpoint=/home zbm_fixture/data; zfs set canmount=noauto mountpoint=/ zbm_fixture/crypt; zpool set bootfs=zbm_fixture/default zbm_fixture; zpool export zbm_fixture",
-        )?;
-        vm::key(run, "ret")?;
         wait_for(30, None, || {
             let state = vm::screen(run)?;
             ensure!(
-                state["event"] == "boot-environments" && state["state"]["error"].is_null(),
+                state["event"] == "catalog-ready" && state["state"]["error"].is_null(),
                 "Waiting for boot environments: {state}"
             );
             let environments = state["state"]["environments"].as_array().unwrap();
@@ -200,23 +194,23 @@ pub fn run(
             ensure!(
                 names
                     == [
+                        "zbm_fixture/default",
                         "zbm_fixture/ROOT",
-                        "zbm_fixture/crypt",
-                        "zbm_fixture/default"
+                        "zbm_fixture/crypt"
                     ],
                 "Wrong BE visibility: {names:?}"
             );
             ensure!(
-                state["state"]["selected_environment"] == 2
-                    && environments[2]["is_default"] == true,
+                state["state"]["selected_environment"] == 0
+                    && environments[0]["is_default"] == true,
                 "bootfs was not selected"
             );
             ensure!(
-                environments[1]["unavailable"]
+                environments[2]["unavailable"]
                     .as_str()
-                    .is_some_and(|e| e.contains("Encryption key is unavailable"))
-                    && environments[1]["properties"]["keystatus"] == "unavailable"
-                    && environments[1]["properties"]["keyformat"] == "passphrase",
+                    .is_some_and(|e| e.contains("Locked"))
+                    && environments[2]["properties"]["keystatus"] == "unavailable"
+                    && environments[2]["properties"]["keyformat"] == "passphrase",
                 "Missing encrypted-root diagnostic"
             );
             fs::write(
@@ -228,11 +222,12 @@ pub fn run(
         vm::screenshot(run, &run.join("environments.png"))?;
         fs::write(run.join("environments.txt"), vm::console(run)?)?;
         crate::interface::environments(run)?;
+        keysource(run)?;
         vm::ssh(
             run,
-            r#"test "$(zpool get -H -o value readonly zbm_fixture)" = on; test "$(awk 'index($5, "/run/zbm-rs/roots/") == 1 {n++} END {print n}' /proc/self/mountinfo)" = 2"#,
+            r#"test "$(zpool get -H -o value readonly zbm_fixture)" = on; test "$(awk 'index($5, "/run/zbm-rs/roots/") == 1 {n++} END {print n}' /proc/self/mountinfo)" = 4"#,
         )?;
-        vm::key(run, "b")?;
+        vm::key(run, "f8")?;
         vm::screenshot(run, &run.join("pool.png"))?;
         let console = vm::console(run)?;
         ensure!(
@@ -319,4 +314,56 @@ pub(crate) fn new_manager(run: &Path, previous: u32, pools: usize) -> Result<Val
     );
     ensure!(vm::ssh(run, &format!("test ! -e /proc/{previous}; test -d /proc/1; test /proc/1/exe -ef /proc/{current}/exe"))?.is_empty(), "Unexpected process evidence");
     Ok(state)
+}
+
+/// One encrypted source unlocks a second root without exposing the key to the UI.
+fn keysource(run: &Path) -> Result<()> {
+    vm::key(run, "home")?;
+    vm::key(run, "down")?;
+    vm::key(run, "down")?;
+    wait_for(10, None, || {
+        let state = vm::screen(run)?;
+        let selected = state["state"]["selected_environment"].as_u64().unwrap() as usize;
+        ensure!(
+            state["state"]["environments"][selected]["dataset"] == "zbm_fixture/crypt",
+            "Select encrypted root"
+        );
+        Ok(())
+    })?;
+    vm::key(run, "k")?;
+    wait_for(15, None, || {
+        ensure!(
+            vm::screen(run)?["ui"]["panel"] == "Unlock",
+            "Expected keysource passphrase prompt"
+        );
+        ensure!(
+            vm::console(run)?.contains("zbm_fixture/keystore"),
+            "Prompt must identify the source encryption root"
+        );
+        Ok(())
+    })?;
+    vm::screenshot(run, &run.join("keysource-prompt.png"))?;
+    for key in [
+        "s", "o", "u", "r", "c", "e", "minus", "p", "a", "s", "s", "p", "h", "r", "a", "s", "e",
+        "ret",
+    ] {
+        vm::key(run, key)?;
+    }
+    wait_for(20, None, || {
+        ensure!(
+            vm::screen(run)?["event"] == "catalog-ready",
+            "Waiting for resumed keysource inspection"
+        );
+        vm::ssh(
+            run,
+            "test \"$(zfs get -H -o value keystatus zbm_fixture/crypt)\" = available; test \"$(zfs get -H -o value keystatus zbm_fixture/keystore)\" = available; test -z \"$(ls -A /run/zbm-rs/keys)\"",
+        )?;
+        Ok(())
+    })?;
+    ensure!(
+        !fs::read_to_string(run.join("serial.log"))?.contains("source-passphrase"),
+        "Passphrase leaked into telemetry"
+    );
+    fs::write(run.join("keysource-report.json"), b"{\"passed\":true,\"checks\":[\"source-prompt\",\"dependent-root-unlock\",\"resumed-intent\",\"RAM-key-cache-cleanup\"]}")?;
+    Ok(())
 }

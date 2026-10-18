@@ -49,7 +49,13 @@ pub fn run(run: &Path, image: &Path, fixture: &Path, options: Options<'_>) -> Re
     let mut owned = OwnedVm(command.stdout(Stdio::null()).spawn()?);
     let result = (|| {
         wait_for(90, Some(&mut owned.0), || {
-            ensure!(vm::screen(run)?["event"] == "ready", "Waiting for loader");
+            ensure!(
+                matches!(
+                    vm::screen(run)?["event"].as_str(),
+                    Some("ready" | "catalog-ready")
+                ),
+                "Waiting for loader"
+            );
             vm::ssh(run, "test -b /dev/vdb")?;
             Ok(())
         })?;
@@ -114,7 +120,7 @@ ln -s $fake /fixture-root/nix/var/nix/profiles/system-4-link"#,
         wait_for(20, None, || {
             let state = vm::screen(run)?;
             ensure!(
-                state["event"] == "ready"
+                matches!(state["event"].as_str(), Some("ready" | "catalog-ready"))
                     && state["state"]["pools"]
                         .as_array()
                         .is_some_and(|p| p.len() == 1),
@@ -122,7 +128,6 @@ ln -s $fake /fixture-root/nix/var/nix/profiles/system-4-link"#,
             );
             Ok(())
         })?;
-        vm::key(run, "ret")?;
         environments(run)?;
         if snapshot {
             return snapshot_boot(
@@ -134,9 +139,10 @@ ln -s $fake /fixture-root/nix/var/nix/profiles/system-4-link"#,
                 swtpm,
             );
         }
-        vm::key(run, "ret")?;
+        vm::key(run, "k")?;
         targets(run, secure_vars.is_some())?;
         if secure_vars.is_some() {
+            select_generation(run, 4)?;
             vm::key(run, "ret")?;
             wait_for(15, None, || {
                 let state = vm::screen(run)?;
@@ -156,9 +162,8 @@ ln -s $fake /fixture-root/nix/var/nix/profiles/system-4-link"#,
         let old = manager_pid(run)?;
         vm::key(run, "n")?;
         wait_for(20, None, || new_manager(run, old, 1))?;
-        vm::key(run, "ret")?;
         environments(run)?;
-        vm::key(run, "ret")?;
+        vm::key(run, "k")?;
         targets(run, secure_vars.is_some())?;
         select_generation(run, 1)?;
         vm::screenshot(run, &run.join("selected-generation.png"))?;
@@ -308,7 +313,7 @@ fn targets(run: &Path, secure: bool) -> Result<()> {
     wait_for(30, None, || {
         let state = vm::screen(run)?;
         ensure!(
-            state["event"] == "boot-targets",
+            matches!(state["event"].as_str(), Some("boot-targets" | "navigation")),
             "Waiting for generation discovery"
         );
         ensure!(
@@ -341,7 +346,7 @@ fn environments(run: &Path) -> Result<()> {
     wait_for(30, None, || {
         let state = vm::screen(run)?;
         ensure!(
-            state["event"] == "boot-environments" && state["state"]["error"].is_null(),
+            state["event"] == "catalog-ready" && state["state"]["error"].is_null(),
             "Waiting for BE discovery: {state}"
         );
         let selected = state["state"]["selected_environment"].as_u64().unwrap() as usize;
@@ -441,10 +446,15 @@ fn snapshot_boot(
     )?;
     vm::key(run, "r")?;
     wait_for(20, None, || {
-        ensure!(vm::screen(run)?["event"] == "ready", "Waiting for rescan");
+        ensure!(
+            matches!(
+                vm::screen(run)?["event"].as_str(),
+                Some("ready" | "catalog-ready")
+            ),
+            "Waiting for rescan"
+        );
         Ok(())
     })?;
-    vm::key(run, "ret")?;
     environments(run)?;
     snapshot_generations(run)?;
     vm::ssh(run, "zpool set org.zfsbootmenu:readonly=on zbm_fixture")?;
@@ -535,7 +545,6 @@ fn snapshot_boot(
     let old = manager_pid(run)?;
     vm::ssh(run, &format!("kill -ABRT {old}"))?;
     wait_for(20, None, || new_manager(run, old, 1))?;
-    vm::key(run, "ret")?;
     environments(run)?;
     snapshot_generations(run)?;
     ensure!(

@@ -1,25 +1,24 @@
 #[path = "src/config/schema.rs"]
+#[allow(dead_code)]
 mod schema;
 fn main() {
-    println!("cargo::rerun-if-env-changed=ZBM_RS_CONFIG");
+    println!("cargo::rerun-if-env-changed=ZBM_RS_BUILD_POLICY");
     println!("cargo::rerun-if-changed=src/config/schema.rs");
-    let path = std::env::var_os("ZBM_RS_CONFIG")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/default.json")
-        });
-    println!("cargo::rerun-if-changed={}", path.display());
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        let input = std::fs::read_to_string(&path)?;
-        let config: schema::Config = serde_json::from_str(&input)?;
-        config.validate()?;
+        let input = match std::env::var("ZBM_RS_BUILD_POLICY") {
+            Ok(input) => input,
+            Err(std::env::VarError::NotPresent) => "{}".into(),
+            Err(error) => return Err(error.into()),
+        };
+        let policy: schema::BuildPolicy = serde_json::from_str(&input)?;
+        policy.validate()?;
         println!(
             "cargo::rustc-env=ZBM_DIAGNOSTIC_ESP_PARTUUID={}",
-            config.diagnostics.esp_partuuid.as_deref().unwrap_or("")
+            policy.diagnostic_esp_partuuid.as_deref().unwrap_or("")
         );
         println!(
             "cargo::rustc-env=ZBM_IMAGE_SECURITY_MODE={}",
-            match config.security.mode {
+            match policy.security_mode {
                 schema::SecurityMode::Off => "off",
                 schema::SecurityMode::Enforce => "enforce",
             }
@@ -27,9 +26,6 @@ fn main() {
         Ok(())
     })();
     if let Err(error) = result {
-        panic!(
-            "invalid zbm-rs build configuration {}: {error}",
-            path.display()
-        );
+        panic!("invalid zbm-rs build policy: {error}");
     }
 }

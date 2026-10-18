@@ -43,6 +43,7 @@ enum Request {
 
 #[derive(Serialize, Deserialize)]
 enum Reply {
+    Unlock(zbm_core::unlock::Status),
     Ready,
     Pools(Vec<Pool>),
     Environments(Vec<BootEnvironment>),
@@ -199,6 +200,7 @@ pub async fn discover() -> std::result::Result<Vec<Pool>, String> {
 pub async fn perform(action: Action) -> Result<Outcome> {
     tokio::task::spawn_blocking(move || match call(Request::Operation(Box::new(action)))? {
         Reply::Environments(v) => Ok(Outcome::Environments(v)),
+        Reply::Unlock(v) => Ok(Outcome::Unlock(v)),
         Reply::Snapshots(v) => Ok(Outcome::Snapshots(v)),
         Reply::Targets(v) => Ok(Outcome::Targets(v)),
         Reply::Prepared(v) => Ok(Outcome::Prepared(v)),
@@ -263,12 +265,12 @@ async fn normalize(action: Action, config: &Config) -> Result<Action> {
         Action::Unlock {
             pool: p,
             dataset,
-            passphrase,
+            answer,
             ..
         } => Action::Unlock {
             pool: pool(&zfs, p.guid).await?,
             dataset,
-            passphrase,
+            answer,
             readonly,
             limit,
         },
@@ -326,6 +328,7 @@ async fn normalize(action: Action, config: &Config) -> Result<Action> {
 
 pub fn run() -> Result<()> {
     ensure!(unsafe { libc::geteuid() } == 0, "Broker requires root");
+    zbm_core::unlock::cleanup_cache()?;
     let fd: i32 = std::env::var(FD_ENV)?.parse()?;
     ensure!(fd >= 3, "Invalid private broker descriptor");
     unsafe {
@@ -363,6 +366,7 @@ pub fn run() -> Result<()> {
                     let action = runtime.block_on(normalize(*action, &config))?;
                     match runtime.block_on(action.run_local())? {
                         Outcome::Environments(v) => Reply::Environments(v),
+                        Outcome::Unlock(v) => Reply::Unlock(v),
                         Outcome::Snapshots(v) => Reply::Snapshots(v),
                         Outcome::Targets(v) => Reply::Targets(v),
                         Outcome::Prepared(v) => Reply::Prepared(v),

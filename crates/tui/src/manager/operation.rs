@@ -20,7 +20,7 @@ pub enum Action {
     Unlock {
         pool: Pool,
         dataset: String,
-        passphrase: zeroize::Zeroizing<Vec<u8>>,
+        answer: Option<zbm_core::unlock::Answer>,
         readonly: bool,
         limit: u32,
     },
@@ -66,6 +66,7 @@ pub enum Action {
 }
 
 pub enum Outcome {
+    Unlock(zbm_core::unlock::Status),
     Changed {
         environments: Vec<BootEnvironment>,
         selected: String,
@@ -148,14 +149,9 @@ impl Action {
             Self::Unlock {
                 pool,
                 dataset,
-                passphrase,
-                readonly,
-                limit,
-            } => {
-                boot_zfs::unlock_environment(&zfs, &pool, &dataset, &passphrase).await?;
-                drop(passphrase);
-                Outcome::Environments(boot_zfs::environments(&zfs, &pool, readonly, limit).await?)
-            }
+                answer,
+                ..
+            } => Outcome::Unlock(zbm_core::unlock::resolve(&zfs, &pool, &dataset, answer).await?),
             Self::Rollback {
                 pool,
                 source,

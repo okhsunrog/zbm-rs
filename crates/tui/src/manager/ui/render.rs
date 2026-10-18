@@ -48,15 +48,17 @@ fn panel(title: impl Into<String>, color: Color) -> Block<'static> {
         .style(ink(INK).bg(BASE))
 }
 fn tag_style(tag: &str) -> Style {
-    ink(if tag.contains("UNAVAILABLE") {
-        NOTICE
-    } else if tag == "SNAPSHOT" {
-        SNAPSHOT
-    } else if tag.contains("BOOTFS") {
-        GOOD
-    } else {
-        FOCUS
-    })
+    ink(
+        if tag.contains("UNAVAILABLE") || tag.contains("LOCKED") || tag == "ERROR" {
+            NOTICE
+        } else if tag == "SNAPSHOT" {
+            SNAPSHOT
+        } else if tag.contains("BOOTFS") {
+            GOOD
+        } else {
+            FOCUS
+        },
+    )
 }
 
 impl Ui {
@@ -130,18 +132,25 @@ impl Ui {
                 }
                 lines.push(field("Boot targets", env.targets.len().to_string()));
                 lines.push(field(
-                    "Unavailable",
+                    "Rejected",
                     env.rejected_generations.len().to_string(),
                 ));
                 lines.push(field("Encryption", &env.properties.encryption));
                 lines.push(Line::raw(""));
                 if let Some(error) = &env.unavailable {
-                    lines.push(heading("Unavailable", NOTICE));
+                    lines.push(heading(
+                        if env.properties.locked() {
+                            "Locked"
+                        } else {
+                            "Boot unavailable"
+                        },
+                        NOTICE,
+                    ));
                     lines.push(Line::raw(clean(error)));
                 } else {
-                    lines.push(heading("Choose a boot target", FOCUS));
+                    lines.push(heading("Boot this system", FOCUS));
                     lines.push(Line::raw(
-                        "Enter opens the available generations or kernels.",
+                        "Enter boots the default. K opens kernels or generations.",
                     ));
                     if options.config.ui.show_snapshots {
                         lines.push(Line::raw("T opens this environment's snapshots."));
@@ -383,6 +392,9 @@ impl Ui {
             if !compact && !state.environments.is_empty() && options.config.ui.show_snapshots {
                 keys.extend(keycap("T", "Snapshots", MUTED));
             }
+            if !state.environments.is_empty() {
+                keys.extend(keycap("K", "Kernels", MUTED));
+            }
             keys.extend(keycap("I", "Details", MUTED));
             keys.extend(keycap("F2", "Actions", MUTED));
         }
@@ -600,6 +612,12 @@ impl Ui {
             ("Working: ", FOCUS, operation.to_owned())
         } else if state.activity.is_scanning() {
             ("Working: ", FOCUS, "Discovering ZFS pools...".into())
+        } else if let Some(seconds) = state.countdown_secs {
+            (
+                "Autoboot: ",
+                FOCUS,
+                format!("Booting the default system in {seconds}s. Any key opens the menu."),
+            )
         } else if self.searching {
             (
                 "",
@@ -746,13 +764,13 @@ impl Ui {
         } else {
             let text = match self.panel {
                 Panel::Unlock => vec![
-                    Line::raw(
+                    Line::raw(self.unlock_prompt.as_ref().map(clean).unwrap_or_else(|| {
                         state
                             .environments
                             .get(state.selected_environment)
                             .map(|e| clean(&e.dataset))
-                            .unwrap_or_default(),
-                    ),
+                            .unwrap_or_default()
+                    })),
                     Line::raw(""),
                     Line::raw("Enter the ZFS encryption passphrase."),
                     Line::raw("Input is hidden and is not saved. Escape cancels."),

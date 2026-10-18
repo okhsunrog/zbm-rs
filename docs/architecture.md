@@ -1,18 +1,30 @@
 # Architecture
 
-Boot environment discovery reads effective ZFS properties through zfskit after
-an explicit selected-pool import. Visibility uses mountpoint and inherited
-org.zfsbootmenu:active, with bootfs selecting the default environment. Only
-mountable candidates with available encryption keys are mounted read-only under the ownership
-ledger. Non-boot filesystems are left alone.
-Locked passphrase environments offer explicit hidden-input unlock through the
-broker, with pool/encryption-root validation and secret stdin. No discovery path
-loads keys or consults keylocations automatically. The selected OS still owns
-its own unlock after kexec; loaded keys are not transferred across kernels.
-The TUI separates pools, boot environments, Linux kernel pairs and NixOS generations. Boot targets have an
-explicit Linux or NixOS backend; generation, toplevel and init are optional for
-Linux. ZBM kernel/commandline/rootprefix properties drive Linux selection and
-root arguments; Bootspec remains authoritative for NixOS.
+Pool discovery is non-mutating. The startup workflow separately imports eligible
+pools under the signed image policy, then merges their read-only BE catalogs.
+Each environment has an owning pool GUID and dataset name. One pool's ordinary
+failure does not hide peers. F8 exposes pool state and manual import. Imports are
+never forced and external imports are never claimed by the ownership ledger.
+
+The default environment comes from unambiguous bootfs and optional image-owned
+pool preference. Core adapters select the default Linux kernel or actual current
+NixOS profile; the TUI never assumes that index zero is bootable or current.
+Enter loads the default directly, K inspects alternatives and T opens snapshots.
+The manager carries a selected intent through unlock and catalog refresh.
+Separate pool, kernel and generation views are optional navigation, not startup steps.
+
+Unlock follows only the requested BE's encryption dependencies through the broker.
+One common encryption root is requested at startup; independent roots are loaded
+on demand. Local file keys and encrypted keysource datasets use bounded, rooted
+reads and ledger-owned read-only mounts. Dependency cycles fall back to direct
+passphrase input when possible. Challenge/answer messages identify the actual
+root; only the private answer frame carries a zeroized passphrase. File keys are
+briefly staged in root-only RAM files and removed, including stale broker caches
+on protected restart. No secrets enter telemetry or persistent failure reports.
+Menu/countdown/immediate policy comes only from the signed image. Ordinary JSON
+settings do not affect Rust compilation; only the compiled security mode and
+explicit diagnostic ESP bind the executable. See [configuration](configuration.md).
+
 Native NixOS installation prepares source-bound signed artifacts outside the
 store; see [NixOS deployment](nixos-deployment.md). Discovery never executes
 runtime secret appenders and handoff revalidates both source and authorization.

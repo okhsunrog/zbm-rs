@@ -6,7 +6,6 @@ pub const IMAGE_PATH: &str = "/etc/zbm-rs/config.json";
 pub fn image_enforced() -> bool {
     env!("ZBM_IMAGE_SECURITY_MODE") == "enforce"
 }
-const DEFAULT_JSON: &str = include_str!("../../../config/default.json");
 
 pub fn parse(input: &str) -> anyhow::Result<Config> {
     let config: Config = serde_json::from_str(input)?;
@@ -27,7 +26,7 @@ pub fn load(supervised: bool) -> anyhow::Result<Config> {
                 .with_context(|| format!("reading config {}", path.display()))?,
         )
         .with_context(|| format!("invalid config {}", path.display())),
-        None => parse(DEFAULT_JSON),
+        None => Ok(Config::default()),
     }?;
     if supervised && (config.security.mode == SecurityMode::Enforce) != image_enforced() {
         anyhow::bail!("image security mode differs from the compiled image policy");
@@ -41,7 +40,7 @@ mod tests {
     #[test]
     fn nested_defaults_and_escaped_strings_round_trip() {
         let config = parse(r#"{"ui":{"title":"Boot \"Linux\""},"zfs":{"import_policy":"read-only"},"kernel_args":["quote=\"value\"","path=\\a","unicode=λ"]}"#).unwrap();
-        assert_eq!(config.ui.timeout_secs, 5);
+        assert_eq!(config.boot.timeout_secs, 5);
         assert!(matches!(config.zfs.import_policy, ImportPolicy::ReadOnly));
         let roundtrip = parse(&serde_json::to_string(&config).unwrap()).unwrap();
         assert_eq!(config.kernel_args, roundtrip.kernel_args);
@@ -51,7 +50,13 @@ mod tests {
     fn invalid_enum_unknown_fields_and_semantics_fail() {
         for (input, expected) in [
             (r#"{"zfs":{"import_policy":"unsafe"}}"#, "unknown variant"),
-            (r#"{"ui":{"timeout_secs":301}}"#, "ui.timeout_secs"),
+            (r#"{"boot":{"timeout_secs":301}}"#, "boot.timeout_secs"),
+            (r#"{"boot":{"timeout_secs":0}}"#, "boot.timeout_secs"),
+            (r#"{"boot":{"mode":"unsafe"}}"#, "unknown variant"),
+            (
+                r#"{"boot":{"preferred_pool_guid":"0"}}"#,
+                "preferred_pool_guid",
+            ),
             (
                 r#"{"manager":{"restart_limit":9}}"#,
                 "manager.restart_limit",

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub boot: Boot,
     pub ui: Ui,
     pub manager: Manager,
     pub zfs: Zfs,
@@ -19,19 +20,69 @@ pub struct Diagnostics {
     /// Explicit GPT partition identity; never search or write arbitrary ESPs.
     pub esp_partuuid: Option<String>,
 }
+
+/// Only these invariants affect the executable; ordinary settings belong to the image.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BuildPolicy {
+    pub security_mode: SecurityMode,
+    pub diagnostic_esp_partuuid: Option<String>,
+}
+
+impl BuildPolicy {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.diagnostic_esp_partuuid.as_ref().is_some_and(|id| {
+            id.len() != 36
+                || id.bytes().enumerate().any(|(i, ch)| {
+                    if [8, 13, 18, 23].contains(&i) {
+                        ch != b'-'
+                    } else {
+                        !ch.is_ascii_hexdigit()
+                    }
+                })
+        }) {
+            return Err("diagnostics.esp_partuuid must be a GPT partition UUID".into());
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Ui {
-    pub timeout_secs: u32,
     pub show_snapshots: bool,
     pub title: Option<String>,
 }
 impl Default for Ui {
     fn default() -> Self {
         Self {
-            timeout_secs: 5,
             show_snapshots: true,
             title: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BootMode {
+    #[default]
+    Menu,
+    Countdown,
+    Immediate,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Boot {
+    pub mode: BootMode,
+    pub timeout_secs: u32,
+    pub preferred_pool_guid: Option<String>,
+}
+impl Default for Boot {
+    fn default() -> Self {
+        Self {
+            mode: BootMode::Menu,
+            timeout_secs: 5,
+            preferred_pool_guid: None,
         }
     }
 }
@@ -105,22 +156,26 @@ impl Default for Nixos {
 }
 
 impl Config {
+    pub fn build_policy(&self) -> BuildPolicy {
+        BuildPolicy {
+            security_mode: self.security.mode,
+            diagnostic_esp_partuuid: self.diagnostics.esp_partuuid.clone(),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.security.validate()?;
-        if self.diagnostics.esp_partuuid.as_ref().is_some_and(|id| {
-            id.len() != 36
-                || id.bytes().enumerate().any(|(i, ch)| {
-                    if [8, 13, 18, 23].contains(&i) {
-                        ch != b'-'
-                    } else {
-                        !ch.is_ascii_hexdigit()
-                    }
-                })
-        }) {
-            return Err("diagnostics.esp_partuuid must be a GPT partition UUID".into());
+        self.build_policy().validate()?;
+        if !(1..=300).contains(&self.boot.timeout_secs) {
+            return Err("boot.timeout_secs must be in 1..=300".into());
         }
-        if self.ui.timeout_secs > 300 {
-            return Err("ui.timeout_secs must be in 0..=300".into());
+        if self
+            .boot
+            .preferred_pool_guid
+            .as_ref()
+            .is_some_and(|id| id.parse::<u64>().ok().is_none_or(|guid| guid == 0))
+        {
+            return Err("boot.preferred_pool_guid must be a nonzero decimal GUID".into());
         }
         if self.manager.restart_limit > 8 {
             return Err("manager.restart_limit must be in 0..=8".into());

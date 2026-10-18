@@ -16,7 +16,8 @@ import ./image.nix {
   forcedModules = [ "insyde_efivarfs" ];
   moduleOptions.insyde_efivarfs = "expose=1";
   loaderConfig = {
-    ui = { timeout_secs = 0; show_snapshots = true; };
+    boot.mode = "menu";
+    ui.show_snapshots = true;
     zfs.import_policy = "host-id";
     kernel_args = [];
     diagnostics.esp_partuuid = diagnosticEspPartuuid;

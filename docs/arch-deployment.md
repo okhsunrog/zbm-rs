@@ -9,22 +9,25 @@ boot, restart/recovery, keyboard and target-OS TPM checks.
 
 ## Encrypted roots
 
-Selected-pool inspection displays locked boot environments without loading keys.
-Enter on a mountable passphrase-encrypted environment opens hidden input. Escape
-cancels; a wrong passphrase leaves the key unavailable and permits another try.
-The broker rechecks the selected pool, dataset, encryption-root ancestry and key
-format. It overrides `keylocation` with `prompt` and sends the supplied bytes via
-zfskit's secret stdin support. It never opens a keylocation, loads keys recursively
-or changes persistent encryption properties. Buffers owned by the UI and RPC
-framing are cleared on drop; this is not a claim that every library/allocator
-copy is erased. Passphrases are absent from UI telemetry, argv and disk files.
+The broker validates the selected pool GUID, boot dataset and encryption-root
+ownership. Unlock may ask for a dependent keysource root's passphrase. Success
+resumes the original boot/browse action; incorrect input keeps the prompt open,
+and Escape cancels. One common root is requested at startup, independent roots
+only on demand. Supplied passphrases use secret stdin and are not tried on peers.
 
-An already available key permits normal read-only discovery, including snapshot
-inspection and explicit writable clone preparation. Pool export before handoff
-does not transfer the loaded key into the next kernel. The selected OS initramfs
-must still support its own ZFS unlock, either by prompting again or through its
-existing trusted key arrangement. Never put a real disk key in a public EFI image
-or the Nix store. Raw/hex keys and ZBM `keysource` discovery are not implemented.
+Local file:// keylocations and inherited org.zfsbootmenu:keysource are supported.
+An encrypted source on an owned imported pool is unlocked and mounted read-only.
+Paths are resolved relative to its normal mountpoint, then its dataset root,
+without symlink escape. Keys must be regular files of at most 4 KiB. File keys,
+including OpenZFS raw/hex formats, briefly use a root-only RAM cache removed after
+use and on protected manager restart. Missing files and dependency cycles offer a
+direct passphrase where keyformat allows it. Network keys and hooks are unsupported.
+Persistent encryption properties remain unchanged. No secret appears in UI
+telemetry, argv, Nix inputs, ESP diagnostics or persistent storage.
+
+Keys loaded into ZFS do not transfer across kexec. The selected OS initramfs must
+unlock its root with its own trusted arrangement. Never put production disk keys
+in a public EFI or Nix store. Unlock does not authorize a boot or a recovery shell.
 
 ## Authorize Arch boot inputs
 

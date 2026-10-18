@@ -64,15 +64,23 @@ let
     allowMissing = false;
     extraFirmwarePaths = hardware.firmwarePaths or [];
   };
-  configJson = pkgs.writeText "zbm-rs-config.json" (builtins.toJSON trustedConfig);
+  rawConfigJson = pkgs.writeText "zbm-rs-config-input.json" (builtins.toJSON trustedConfig);
+  # Validation is an image dependency, never an input to compiling the validator.
+  configJson = pkgs.runCommand "zbm-rs-config.json" {} ''
+    ${binary}/bin/zbm-rs --validate-config ${rawConfigJson} > $out
+  '';
   rustSource = lib.cleanSourceWith {
     src = source;
     filter = path: type:
       let relative = lib.removePrefix (toString source + "/") path;
-      in path == toString source || lib.any (name: relative == name || lib.hasPrefix (name + "/") relative) [ "Cargo.toml" "Cargo.lock" "crates" "xtask" "config" ];
+      in path == toString source || relative == "config" || relative == "config/test.json"
+        || lib.any (name: relative == name || lib.hasPrefix (name + "/") relative) [ "Cargo.toml" "Cargo.lock" "crates" "xtask" ];
   };
   binary = runtimePkgs.rustPlatform.buildRustPackage {
-    ZBM_RS_CONFIG = configJson;
+    ZBM_RS_BUILD_POLICY = builtins.toJSON {
+      security_mode = if enforced then "enforce" else "off";
+      diagnostic_esp_partuuid = rawConfig.diagnostics.esp_partuuid or null;
+    };
     pname = "zbm-rs";
     version = "0.1.0";
     src = rustSource;

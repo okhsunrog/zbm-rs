@@ -1,4 +1,5 @@
-"""Exercise Cargo config validation and input tracking. Run with uv run."""
+"""Check runtime validation, binary reuse and compiled policy tracking. Run with uv run."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -7,43 +8,84 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 
-def build(path):
+def build(path=None, policy=None):
     env = os.environ.copy()
-    env["ZBM_RS_CONFIG"] = str(path)
-    result = subprocess.run(
+    env.pop("ZBM_RS_CONFIG", None)
+    env.pop("ZBM_RS_BUILD_POLICY", None)
+    if path is not None:
+        env["ZBM_RS_CONFIG"] = str(path)
+    if policy is not None:
+        env["ZBM_RS_BUILD_POLICY"] = json.dumps(policy)
+    return subprocess.run(
         ["cargo", "build", "-p", "zbm-rs", "--locked", "--message-format=json"],
         cwd=ROOT, env=env, text=True, capture_output=True,
     )
-    return result
+
+
+def artifact(result):
+    assert result.returncode == 0, result.stderr
+    messages = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+    return next(m for m in messages if m.get("reason") == "compiler-artifact"
+                and m["target"]["name"] == "zbm-rs" and m.get("executable"))
+
+
+def run(binary, *args, config=None):
+    env = os.environ.copy()
+    env.pop("ZBM_RS_CONFIG", None)
+    if config is not None:
+        env["ZBM_RS_CONFIG"] = str(config)
+    return subprocess.run([str(binary), *args], env=env, text=True, capture_output=True)
+
+
+baseline = artifact(build())
+binary = Path(baseline["executable"])
+digest = hashlib.sha256(binary.read_bytes()).hexdigest()
 
 with tempfile.TemporaryDirectory(prefix="zbm-config-check-") as directory:
     path = Path(directory) / "config.json"
     fixture = json.loads((ROOT / "config/test.json").read_text())
     path.write_text(json.dumps(fixture))
-    valid = build(path)
+    assert artifact(build(path))["fresh"], "Runtime config path rebuilt the executable"
+    valid = run(binary, "--validate-config", str(path))
     assert valid.returncode == 0, valid.stderr
-    messages = [json.loads(line) for line in valid.stdout.splitlines() if line.startswith("{")]
-    script = next(m for m in messages if m.get("reason") == "build-script-executed" and "zbm-rs@" in m["package_id"])
-    directives = (Path(script["out_dir"]).parent / "output").read_text()
-    assert "cargo::rerun-if-env-changed=ZBM_RS_CONFIG" in directives
-    assert f"cargo::rerun-if-changed={path}" in directives
-    assert not (Path(script["out_dir"]) / "config.rs").exists(), "Unexpected generated Rust config"
+    preview = run(binary, "--print-config", config=path)
+    assert json.loads(preview.stdout)["ui"]["title"] == fixture["ui"]["title"]
+    fixture["ui"]["title"] = "Changed without recompilation"
+    path.write_text(json.dumps(fixture))
+    assert artifact(build(path))["fresh"], "Runtime config content rebuilt the executable"
+    assert json.loads(run(binary, "--print-config", config=path).stdout)["ui"]["title"] == fixture["ui"]["title"]
     fixture["nixos"]["generation_limit"] = 0
     path.write_text(json.dumps(fixture))
-    invalid = build(path)
-    assert invalid.returncode != 0, "Changed invalid JSON did not invalidate Cargo build"
+    assert artifact(build(path))["fresh"], "Runtime JSON unexpectedly participates in compilation"
+    invalid = run(binary, "--validate-config", str(path))
+    assert invalid.returncode != 0, "Invalid image JSON passed validation"
     assert "nixos.generation_limit" in invalid.stderr, invalid.stderr
     path.write_text('{"zfs":{"import_policy":"unsafe"}}')
-    invalid = build(path)
+    invalid = run(binary, "--validate-config", str(path))
     assert invalid.returncode != 0 and "unknown variant" in invalid.stderr, invalid.stderr
     path.write_text("{}")
-    assert build(path).returncode == 0, "Defaults should validate"
-    other = Path(directory) / "other.json"
-    other.write_text('{"manager":{"restart_limit":99}}')
-    invalid = build(other)
-    assert invalid.returncode != 0 and "manager.restart_limit" in invalid.stderr, invalid.stderr
+    assert run(binary, "--validate-config", str(path)).returncode == 0, "Defaults should validate"
+    missing = Path(directory) / "missing.json"
+    assert artifact(build(missing))["fresh"], "A missing runtime file must not affect compilation"
+    assert run(binary, "--print-config", config=missing).returncode != 0
+    assert hashlib.sha256(binary.read_bytes()).hexdigest() == digest
 
-result = subprocess.run(["cargo", "build", "-p", "zbm-rs", "--locked"], cwd=ROOT,
-    env={key: value for key, value in os.environ.items() if key != "ZBM_RS_CONFIG"}, capture_output=True, text=True)
-assert result.returncode == 0, result.stderr
-print("Config checks passed: typed JSON, defaults, validation, env/file input tracking, no Rust codegen")
+defaults = run(binary, "--validate-config", str(ROOT / "config/default.json"))
+assert defaults.returncode == 0, defaults.stderr
+assert json.loads(defaults.stdout) == json.loads(run(binary, "--print-config").stdout)
+
+try:
+    policy = {"security_mode": "enforce"}
+    assert not artifact(build(policy=policy))["fresh"], "Compiled security policy change was ignored"
+    policy["diagnostic_esp_partuuid"] = "ed5d4b72-0aac-48d3-8f89-43362d952ca0"
+    assert not artifact(build(policy=policy))["fresh"], "Compiled ESP policy change was ignored"
+    invalid = build(policy={"security_mode": "unsafe"})
+    assert invalid.returncode != 0 and "unknown variant" in invalid.stderr, invalid.stderr
+    invalid = build(policy={"diagnostic_esp_partuuid": "../../sda"})
+    assert invalid.returncode != 0 and "GPT partition UUID" in invalid.stderr, invalid.stderr
+    invalid = build(policy={"ui": {"timeout_secs": 10}})
+    assert invalid.returncode != 0 and "unknown field" in invalid.stderr, invalid.stderr
+finally:
+    artifact(build())
+
+print("Config checks passed: runtime validation, unchanged binary for JSON edits, tracked security/ESP build policy")

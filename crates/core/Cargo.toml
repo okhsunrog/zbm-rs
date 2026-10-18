@@ -14,5 +14,6 @@ serde_json = "1.0.151"
 sha2 = "0.11.0"
 shlex = "2.0.1"
 tokio = { version = "1.53.2", features = ["rt", "time", "macros"] }
+zeroize = { version = "1.9.1", features = ["serde"] }
 zfskit = { version = "0.3.0" }
 zstd = "0.14.0"

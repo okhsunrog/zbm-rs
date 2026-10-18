@@ -10,18 +10,18 @@ let
   optionalTpm = json { settings.security.tpm.policy = "optional"; };
   requiredTpm = json { settings.security.tpm.policy = "required"; };
   minimum = json { settings = {
-    ui.timeout = 0;
+    boot.timeout = 1;
     manager.restartLimit = 0;
     zfs.importPolicy = "read-only";
     nixos.generationLimit = 1;
   }; };
   maximum = json { settings = {
-    ui.timeout = 300;
+    boot.timeout = 300;
     manager.restartLimit = 8;
     nixos.generationLimit = 512;
   }; };
   legacy = json {
-    timeout = 0;
+    timeout = 1;
     manager.restartLimit = 0;
     zfs.importPolicy = "read-only";
     configurationLimit = 1;
@@ -39,6 +39,6 @@ in pkgs.runCommand "zbm-module-config-parity" { nativeBuildInputs = [ pkgs.jq ];
   ${binary}/bin/zbm-rs --validate-config ${requiredTpm} > $out/tpm-required.json
   jq -e '.security.tpm == {"policy":"optional"}' $out/tpm-optional.json
   jq -e '.security.tpm == {"policy":"required"}' $out/tpm-required.json
-  jq -e '.ui.timeout_secs == 0 and .manager.restart_limit == 0 and .nixos.generation_limit == 1 and .zfs.import_policy == "read-only"' $out/minimum.json
-  jq -e '.ui.timeout_secs == 300 and .manager.restart_limit == 8 and .nixos.generation_limit == 512' $out/maximum.json
+  jq -e '.boot.timeout_secs == 1 and .manager.restart_limit == 0 and .nixos.generation_limit == 1 and .zfs.import_policy == "read-only"' $out/minimum.json
+  jq -e '.boot.timeout_secs == 300 and .manager.restart_limit == 8 and .nixos.generation_limit == 512' $out/maximum.json
 ''

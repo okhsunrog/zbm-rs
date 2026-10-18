@@ -1,8 +1,27 @@
 {
-  "ui": {"timeout_secs": 0, "show_snapshots": false, "title": "zbm-rs test"},
-  "manager": {"restart_limit": 2},
-  "diagnostics": {"esp_partuuid": "ed5d4b72-0aac-48d3-8f89-43362d952ca0"},
-  "zfs": {"import_policy": "read-only"},
-  "nixos": {"generation_limit": 3},
-  "kernel_args": ["quiet", "zbm.test=1"]
+  "ui": {
+    "show_snapshots": false,
+    "title": "zbm-rs test"
+  },
+  "manager": {
+    "restart_limit": 2
+  },
+  "diagnostics": {
+    "esp_partuuid": "ed5d4b72-0aac-48d3-8f89-43362d952ca0"
+  },
+  "zfs": {
+    "import_policy": "read-only"
+  },
+  "nixos": {
+    "generation_limit": 3
+  },
+  "kernel_args": [
+    "quiet",
+    "zbm.test=1"
+  ],
+  "boot": {
+    "mode": "menu",
+    "timeout_secs": 1,
+    "preferred_pool_guid": null
+  }
 }

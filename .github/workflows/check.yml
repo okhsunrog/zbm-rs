@@ -29,7 +29,7 @@ jobs:
         working-directory: zbm-rs
       - run: nix build .#zbm-rs-efi .#checks.x86_64-linux.image-size --out-link result
         working-directory: zbm-rs
-      - run: nix build .#checks.x86_64-linux.module-config --out-link result-module-config
+      - run: nix build .#checks.x86_64-linux.module-config .#checks.x86_64-linux.config-binary-reuse --out-link result-module-config
         working-directory: zbm-rs
       - run: nix build .#checks.x86_64-linux.module-options --out-link result-module-options
         working-directory: zbm-rs

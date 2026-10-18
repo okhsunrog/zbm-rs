@@ -6,6 +6,7 @@ pub mod environment;
 mod initrd;
 pub mod linux;
 pub mod security;
+pub mod unlock;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 pub use zfskit::Zfs;
@@ -31,6 +32,9 @@ impl TryFrom<DiscoveredPool> for Pool {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct State {
+    pub pool_view: bool,
+    pub pool_errors: std::collections::BTreeMap<u64, String>,
+    pub countdown_secs: Option<u32>,
     pub pools: Vec<Pool>,
     pub selected: usize,
     #[serde(flatten)]
@@ -57,6 +61,7 @@ impl State {
         self.snapshot_view = false;
         self.selected_environment = 0;
         self.selected_target = 0;
+        self.pool_errors.clear();
         self.scans += 1;
         match result {
             Ok(pools) => {
@@ -79,6 +84,11 @@ impl State {
                 (self.selected + self.pools.len() - 1) % self.pools.len()
             };
         }
+    }
+
+    pub fn environment_pool(&self) -> Option<&Pool> {
+        let guid = self.environments.get(self.selected_environment)?.pool_guid;
+        self.pools.iter().find(|pool| pool.guid == guid)
     }
 }
 

@@ -94,7 +94,8 @@ pub fn run(
         wait_for(120, Some(&mut owned.0), || {
             let state = vm::screen(run)?;
             ensure!(
-                state["event"] == "ready" && state["config"]["security"]["mode"] == "enforce",
+                matches!(state["event"].as_str(), Some("ready" | "catalog-ready"))
+                    && state["config"]["security"]["mode"] == "enforce",
                 "Waiting for protected manager"
             );
             Ok(())
@@ -274,7 +275,8 @@ pub fn run(
         wait_for(30, Some(&mut owned.0), || {
             let state = vm::screen(run)?;
             ensure!(
-                state["event"] == "ready" && state["pid"] != pid,
+                matches!(state["event"].as_str(), Some("ready" | "catalog-ready"))
+                    && state["pid"] != pid,
                 "Manager did not restart"
             );
             Ok(())
@@ -306,7 +308,8 @@ pub fn run(
         wait_for(30, Some(&mut owned.0), || {
             let state = vm::screen(run)?;
             ensure!(
-                state["event"] == "ready" && state["pid"] != pid,
+                matches!(state["event"].as_str(), Some("ready" | "catalog-ready"))
+                    && state["pid"] != pid,
                 "Protected retry failed"
             );
             vm::ssh(run, "test -f /run/zbm-rs/manager.pid")?;

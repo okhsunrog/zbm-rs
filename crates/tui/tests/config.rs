@@ -12,7 +12,7 @@ fn default_and_alternate_image_config_are_typed_and_validated() {
     assert!(output.status.success());
     let default: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(default["manager"]["restart_limit"], 2);
-    assert_eq!(default["ui"]["timeout_secs"], 5);
+    assert_eq!(default["boot"]["timeout_secs"], 5);
     assert!(default["ui"]["title"].is_null());
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/test.json");
     let output = binary()

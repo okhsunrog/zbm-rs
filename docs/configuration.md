@@ -28,20 +28,33 @@ cargo run -p zbm-rs -- --print-config
 uv run --no-project nix/check-config.py
 ```
 
-`ZBM_RS_CONFIG` participates in Cargo input tracking and build validation as well
-as local execution. Missing or invalid explicit files fail. `--print-config`
-normalizes defaults; `--validate-config` prints validated JSON.
+`ZBM_RS_CONFIG` is a local execution override only; it is not a Cargo input.
+Missing or invalid explicit files fail at execution. `--print-config` normalizes
+defaults; `--validate-config` prints validated JSON. Local execution without an
+override uses the shared schema defaults, checked against `config/default.json`.
+
+The image build runs `--validate-config` before packaging JSON into the initramfs.
+Changing ordinary JSON settings reuses the same Rust executable; rebuilding,
+signing and deploying the EFI image is still necessary. An unchanged loader
+kernel and its modules are reused too. Cargo receives only `ZBM_RS_BUILD_POLICY`,
+a small JSON object with `security_mode` and `diagnostic_esp_partuuid`. These two
+values remain compiled invariants, so changing either rebuilds the executable.
+The full configuration never enters that build input. `nix/check-config.py` checks
+runtime validation and Cargo reuse; the `config-binary-reuse` Nix check also
+compares actual derivation paths for changed image settings and compiled policy.
 
 ## Schema
 
 | JSON field | Default | Constraint / current behavior |
 | --- | --- | --- |
-| `ui.timeout_secs` | `5` | 0..300; reserved for future autoboot |
+| `boot.mode` | `menu` | menu, countdown, immediate; automatic modes require an unambiguous bootfs |
+| `boot.timeout_secs` | `5` | 1..300; countdown begins after unlock and target discovery |
+| `boot.preferred_pool_guid` | `null` | optional nonzero decimal pool GUID selecting which pool bootfs to prefer |
 | `ui.show_snapshots` | `true` | enable snapshot browsing from the BE list |
 | `ui.title` | `null` | optional heading; <=256 bytes, no control characters |
 | `manager.restart_limit` | `2` | 0..8; rapid failure threshold entering recovery |
 | `diagnostics.esp_partuuid` | `null` | opt-in GPT partition UUID for failure-only FAT reports; compiled into the image as well as validated JSON |
-| `zfs.import_policy` | `host-id` | host-id or read-only; explicit import only, never force |
+| `zfs.import_policy` | `host-id` | host-id or read-only; automatic startup import, never force |
 | `nixos.generation_limit` | `20` | 1..512; maximum generations per root or snapshot |
 | `kernel_args` | `[]` | <=64 strings, <=4096 bytes each, no NUL; additional target arguments |
 | `security.mode` | `off` | off/enforce; compiled image mode must agree at runtime |
@@ -72,7 +85,7 @@ can still prevent persistence. A successful boot leaves the last failure intact.
 
 ## Nix integration
 
-Runtime options are under `programs.zbm-rs.settings`: `ui.timeout`,
+Runtime options are under `programs.zbm-rs.settings`: `boot.mode`, `boot.timeout`, `boot.preferredPoolGuid`,
 `ui.showSnapshots`, `ui.title`, `manager.restartLimit`, `zfs.importPolicy`,
 `nixos.generationLimit` and `kernelArgs`. Image packaging uses `image.profile`
 and `image.hardwareManifest`. The former top-level names remain renamed aliases.
@@ -172,3 +185,33 @@ The configuration uses typed runtime JSON instead of generated Rust constants.
 See [the schema design comparison](research/configuration-design.md) for the
 implementation tradeoffs. Complete AArch64 image packaging/boot is not yet
 supported by the x86_64 flake/UKI layout.
+
+## Startup and ZFS compatibility
+
+Startup imports all eligible discovered pools under the image import policy and
+combines their boot environments. A foreign import is never claimed or exported.
+Ordinary pool errors are isolated and visible under F8. Discovery itself remains
+read-only; startup import and demand-driven unlock are explicit manager operations.
+
+`bootfs` selects the preferred environment, not permission to boot it. One unique
+bootfs is used unless `boot.preferred_pool_guid` selects a pool. An absent,
+ambiguous or unusable default always leaves a menu. The preferred environment is
+first and highlighted. Enter boots its default target; K opens kernels or NixOS
+generations; T opens snapshots. NixOS uses the `system` profile, even after rollback,
+not the newest numbered generation. The current generation survives history limits.
+
+`menu` waits for input after unlocking. `countdown` starts its timer only when the
+default is ready; any menu key cancels automatic boot for this manager session.
+`immediate` boots without another confirmation. Esc during startup or a passphrase
+prompt cancels automatic boot and returns to the menu. No new ZFS properties
+control these modes. The old reserved JSON `ui.timeout_secs` is removed; Nix timeout
+option names remain renamed aliases to `settings.boot.timeout` (now 1..300).
+
+Supported ZFSBootMenu metadata includes bootfs, active, kernel (POSIX ERE),
+commandline, rootprefix, readonly, local keylocation and keysource. Linux discovery
+also supports per-kernel .kcl files. A nonmatching kernel expression warns and uses
+the normal newest-first order; an invalid expression requires manual selection.
+NixOS Bootspec stays authoritative for its generation artifacts and arguments.
+ZFS metadata never overrides signed boot authorizations or image security policy.
+Network keys, TPM disk unlock, external hooks and arbitrary installed-OS scripts
+are not supported. See the demand-driven key handling in [Arch deployment](arch-deployment.md).

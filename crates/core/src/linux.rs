@@ -220,18 +220,70 @@ pub fn discover(
         });
     }
     targets.sort_by_key(|target| std::cmp::Reverse(version_key(&target.label)));
-    if let Some(preferred) = &properties.kernel
-        && let Some(index) = targets
-            .iter()
-            .position(|target| target.label.contains(preferred))
-    {
-        let target = targets.remove(index);
-        targets.insert(0, target);
+    let mut default_error = None;
+    let mut invalid_pattern = false;
+    if let Some(preferred) = &properties.kernel {
+        match KernelPattern::new(preferred) {
+            Ok(pattern) => {
+                if let Some(index) = targets
+                    .iter()
+                    .position(|target| pattern.matches(&target.inputs().kernel.to_string_lossy()))
+                {
+                    let target = targets.remove(index);
+                    targets.insert(0, target);
+                } else {
+                    default_error = Some("Preferred kernel pattern matched nothing; using the newest detected kernel".into());
+                }
+            }
+            Err(error) => {
+                invalid_pattern = true;
+                default_error = Some(format!(
+                    "Invalid preferred kernel pattern: {error}; choose a kernel with K"
+                ));
+            }
+        }
     }
     Ok(TargetDiscovery {
+        default_target: (!targets.is_empty() && !invalid_pattern).then_some(0),
+        default_error,
         targets,
         rejected: vec![],
     })
+}
+
+/// Match the same POSIX extended expressions as Bash's =~ operator.
+struct KernelPattern(libc::regex_t);
+impl KernelPattern {
+    fn new(pattern: &str) -> io::Result<Self> {
+        let pattern =
+            std::ffi::CString::new(pattern).map_err(|_| invalid("NUL in kernel pattern"))?;
+        if pattern.as_bytes().len() > 4096 {
+            return Err(invalid("Kernel pattern exceeds 4 KiB"));
+        }
+        let mut compiled = std::mem::MaybeUninit::uninit();
+        let result = unsafe {
+            libc::regcomp(
+                compiled.as_mut_ptr(),
+                pattern.as_ptr(),
+                libc::REG_EXTENDED | libc::REG_NOSUB,
+            )
+        };
+        if result != 0 {
+            return Err(invalid(format!("POSIX ERE error {result}")));
+        }
+        Ok(Self(unsafe { compiled.assume_init() }))
+    }
+    fn matches(&self, path: &str) -> bool {
+        let Ok(path) = std::ffi::CString::new(path) else {
+            return false;
+        };
+        unsafe { libc::regexec(&self.0, path.as_ptr(), 0, std::ptr::null_mut(), 0) == 0 }
+    }
+}
+impl Drop for KernelPattern {
+    fn drop(&mut self) {
+        unsafe { libc::regfree(&mut self.0) };
+    }
 }
 
 pub fn resolve(target: &BootTarget, dataset: &str, extra: &[String]) -> io::Result<BootPlan> {
@@ -241,6 +293,14 @@ pub fn resolve(target: &BootTarget, dataset: &str, extra: &[String]) -> io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn kernel_patterns_use_posix_extended_expressions() {
+        let pattern = KernelPattern::new("vmlinuz-linux-(okhsunrog|lts)$").unwrap();
+        assert!(pattern.matches("/boot/vmlinuz-linux-okhsunrog"));
+        assert!(pattern.matches("/boot/vmlinuz-linux-lts"));
+        assert!(!pattern.matches("/boot/vmlinuz-linux-lts-old"));
+        assert!(KernelPattern::new("[").is_err());
+    }
     #[test]
     fn root_is_authoritative_and_quoted_values_survive() {
         assert_eq!(
@@ -296,6 +356,8 @@ mod tests {
             encryptionroot: None,
             keystatus: "-".into(),
             keyformat: "-".into(),
+            keylocation: None,
+            keysource: None,
             active: "-".into(),
             commandline: Some("rw".into()),
             kernel: Some("linux-lts".into()),

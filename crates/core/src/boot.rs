@@ -129,6 +129,8 @@ pub struct GenerationIssue {
 pub struct TargetDiscovery {
     pub targets: Vec<BootTarget>,
     pub rejected: Vec<GenerationIssue>,
+    pub default_target: Option<usize>,
+    pub default_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,7 +380,36 @@ pub fn discover_generations(root: &Path, dataset: &str, limit: u32) -> io::Resul
         }
     }
     candidates.sort_unstable_by(|a, b| b.cmp(a));
+    let current = rooted_path(root, Path::new("/nix/var/nix/profiles/system"));
+    // A rollback may select an old generation outside the normal history limit.
+    let profile_number = fs::read_link(root.join("nix/var/nix/profiles/system"))
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix("system-"))
+                .and_then(|name| name.strip_suffix("-link"))
+                .and_then(|name| name.parse::<u64>().ok())
+        });
+    let current_number = profile_number.or_else(|| {
+        candidates.iter().copied().find(|number| {
+            rooted_path(
+                root,
+                &PathBuf::from(format!("/nix/var/nix/profiles/system-{number}-link")),
+            )
+            .ok()
+            .as_ref()
+            .is_some_and(|path| current.as_ref().ok() == Some(path))
+        })
+    });
     candidates.truncate(limit as usize);
+    if let Some(number) = current_number
+        && !candidates.contains(&number)
+    {
+        candidates.pop();
+        candidates.push(number);
+        candidates.sort_unstable_by(|a, b| b.cmp(a));
+    }
     let mut discovery = TargetDiscovery::default();
     for generation in candidates {
         let profile = PathBuf::from(format!("/nix/var/nix/profiles/system-{generation}-link"));
@@ -390,6 +421,34 @@ pub fn discover_generations(root: &Path, dataset: &str, limit: u32) -> io::Resul
                 error: error.to_string(),
             }),
         }
+    }
+    discovery.default_target = current_number
+        .and_then(|number| {
+            discovery
+                .targets
+                .iter()
+                .position(|target| target.generation() == Some(number))
+        })
+        .or_else(|| {
+            if profile_number.is_some() {
+                None
+            } else {
+                current.as_ref().ok().and_then(|current| {
+                    discovery.targets.iter().position(|target| {
+                        target
+                            .toplevel()
+                            .and_then(|path| rooted_path(root, path).ok())
+                            .as_ref()
+                            == Some(current)
+                    })
+                })
+            }
+        });
+    if discovery.default_target.is_none() {
+        discovery.default_error = Some(
+            "Current NixOS system profile is missing or not prepared; choose a generation with K"
+                .into(),
+        );
     }
     Ok(discovery)
 }
@@ -559,6 +618,10 @@ mod tests {
         let targets = generations(&root, "tank/root", 1).unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].generation(), Some(12));
+        symlink("system-3-link", root.join("nix/var/nix/profiles/system")).unwrap();
+        let rollback = discover_generations(&root, "tank/root", 1).unwrap();
+        assert_eq!(rollback.targets[0].generation(), Some(3));
+        assert_eq!(rollback.default_target, Some(0));
         let plan = BootPlan::resolve(&targets[0], &["quiet".into()]).unwrap();
         assert_eq!(plan.kernel, root.join("nix/store/os/kernel"));
         assert_eq!(

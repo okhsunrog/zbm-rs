@@ -3,6 +3,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::DefaultTerminal;
 use std::{
+    collections::VecDeque,
     process::Command,
     time::{Duration, Instant},
 };
@@ -14,6 +15,9 @@ mod ui;
 use command::Command as UiCommand;
 use operation::{Action, Outcome, Workflow};
 use ui::{Input, Panel, Ui};
+
+mod navigation;
+use navigation::{Intent, UnlockSelection, intent_action, merge, preferred, readonly};
 
 struct Options {
     preview: bool,
@@ -58,6 +62,14 @@ async fn tui(
     let mut rescan = true;
     let mut workflow = Workflow::default();
     let mut last_tick = Instant::now();
+    let mut queue = VecDeque::new();
+    let mut inspecting = None;
+    let mut catalog_active = false;
+    let mut startup_done = false;
+    let mut unlocking: Option<UnlockSelection> = None;
+    let mut resume_unlock = false;
+    let mut auto_cancelled = false;
+    let mut auto_deadline: Option<Instant> = None;
     loop {
         #[cfg(feature = "vm-test")]
         if let Some(control) = control
@@ -95,12 +107,40 @@ async fn tui(
             workflow.finish_scan();
             state.activity = workflow.view();
             state.apply_scan(result);
+            queue = if options.preview {
+                VecDeque::new()
+            } else {
+                state.pools.clone().into()
+            };
+            catalog_active = !options.preview;
             refresh(terminal, &mut state, options, &mut ui)?;
             emit(options, "ready", &state, &ui)?;
         }
         if let Some(mut completed) = workflow.take_finished() {
             state.activity = workflow.view();
             let event = match completed.finish().await {
+                Ok(Outcome::Unlock(zbm_core::unlock::Status::Passphrase(challenge))) => {
+                    ui.unlock_prompt = Some(format!(
+                        "{}{}",
+                        challenge.encryption_root,
+                        challenge
+                            .reason
+                            .as_ref()
+                            .map(|reason| format!("\n{reason}"))
+                            .unwrap_or_default()
+                    ));
+                    if let Some(selection) = &mut unlocking {
+                        selection.challenge = Some(challenge);
+                    }
+                    ui.open_panel(Panel::Unlock);
+                    "unlock-prompt"
+                }
+                Ok(Outcome::Unlock(zbm_core::unlock::Status::Ready)) => {
+                    queue = state.pools.clone().into();
+                    catalog_active = true;
+                    resume_unlock = true;
+                    "unlocked"
+                }
                 Ok(Outcome::Changed {
                     environments,
                     selected,
@@ -110,7 +150,11 @@ async fn tui(
                         .iter()
                         .position(|e| e.dataset == selected)
                         .unwrap_or(0);
-                    state.environments = environments;
+                    let guid = environments
+                        .first()
+                        .map(|e| e.pool_guid)
+                        .unwrap_or_else(|| state.pools[state.selected].guid);
+                    merge(&mut state, guid, environments, options);
                     state.targets.clear();
                     state.rejected_generations.clear();
                     state.snapshots.clear();
@@ -120,15 +164,11 @@ async fn tui(
                     "environment-changed"
                 }
                 Ok(Outcome::Environments(environments)) => {
-                    state.error = environments.is_empty().then(|| {
-                        "No visible boot environments (mountpoint=/ or legacy with active=on)"
-                            .into()
-                    });
-                    state.selected_environment = environments
-                        .iter()
-                        .position(|environment| environment.is_default)
-                        .unwrap_or(0);
-                    state.environments = environments;
+                    let guid = inspecting
+                        .take()
+                        .unwrap_or_else(|| state.pools[state.selected].guid);
+                    state.pool_errors.remove(&guid);
+                    merge(&mut state, guid, environments, options);
                     "boot-environments"
                 }
                 Ok(Outcome::Snapshots(snapshots)) => {
@@ -176,6 +216,22 @@ async fn tui(
                         "{} failed: {:#}",
                         completed.description, error.source
                     ));
+                    if let Some(guid) = inspecting.take() {
+                        state.pool_errors.insert(guid, state.error.clone().unwrap());
+                    }
+                    if completed.error_event == "unlock-error" {
+                        if unlocking
+                            .as_ref()
+                            .is_some_and(|selection| selection.challenge.is_some())
+                        {
+                            ui.open_panel(Panel::Unlock);
+                        } else {
+                            unlocking = None;
+                            auto_cancelled = true;
+                        }
+                    } else {
+                        auto_cancelled = true;
+                    }
                     completed.error_event
                 }
             };
@@ -188,6 +244,84 @@ async fn tui(
             state.error = Some("Operation timed out after 30 seconds. Use Shell or Restart to reconcile ZFS state.".into());
             refresh(terminal, &mut state, options, &mut ui)?;
             emit(options, "operation-timeout", &state, &ui)?;
+        }
+        if !state.activity.is_scanning()
+            && state.activity.operation().is_none()
+            && !state.activity.requires_restart()
+            && catalog_active
+        {
+            if let Some(pool) = queue.pop_front() {
+                inspecting = Some(pool.guid);
+                workflow.start(Action::Environments {
+                    pool,
+                    readonly: readonly(options),
+                    limit: options.config.nixos.generation_limit,
+                })?;
+                state.activity = workflow.view();
+            } else {
+                catalog_active = false;
+                state.error = None;
+                let mut action = None;
+                if resume_unlock {
+                    resume_unlock = false;
+                    if let Some(selection) = unlocking.take() {
+                        if let Some(index) = state.environments.iter().position(|e| {
+                            e.pool_guid == selection.pool.guid && e.dataset == selection.dataset
+                        }) {
+                            ui.focus_environment(&mut state, index);
+                            action = intent_action(
+                                selection.intent,
+                                &mut state,
+                                &mut ui,
+                                options,
+                                &mut unlocking,
+                            );
+                        } else {
+                            state.error =
+                                Some("Selected environment disappeared after unlock".into());
+                            auto_cancelled = true;
+                        }
+                    }
+                }
+                if !startup_done {
+                    startup_done = true;
+                    let selected = preferred(&state, options);
+                    if let Some(index) = selected {
+                        ui.focus_environment(&mut state, index);
+                    }
+                    let roots: std::collections::BTreeSet<_> = state
+                        .environments
+                        .iter()
+                        .filter(|e| e.properties.locked())
+                        .filter_map(|e| {
+                            e.properties
+                                .encryptionroot
+                                .as_ref()
+                                .map(|root| (e.pool_guid, root.clone()))
+                        })
+                        .collect();
+                    if (selected.is_some() || roots.len() == 1)
+                        && state
+                            .environments
+                            .get(state.selected_environment)
+                            .is_some_and(|e| e.properties.locked())
+                    {
+                        action = intent_action(
+                            Intent::Menu,
+                            &mut state,
+                            &mut ui,
+                            options,
+                            &mut unlocking,
+                        );
+                    }
+                }
+                if let Some(action) = action {
+                    workflow.start(action)?;
+                    state.activity = workflow.view();
+                }
+                refresh(terminal, &mut state, options, &mut ui)?;
+                emit(options, "catalog-ready", &state, &ui)?;
+            }
         }
         if state.activity.operation().is_some() && last_tick.elapsed() >= Duration::from_secs(1) {
             refresh(terminal, &mut state, options, &mut ui)?;
@@ -202,25 +336,30 @@ async fn tui(
             if let Event::Key(key) = input
                 && key.kind == KeyEventKind::Press
             {
+                let cancelled_timer = state.countdown_secs.is_some() && ui.panel != Panel::Unlock;
+                if key.code == crossterm::event::KeyCode::Esc || ui.panel != Panel::Unlock {
+                    auto_cancelled = true;
+                    auto_deadline = None;
+                    state.countdown_secs = None;
+                }
+                if key.code == crossterm::event::KeyCode::Esc && ui.panel == Panel::Unlock {
+                    unlocking = None;
+                }
                 let mut action = None;
-                let mut observed = None;
+                let mut observed = cancelled_timer.then_some("autoboot-cancelled");
                 match ui.input(key, &mut state) {
                     Input::Unlock(passphrase) => {
-                        if let Some(reason) = ui.reason(UiCommand::Open, &state, options) {
-                            state.error = Some(reason);
-                            observed = Some("command-disabled");
-                        } else if let Some(environment) =
-                            state.environments.get(state.selected_environment)
-                            && environment.properties.can_unlock()
+                        if let Some(selection) = &unlocking
+                            && let Some(challenge) = &selection.challenge
                         {
                             action = Some(Action::Unlock {
-                                pool: state.pools[state.selected].clone(),
-                                dataset: environment.dataset.clone(),
-                                passphrase,
-                                readonly: matches!(
-                                    options.config.zfs.import_policy,
-                                    crate::config::ImportPolicy::ReadOnly
-                                ),
+                                pool: selection.pool.clone(),
+                                dataset: selection.dataset.clone(),
+                                answer: Some(zbm_core::unlock::Answer {
+                                    challenge: challenge.clone(),
+                                    passphrase,
+                                }),
+                                readonly: readonly(options),
                                 limit: options.config.nixos.generation_limit,
                             });
                         }
@@ -258,7 +397,9 @@ async fn tui(
                                     break;
                                 }
                                 UiCommand::Back => {
-                                    if !state.targets.is_empty()
+                                    if state.pool_view {
+                                        state.pool_view = false;
+                                    } else if !state.targets.is_empty()
                                         || !state.rejected_generations.is_empty()
                                     {
                                         state.targets.clear();
@@ -268,18 +409,29 @@ async fn tui(
                                         state.snapshot_view = false;
                                         state.snapshots.clear();
                                     } else {
-                                        state.environments.clear();
+                                        state.pool_view = false;
                                     }
                                     state.error = None;
                                     observed = Some("back");
                                 }
-                                UiCommand::Snapshots => {
-                                    let environment =
-                                        &state.environments[state.selected_environment];
-                                    action = Some(Action::Snapshots {
-                                        pool: state.pools[state.selected].clone(),
-                                        dataset: environment.dataset.clone(),
-                                    });
+                                UiCommand::Pools => {
+                                    state.pool_view = !state.pool_view;
+                                    observed = Some("pool-view");
+                                }
+                                UiCommand::Kernels | UiCommand::Snapshots => {
+                                    let intent = if command == UiCommand::Kernels {
+                                        Intent::Kernels
+                                    } else {
+                                        Intent::Snapshots
+                                    };
+                                    action = intent_action(
+                                        intent,
+                                        &mut state,
+                                        &mut ui,
+                                        options,
+                                        &mut unlocking,
+                                    );
+                                    observed = Some("navigation");
                                 }
                                 UiCommand::Prepare => {
                                     action = Some(Action::Prepare {
@@ -329,7 +481,16 @@ async fn tui(
                                 }
                                 UiCommand::Rescan => rescan = true,
                                 UiCommand::Open => {
-                                    if let Some(target) = ui.target(&state) {
+                                    if state.pool_view {
+                                        state.targets.clear();
+                                        state.rejected_generations.clear();
+                                        state.snapshot_view = false;
+                                        action = Some(Action::Environments {
+                                            pool: state.pools[state.selected].clone(),
+                                            readonly: readonly(options),
+                                            limit: options.config.nixos.generation_limit,
+                                        });
+                                    } else if let Some(target) = ui.target(&state) {
                                         action = Some(Action::Boot {
                                             pool: state.pools[state.selected].clone(),
                                             target: target.clone(),
@@ -342,22 +503,15 @@ async fn tui(
                                             snapshot: snapshot.clone(),
                                             limit: options.config.nixos.generation_limit,
                                         });
-                                    } else if !state.environments.is_empty() {
-                                        let environment =
-                                            &state.environments[state.selected_environment];
-                                        if environment.properties.can_unlock() {
-                                            ui.open_panel(Panel::Unlock);
-                                            state.error = None;
-                                            refresh(terminal, &mut state, options, &mut ui)?;
-                                            emit(options, "unlock-prompt", &state, &ui)?;
-                                            continue;
-                                        }
-                                        state.error = environment.unavailable.clone();
-                                        state.targets = environment.targets.clone();
-                                        state.rejected_generations =
-                                            environment.rejected_generations.clone();
-                                        state.selected_target = 0;
-                                        observed = Some("boot-targets");
+                                    } else if !state.environments.is_empty() && !state.pool_view {
+                                        action = intent_action(
+                                            Intent::Boot,
+                                            &mut state,
+                                            &mut ui,
+                                            options,
+                                            &mut unlocking,
+                                        );
+                                        observed = Some("boot-selection");
                                     } else {
                                         action = Some(Action::Environments {
                                             pool: state.pools[state.selected].clone(),
@@ -386,6 +540,10 @@ async fn tui(
                     }
                 }
                 if let Some(action) = action {
+                    if let Action::Environments { pool, .. } = &action {
+                        inspecting = Some(pool.guid);
+                        state.pool_view = false;
+                    }
                     workflow.start(action)?;
                     state.activity = workflow.view();
                     state.error = None;
@@ -395,6 +553,70 @@ async fn tui(
                 if let Some(event) = observed {
                     refresh(terminal, &mut state, options, &mut ui)?;
                     emit(options, event, &state, &ui)?;
+                }
+            }
+        }
+        if startup_done
+            && !auto_cancelled
+            && !catalog_active
+            && unlocking.is_none()
+            && state.activity.operation().is_none()
+            && !state.activity.requires_restart()
+            && ui.panel == Panel::None
+        {
+            use crate::config::BootMode;
+            if options.config.boot.mode != BootMode::Menu {
+                if let Some(index) = preferred(&state, options) {
+                    let environment = &state.environments[index];
+                    if !environment.properties.locked()
+                        && environment.default_target.is_some()
+                        && environment.unavailable.is_none()
+                    {
+                        let deadline = *auto_deadline.get_or_insert_with(|| {
+                            Instant::now()
+                                + Duration::from_secs(
+                                    if options.config.boot.mode == BootMode::Immediate {
+                                        0
+                                    } else {
+                                        options.config.boot.timeout_secs as u64
+                                    },
+                                )
+                        });
+                        state.countdown_secs = Some(
+                            deadline
+                                .saturating_duration_since(Instant::now())
+                                .as_secs()
+                                .saturating_add(1) as u32,
+                        );
+                        if Instant::now() >= deadline && !event::poll(Duration::ZERO)? {
+                            state.selected_environment = index;
+                            auto_cancelled = true;
+                            state.countdown_secs = None;
+                            if let Some(action) = intent_action(
+                                Intent::Boot,
+                                &mut state,
+                                &mut ui,
+                                options,
+                                &mut unlocking,
+                            ) {
+                                workflow.start(action)?;
+                                state.activity = workflow.view();
+                            }
+                        }
+                        if last_tick.elapsed() >= Duration::from_secs(1) {
+                            refresh(terminal, &mut state, options, &mut ui)?;
+                            last_tick = Instant::now();
+                        }
+                    } else if !environment.properties.locked() {
+                        auto_cancelled = true;
+                        state.error = environment
+                            .default_error
+                            .clone()
+                            .or(environment.unavailable.clone());
+                        refresh(terminal, &mut state, options, &mut ui)?;
+                    }
+                } else {
+                    auto_cancelled = true;
                 }
             }
         }

@@ -29,7 +29,9 @@ pub enum View {
 
 impl View {
     fn of(state: &State) -> Self {
-        if !state.targets.is_empty() || !state.rejected_generations.is_empty() {
+        if state.pool_view {
+            Self::Pools
+        } else if !state.targets.is_empty() || !state.rejected_generations.is_empty() {
             if state
                 .targets
                 .first()
@@ -104,6 +106,7 @@ pub enum Panel {
 
 #[derive(Default)]
 pub struct Ui {
+    pub unlock_prompt: Option<String>,
     screens: BTreeMap<String, Screen>,
     key: String,
     pub searching: bool,
@@ -168,6 +171,17 @@ fn fuzzy(value: &str, query: &str) -> bool {
 }
 
 impl Ui {
+    pub fn focus_environment(&mut self, state: &mut State, index: usize) {
+        state.selected_environment = index;
+        if let Some(environment) = state.environments.get(index)
+            && let Some(screen) = self.screens.get_mut("environments")
+        {
+            screen.selected = Some(RowId::Environment(format!(
+                "{}:{}",
+                environment.pool_guid, environment.dataset
+            )));
+        }
+    }
     pub fn reset_after_mutation(&mut self) {
         use zeroize::Zeroize;
         self.passphrase.zeroize();
@@ -188,7 +202,11 @@ impl Ui {
                     id: RowId::Pool(p.guid),
                     kind: Kind::Pool(i),
                     title: p.name.clone(),
-                    subtitle: p.health.clone(),
+                    subtitle: state
+                        .pool_errors
+                        .get(&p.guid)
+                        .cloned()
+                        .unwrap_or_else(|| p.health.clone()),
                     tag: "POOL",
                 })
                 .collect(),
@@ -197,20 +215,34 @@ impl Ui {
                 .iter()
                 .enumerate()
                 .map(|(i, e)| Row {
-                    id: RowId::Environment(e.dataset.clone()),
+                    id: RowId::Environment(format!("{}:{}", e.pool_guid, e.dataset)),
                     kind: Kind::Environment(i),
                     title: format!("{}{}", if e.is_default { "* " } else { "" }, e.dataset),
-                    subtitle: e.unavailable.clone().unwrap_or_else(|| {
-                        format!(
-                            "{} targets / {} unavailable",
-                            e.targets.len(),
-                            e.rejected_generations.len()
-                        )
-                    }),
+                    subtitle: e
+                        .unavailable
+                        .clone()
+                        .or_else(|| e.default_error.clone())
+                        .unwrap_or_else(|| {
+                            e.default_target
+                                .and_then(|index| e.targets.get(index))
+                                .map(|target| {
+                                    target
+                                        .generation()
+                                        .map(|number| format!("Generation {number}"))
+                                        .unwrap_or_else(|| target.label.clone())
+                                })
+                                .unwrap_or_else(|| {
+                                    "No default boot target; K chooses an alternative".into()
+                                })
+                        }),
                     tag: if e.is_default && e.unavailable.is_some() {
-                        "BOOTFS / UNAVAILABLE"
+                        "BOOTFS / LOCKED"
                     } else if e.unavailable.is_some() {
-                        "UNAVAILABLE"
+                        if e.properties.locked() {
+                            "LOCKED"
+                        } else {
+                            "ERROR"
+                        }
                     } else if e.is_default {
                         "BOOTFS"
                     } else {
@@ -330,7 +362,7 @@ impl Ui {
         };
         let key = match view {
             View::Pools => "pools".into(),
-            View::Environments => format!("{pool}/environments"),
+            View::Environments => "environments".into(),
             View::Snapshots => format!("{pool}/{environment}/snapshots"),
             View::Generations | View::Kernels => {
                 format!("{pool}/{environment}/{snapshot}/generations")
@@ -348,7 +380,7 @@ impl Ui {
             View::Environments => state
                 .environments
                 .get(state.selected_environment)
-                .map(|e| RowId::Environment(e.dataset.clone())),
+                .map(|e| RowId::Environment(format!("{}:{}", e.pool_guid, e.dataset))),
             View::Snapshots => state
                 .snapshots
                 .get(state.selected_snapshot)
@@ -378,7 +410,16 @@ impl Ui {
         if let Some(row) = self.selected(state) {
             match row.kind {
                 Kind::Pool(i) => state.selected = i,
-                Kind::Environment(i) => state.selected_environment = i,
+                Kind::Environment(i) => {
+                    state.selected_environment = i;
+                    if let Some(pool) = state
+                        .pools
+                        .iter()
+                        .position(|pool| pool.guid == state.environments[i].pool_guid)
+                    {
+                        state.selected = pool;
+                    }
+                }
                 Kind::Snapshot(i) => state.selected_snapshot = i,
                 Kind::Generation(i) => state.selected_target = i,
                 Kind::Rejected(_) => {}
@@ -422,11 +463,32 @@ impl Ui {
                 "An operation is in progress; Restart and Power off remain available".into(),
             );
         }
-        if matches!(command, Command::Search | Command::Back | Command::Rescan) {
+        if matches!(
+            command,
+            Command::Search | Command::Back | Command::Rescan | Command::Pools
+        ) {
             return None;
         }
         if !options.supervised || options.preview {
             return Some("Boot actions are unavailable in local preview".into());
+        }
+        if command == Command::Kernels {
+            return state
+                .environments
+                .get(state.selected_environment)
+                .and_then(|environment| {
+                    if environment.properties.locked() {
+                        None
+                    } else {
+                        environment.unavailable.clone()
+                    }
+                })
+                .or_else(|| {
+                    state
+                        .environments
+                        .is_empty()
+                        .then(|| "Select a boot environment first".into())
+                });
         }
         if matches!(
             command,
@@ -499,7 +561,7 @@ impl Ui {
                 "generation {}: {}",
                 state.rejected_generations[i].generation, state.rejected_generations[i].error
             )),
-            Some(Kind::Environment(i)) if state.environments[i].properties.can_unlock() => None,
+            Some(Kind::Environment(i)) if state.environments[i].properties.locked() => None,
             Some(Kind::Environment(i)) if state.environments[i].root.is_none() => state
                 .environments[i]
                 .unavailable
@@ -519,7 +581,7 @@ impl Ui {
             {
                 "Unlock"
             }
-            View::Environments => "Open",
+            View::Environments => "Boot",
             View::Snapshots => "Open",
             View::Generations | View::Kernels if state.snapshot_view => "Boot clone",
             View::Generations | View::Kernels => "Boot",
@@ -1269,14 +1331,15 @@ mod tests {
         use zbm_core::environment::{BootEnvironment, BootProperties};
         let mut state = State {
             environments: vec![BootEnvironment {
+                pool_guid: 42,
+                default_target: None,
+                default_error: None,
                 dataset: "tank/ROOT/encrypted".into(),
                 root: None,
                 is_default: true,
                 targets: vec![],
                 rejected_generations: vec![],
-                unavailable: Some(
-                    "Encryption key is unavailable; press Enter to unlock with a passphrase".into(),
-                ),
+                unavailable: Some("Locked; unlock to discover boot targets".into()),
                 properties: BootProperties {
                     mountpoint: "/".into(),
                     canmount: "noauto".into(),
@@ -1284,6 +1347,8 @@ mod tests {
                     encryptionroot: Some("tank".into()),
                     keystatus: "unavailable".into(),
                     keyformat: "passphrase".into(),
+                    keylocation: None,
+                    keysource: None,
                     active: "on".into(),
                     commandline: None,
                     kernel: None,
@@ -1309,7 +1374,7 @@ mod tests {
         assert!(
             text.contains("* tank/ROOT/encrypted")
                 && text.contains("BOOTFS")
-                && text.contains("Encryption key is unavailable")
+                && text.contains("Locked")
         );
         assert!(ui.reason(Command::Open, &state, &options()).is_none());
         ui.open_panel(Panel::Unlock);

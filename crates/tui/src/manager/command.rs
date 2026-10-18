@@ -4,6 +4,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Open,
+    Kernels,
+    Pools,
     Back,
     Snapshots,
     Prepare,
@@ -22,8 +24,10 @@ pub enum Command {
     Actions,
 }
 
-pub const ALL: [Command; 17] = [
+pub const ALL: [Command; 19] = [
     Command::Open,
+    Command::Kernels,
+    Command::Pools,
     Command::Back,
     Command::Snapshots,
     Command::Prepare,
@@ -60,7 +64,9 @@ impl Command {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Open => "Open / Boot",
+            Self::Open => "Boot selected system / target",
+            Self::Kernels => "Kernels / NixOS generations",
+            Self::Pools => "Pool status / manual import",
             Self::Back => "Back",
             Self::Snapshots => "Snapshots",
             Self::Prepare => "Prepare / reuse snapshot clone",
@@ -83,6 +89,8 @@ impl Command {
     pub fn keys(self) -> &'static str {
         match self {
             Self::Open => "Enter",
+            Self::Kernels => "K",
+            Self::Pools => "F8",
             Self::Back => "B / Esc",
             Self::Snapshots => "T",
             Self::Prepare => "C",
@@ -128,10 +136,12 @@ impl Command {
             KeyCode::F(4) => Self::Shell,
             KeyCode::F(5) => Self::Rescan,
             KeyCode::F(6) => Self::Restart,
+            KeyCode::F(8) => Self::Pools,
             KeyCode::F(10) => Self::PowerOff,
             KeyCode::Char(c) => match c.to_ascii_lowercase() {
                 'b' => Self::Back,
                 't' => Self::Snapshots,
+                'k' => Self::Kernels,
                 'c' => Self::Prepare,
                 'd' => Self::Discard,
                 'o' => Self::Clone,

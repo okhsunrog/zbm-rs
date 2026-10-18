@@ -269,63 +269,6 @@ pub async fn refresh_target(zfs: &Zfs, target: &boot::BootTarget) -> io::Result<
     Ok(refreshed)
 }
 
-/// Explicit selected-BE unlock only. Never consult an on-disk keylocation,
-/// recurse into other encryption roots, or change persistent ZFS properties.
-pub async fn unlock_environment(
-    zfs: &Zfs,
-    pool: &Pool,
-    dataset: &str,
-    passphrase: &[u8],
-) -> io::Result<()> {
-    load(pool)?;
-    if !managed_pools(zfs).await?.iter().any(|p| p == pool) {
-        return Err(failure("Unlock requires an owned imported pool"));
-    }
-    zfskit::names::DatasetName::parse(dataset).map_err(failure)?;
-    if dataset != pool.name && !dataset.starts_with(&format!("{}/", pool.name)) {
-        return Err(failure("Unlock dataset is outside selected pool"));
-    }
-    let properties = properties(zfs, dataset).await?;
-    if !properties.visible() || properties.canmount == "off" {
-        return Err(failure(
-            "Unlock requires a visible mountable boot environment",
-        ));
-    }
-    if !properties.locked() {
-        return Ok(());
-    }
-    if !properties.can_unlock() {
-        return Err(failure(
-            "Interactive unlock requires a passphrase encryption root",
-        ));
-    }
-    if passphrase.is_empty()
-        || passphrase.len() > 1024
-        || passphrase
-            .iter()
-            .any(|byte| matches!(byte, 0 | b'\n' | b'\r'))
-    {
-        return Err(failure("Invalid passphrase length or control bytes"));
-    }
-    let root = properties.encryptionroot.as_deref().unwrap();
-    zfskit::names::DatasetName::parse(root).map_err(failure)?;
-    if !(dataset == root || dataset.starts_with(&format!("{root}/")))
-        || !(root == pool.name || root.starts_with(&format!("{}/", pool.name)))
-    {
-        return Err(failure(
-            "Encryption root is outside selected dataset ancestry",
-        ));
-    }
-    // OpenZFS accepts piped passphrases with EOF. zfskit marks stdin secret;
-    // it never puts the passphrase in argv or invokes an interactive terminal.
-    zfskit::encryption::load_key_with_passphrase(zfs.command_runner(), root, passphrase)
-        .await
-        .map_err(failure)?;
-    if self::properties(zfs, dataset).await?.locked() {
-        return Err(failure("Encryption key is still unavailable after unlock"));
-    }
-    Ok(())
-}
 pub async fn environments(
     zfs: &Zfs,
     pool: &Pool,
@@ -406,10 +349,13 @@ pub async fn environments(
             continue;
         }
         let mut environment = BootEnvironment {
+            pool_guid: pool.guid,
             is_default: dataset.name == bootfs,
             dataset: dataset.name.clone(),
             unavailable: properties.unavailable(),
             targets: vec![],
+            default_target: None,
+            default_error: None,
             rejected_generations: vec![],
             properties,
             root: None,
@@ -433,6 +379,8 @@ pub async fn environments(
                     .is_empty()
                     .then(|| "No usable Linux kernel/initramfs pair or NixOS generation".into());
                 environment.targets = discovery.targets;
+                environment.default_target = discovery.default_target;
+                environment.default_error = discovery.default_error;
                 environment.rejected_generations = discovery.rejected;
             }
             Err(error) => {
@@ -444,6 +392,28 @@ pub async fn environments(
     }
     environments.sort_by(|a, b| a.dataset.cmp(&b.dataset));
     Ok(environments)
+}
+
+/// Read-only keysource inspection uses the same ownership ledger as boot roots.
+pub(crate) async fn mount_keysource(zfs: &Zfs, pool: &Pool, dataset: &str) -> io::Result<PathBuf> {
+    let mut lease = load(pool)?;
+    let properties = properties(zfs, dataset).await?;
+    if properties.canmount == "off" {
+        return Err(failure("Keysource has canmount=off"));
+    }
+    let environment = BootEnvironment {
+        pool_guid: pool.guid,
+        dataset: dataset.into(),
+        is_default: false,
+        targets: vec![],
+        default_target: None,
+        default_error: None,
+        rejected_generations: vec![],
+        unavailable: None,
+        root: None,
+        properties,
+    };
+    mount_environment(zfs, pool, &mut lease, &environment).await
 }
 
 pub async fn release(zfs: &Zfs, pool: &Pool) -> io::Result<()> {

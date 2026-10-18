@@ -69,7 +69,13 @@ pub fn run(
     }
     let mut owned = OwnedVm(command.stdout(Stdio::null()).spawn()?);
     wait_for(90, Some(&mut owned.0), || {
-        ensure!(vm::screen(run)?["event"] == "ready", "Waiting for loader");
+        ensure!(
+            matches!(
+                vm::screen(run)?["event"].as_str(),
+                Some("ready" | "catalog-ready")
+            ),
+            "Waiting for loader"
+        );
         vm::ssh(run, "test -b /dev/vdb")?;
         Ok(())
     })?;
@@ -127,7 +133,6 @@ pub fn run(
     let original_boot = vm::ssh(run, "cat /proc/sys/kernel/random/boot_id")?;
     vm::key(run, "r")?;
     event(run, "ready")?;
-    vm::key(run, "ret")?;
     if encrypted {
         unlock_checks(run)?;
     }
@@ -168,13 +173,12 @@ pub fn run(
             manager_pid(run)? != pid,
             "Manager did not restart after unlock"
         );
-        vm::key(run, "ret")?;
         let reconciled = event(run, "boot-environments")?;
         ensure!(
             reconciled["state"]["environments"][0]["properties"]["keystatus"] == "available",
             "Restart must reconcile the owned unlocked pool"
         );
-        vm::key(run, "ret")?;
+        vm::key(run, "k")?;
         event(run, "boot-targets")?;
         vm::ssh(
             run,
@@ -233,7 +237,7 @@ pub fn run(
         }
     }
     if !matches!(mode, Mode::Snapshot) {
-        vm::key(run, "ret")?;
+        vm::key(run, "k")?;
         event(run, "boot-targets")?;
     }
     vm::screenshot(run, &run.join("arch-kernel.png"))?;
@@ -291,7 +295,10 @@ fn event(run: &Path, expected: &str) -> Result<serde_json::Value> {
     wait_for(30, None, || {
         let state = vm::screen(run)?;
         ensure!(
-            state["event"] == expected,
+            state["event"] == expected
+                || expected == "ready" && state["event"] == "catalog-ready"
+                || expected == "boot-environments" && state["event"] == "catalog-ready"
+                || expected == "boot-targets" && state["event"] == "navigation",
             "Waiting for {expected}: {state}"
         );
         Ok(state)
@@ -429,6 +436,8 @@ fn confirmed_rollback(run: &Path) -> Result<()> {
         vm::key(run, key)?;
     }
     vm::key(run, "ret")?;
+    event(run, "boot-environments")?;
+    vm::key(run, "esc")?;
     Ok(())
 }
 
@@ -438,7 +447,8 @@ fn recover_snapshot(run: &Path) -> Result<()> {
     wait_for(20, None, || {
         let state = vm::screen(run)?;
         ensure!(
-            state["event"] == "ready" && manager_pid(run)? != old,
+            matches!(state["event"].as_str(), Some("ready" | "catalog-ready"))
+                && manager_pid(run)? != old,
             "Waiting for new manager"
         );
         Ok(())
@@ -564,21 +574,19 @@ chmod 755 /arch-root/usr/local/bin/zbm-arch-proof
 
 /// The only passphrases here belong to fresh disposable pools, never the host.
 fn unlock_checks(run: &Path) -> Result<()> {
-    let locked = event(run, "boot-environments")?;
+    let locked = event(run, "unlock-prompt")?;
     ensure!(
         locked["state"]["environments"][0]["properties"]["keystatus"] == "unavailable",
         "Expected locked BE: {locked}"
     );
     vm::ssh(run, "rm -f /run/fixture-key; test ! -e /run/fixture-key")?;
-    vm::key(run, "ret")?;
-    event(run, "unlock-prompt")?;
     vm::key(run, "esc")?;
     event(run, "unlock-cancelled")?;
     vm::ssh(
         run,
         "test \"$(zfs get -H -o value keystatus zbm_arch)\" = unavailable",
     )?;
-    vm::key(run, "ret")?;
+    vm::key(run, "k")?;
     event(run, "unlock-prompt")?;
     for key in ["w", "r", "o", "n", "g", "ret"] {
         vm::key(run, key)?;
@@ -588,8 +596,6 @@ fn unlock_checks(run: &Path) -> Result<()> {
         run,
         "test \"$(zfs get -H -o value keystatus zbm_arch)\" = unavailable",
     )?;
-    vm::key(run, "ret")?;
-    event(run, "unlock-prompt")?;
     for key in [
         "f", "i", "x", "t", "u", "r", "e", "minus", "p", "a", "s", "s", "p", "h", "r", "a", "s",
         "e",
@@ -598,5 +604,7 @@ fn unlock_checks(run: &Path) -> Result<()> {
     }
     vm::screenshot(run, &run.join("hidden-unlock.png"))?;
     vm::key(run, "ret")?;
+    event(run, "boot-environments")?;
+    vm::key(run, "esc")?;
     Ok(())
 }

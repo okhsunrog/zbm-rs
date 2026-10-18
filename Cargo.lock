@@ -2156,6 +2156,7 @@ dependencies = [
  "sha2 0.11.0",
  "shlex",
  "tokio",
+ "zeroize",
  "zfskit",
  "zstd",
 ]

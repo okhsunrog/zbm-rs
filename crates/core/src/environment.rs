@@ -11,6 +11,8 @@ pub const PROPERTIES: &[&str] = &[
     "encryptionroot",
     "keystatus",
     "keyformat",
+    "keylocation",
+    "org.zfsbootmenu:keysource",
     "org.zfsbootmenu:active",
     "org.zfsbootmenu:commandline",
     "org.zfsbootmenu:kernel",
@@ -19,9 +21,12 @@ pub const PROPERTIES: &[&str] = &[
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootEnvironment {
+    pub pool_guid: u64,
     pub dataset: String,
     pub is_default: bool,
     pub targets: Vec<BootTarget>,
+    pub default_target: Option<usize>,
+    pub default_error: Option<String>,
     pub rejected_generations: Vec<GenerationIssue>,
     pub unavailable: Option<String>,
     pub properties: BootProperties,
@@ -36,6 +41,10 @@ pub struct BootProperties {
     pub encryptionroot: Option<String>,
     pub keystatus: String,
     pub keyformat: String,
+    #[serde(default)]
+    pub keylocation: Option<String>,
+    #[serde(default)]
+    pub keysource: Option<String>,
     pub active: String,
     // Retain these for future generic Linux support. Bootspec remains authoritative.
     pub commandline: Option<String>,
@@ -64,6 +73,8 @@ impl BootProperties {
             encryptionroot: optional("encryptionroot"),
             keystatus: required("keystatus")?,
             keyformat: required("keyformat")?,
+            keylocation: optional("keylocation"),
+            keysource: optional("org.zfsbootmenu:keysource"),
             active: required("org.zfsbootmenu:active")?,
             commandline: optional("org.zfsbootmenu:commandline"),
             kernel: optional("org.zfsbootmenu:kernel"),
@@ -80,11 +91,14 @@ impl BootProperties {
         if self.canmount == "off" {
             Some("canmount=off; dataset is not mountable".into())
         } else if self.locked() {
-            Some(if self.can_unlock() {
-                "Encryption key is unavailable; press Enter to unlock with a passphrase"
-            } else {
-                "Encryption key is unavailable; interactive unlock requires keyformat=passphrase"
-            }.into())
+            Some(
+                if self.can_unlock() {
+                    "Locked; unlock to discover boot targets"
+                } else {
+                    "Locked; a key file or keysource is required"
+                }
+                .into(),
+            )
         } else {
             None
         }
@@ -102,6 +116,16 @@ impl BootProperties {
     }
 }
 
+/// A pool property selects a candidate; it never authorizes a boot.
+pub fn preferred_environment(environments: &[BootEnvironment], pool: Option<u64>) -> Option<usize> {
+    let mut defaults = environments
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.is_default && pool.is_none_or(|guid| guid == e.pool_guid));
+    let first = defaults.next()?.0;
+    defaults.next().is_none().then_some(first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +137,8 @@ mod tests {
             encryptionroot: None,
             keystatus: "-".into(),
             keyformat: "-".into(),
+            keylocation: None,
+            keysource: None,
             active: active.into(),
             commandline: None,
             kernel: None,
@@ -130,7 +156,7 @@ mod tests {
         assert!(properties("/", "-").unavailable().is_none());
         let mut encrypted = properties("/", "on");
         encrypted.encryption = "aes-256-gcm".into();
-        assert!(encrypted.unavailable().unwrap().contains("Encryption"));
+        assert!(encrypted.unavailable().unwrap().contains("Locked"));
         encrypted.encryptionroot = Some("tank".into());
         encrypted.keyformat = "passphrase".into();
         assert!(encrypted.can_unlock());
@@ -172,5 +198,29 @@ mod tests {
                 .to_string()
                 .contains("encryption")
         );
+    }
+
+    #[test]
+    fn a_default_is_required_and_multiple_pool_defaults_are_ambiguous() {
+        let environment = |pool_guid, is_default| BootEnvironment {
+            pool_guid,
+            is_default,
+            dataset: format!("pool{pool_guid}/root"),
+            properties: properties("/", "on"),
+            targets: vec![],
+            default_target: None,
+            default_error: None,
+            rejected_generations: vec![],
+            unavailable: None,
+            root: None,
+        };
+        let mut environments = vec![environment(1, false), environment(2, false)];
+        assert_eq!(preferred_environment(&environments, None), None);
+        environments[0].is_default = true;
+        assert_eq!(preferred_environment(&environments, None), Some(0));
+        environments[1].is_default = true;
+        assert_eq!(preferred_environment(&environments, None), None);
+        assert_eq!(preferred_environment(&environments, Some(2)), Some(1));
+        assert_eq!(preferred_environment(&environments, Some(3)), None);
     }
 }
