@@ -106,6 +106,10 @@ Protected acceptance uses [the separate signing workflow](security-testing.md).
 
 ## Observing a VM
 
+On systems without firmware under `/usr/share`, set `ZBM_OVMF_CODE` and
+`ZBM_OVMF_VARS` to a matching OVMF CODE/VARS pair before invoking the harness.
+The VARS template is copied into each fresh run directory; it is never modified.
+
 Production keeps root-only supervisor and manager stderr logs under
 `/run/zbm-rs/`, with a bounded event log at `events.jsonl`. Optional VM serial
 mirroring is best effort; an absent or unusable UART must never terminate the

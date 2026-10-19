@@ -2,8 +2,10 @@
 
 Import the flake's `nixosModules.default` and enable
 `boot.loader.zbm-rs.enable`. This is independent of `programs.zbm-rs.enable`,
-which builds an EFI image. Installing a generation never changes EFI files,
-NVRAM entries, the pool bootfs, or another boot environment.
+which builds an EFI image. By default generation installation leaves EFI files
+and NVRAM alone. Optional `boot.loader.zbm-rs.efi.enable` installs one separately
+prepared signed EFI image after successful generation publication. Neither path
+changes the pool bootfs or another boot environment.
 
 The NixOS external bootloader hook runs on `nixos-rebuild boot`. It reads the
 standard generation `boot.json`, copies its kernel and initrd outside the store,
@@ -63,6 +65,26 @@ not disable module verification or modify unsigned module derivations in place.
 `nix/sign-module-tree.py` can sign a public copy of an aggregate module tree
 outside Nix, independently verify every module and make it suitable as an
 externally signed build input. Keep that input and its exact kernel ABI paired.
+
+## Optional EFI publication and independent rescue
+
+`boot.loader.zbm-rs.efi` accepts a runtime `image` path, public `certificate`,
+explicit ESP `partuuid`, relative `path` (default `EFI/zbm-rs/zbm-rs.EFI`) and
+firmware `label` (default `zbm-rs`). Prepare and sign that image outside derivations
+before invoking the generation hook. The hook independently verifies it, stages
+and syncs it on the selected FAT partition, then replaces only that filename.
+Repeated installation leaves identical bytes untouched. Missing NVRAM entries
+are appended without reordering existing choices. An existing label pointing to
+another partition or path is an error. No fallback EFI file is overwritten.
+
+An independent rescue image should use `security.mode = "off"`, an ordinary
+kernel without forced signature/lockdown enforcement, and a separately pinned
+source/package set. Install it explicitly through `nix/install-efi.py` with
+`certificate: null`, its own label and path. That mode rejects signed files:
+the recovery bypass must require the owner to disable firmware Secure Boot.
+Normal generation publication never installs or updates rescue. This mechanism
+does not promise that TPM-dependent OS services work in recovery; the loader's
+shell and manual pool unlock remain available.
 
 TPM SRK/NvPCR setup remains owned by the selected OS. Package the actual loader's
 signed PCR policy and public key in that OS's initrd as appropriate; don't reset

@@ -1,7 +1,7 @@
 """NixOS installBootLoader hook: prepare and authorize generations outside /nix/store.
 
-No EFI/NVRAM changes and no loader image rebuild. Source Bootspec/store files
-are never modified. Runtime keys are paths in root-owned configuration only.
+Optional EFI installation consumes an already prepared owner-signed image.
+Source Bootspec/store files are never modified. Runtime keys stay outside Nix.
 """
 import argparse
 import fcntl
@@ -69,6 +69,8 @@ def main():
     with (base / ".publish.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         install(config, system, spec, document_bytes, dataset, base)
+        if config.get("efi"):
+            load("efi_installer", "install-efi.py").deploy(config["efi"])
 
 
 def install(config, system, spec, document_bytes, dataset, base):

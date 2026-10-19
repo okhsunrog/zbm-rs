@@ -69,23 +69,27 @@ pub fn boot(run: &Path, options: BootOptions<'_>) -> Result<()> {
         .into_iter()
         .find(|path| Path::new(path).is_file())
         .ok_or_else(|| anyhow::anyhow!("No supported 4M Secure Boot firmware found"))?
+        .to_owned()
     } else {
         ordinary_code
     };
     ensure!(
-        Path::new(ovmf_code).is_file(),
+        Path::new(&ovmf_code).is_file(),
         "Matching Secure Boot firmware is unavailable"
     );
     if let Some(vars) = secure_vars {
         ensure!(
-            fs::metadata(vars)?.len() == fs::metadata(ovmf_vars)?.len(),
+            fs::metadata(vars)?.len() == fs::metadata(&ovmf_vars)?.len(),
             "Secure OVMF CODE/VARS size mismatch"
         );
     }
     fs::copy(
-        secure_vars.unwrap_or(Path::new(ovmf_vars)),
+        secure_vars.unwrap_or(Path::new(&ovmf_vars)),
         run.join("OVMF_VARS.fd"),
     )?;
+    // Nix store templates are read-only; the owned copy must accept firmware writes.
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(run.join("OVMF_VARS.fd"), fs::Permissions::from_mode(0o600))?;
     fs::copy(image.join("manifest.json"), run.join("image-manifest.json"))?;
     let manifest: Value = serde_json::from_slice(&fs::read(image.join("manifest.json"))?)?;
     if manifest["test_ssh"] == true {
@@ -248,7 +252,21 @@ pub fn boot(run: &Path, options: BootOptions<'_>) -> Result<()> {
     Err(cmd.exec().into())
 }
 
-fn firmware() -> Result<(&'static str, &'static str)> {
+fn firmware() -> Result<(String, String)> {
+    match (
+        std::env::var("ZBM_OVMF_CODE"),
+        std::env::var("ZBM_OVMF_VARS"),
+    ) {
+        (Ok(code), Ok(vars)) => {
+            ensure!(
+                Path::new(&code).is_file() && Path::new(&vars).is_file(),
+                "OVMF override files are missing"
+            );
+            return Ok((code, vars));
+        }
+        (Err(std::env::VarError::NotPresent), Err(std::env::VarError::NotPresent)) => {}
+        _ => bail!("Set both ZBM_OVMF_CODE and ZBM_OVMF_VARS to a matching firmware pair"),
+    }
     for pair in [
         (
             "/usr/share/edk2/x64/OVMF_CODE.4m.fd",
@@ -264,7 +282,7 @@ fn firmware() -> Result<(&'static str, &'static str)> {
         ),
     ] {
         if Path::new(pair.0).exists() && Path::new(pair.1).exists() {
-            return Ok(pair);
+            return Ok((pair.0.to_owned(), pair.1.to_owned()));
         }
     }
     bail!("No matched OVMF CODE/VARS pair found; install edk2-ovmf or ovmf")

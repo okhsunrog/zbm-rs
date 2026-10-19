@@ -40,6 +40,7 @@
         zbm-rs-efi-test-host-only-scsi = mkImage { testProfile = true; profile = "host-only"; hardwareManifest = ./nix/scsi-hardware-example.json; };
       };
       checks.${system} = {
+        efi-install = import ./nix/check-efi-install.nix { inherit pkgs; };
         config-binary-reuse = import ./nix/check-config-reuse.nix { inherit pkgs mkImage; };
         native-nixos = import ./nix/check-native-nixos.nix { inherit self pkgs nixpkgs system; };
         module-options = let appliance = mkImage {

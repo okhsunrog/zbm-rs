@@ -32,6 +32,7 @@ let
           "publish-loader.py"
           "authorize-linux.py"
           "authorize-boot.py"
+          "install-efi.py"
         ]
   );
   loaderConfig = pkgs.writeText "zbm-rs-target-config.json" (
@@ -43,6 +44,9 @@ let
       loader = "${loader}/bin/zbm-rs";
       signing =
         if cfg.signing.enable then lib.filterAttrs (name: _: name != "enable") cfg.signing else null;
+      efi = if cfg.efi.enable then {
+        inherit (cfg.efi) image certificate partuuid path label;
+      } else null;
     }
   );
   installer = pkgs.writeShellScript "install-zbm-rs-generation" ''
@@ -54,6 +58,8 @@ let
         pkgs.sbsigntool
         pkgs.uv
         pkgs.python3
+        pkgs.efibootmgr
+        pkgs.dosfstools
       ]
     }:$PATH
     export UV_PYTHON=${pkgs.python3}/bin/python
@@ -114,6 +120,14 @@ in
         default = "${pkgs.ima-evm-utils}/bin/evmctl";
       };
     };
+    efi = {
+      enable = lib.mkEnableOption "install a separately prepared, signed EFI image after generation publication";
+      image = runtimePath "Runtime signed EFI image; prepare it before invoking the installation hook.";
+      certificate = runtimePath "Public certificate required to verify the main EFI image.";
+      partuuid = runtimePath "Explicit GPT partition UUID of the ESP.";
+      path = lib.mkOption { type = lib.types.str; default = "EFI/zbm-rs/zbm-rs.EFI"; };
+      label = lib.mkOption { type = lib.types.str; default = "zbm-rs"; };
+    };
   };
   config = lib.mkIf cfg.enable {
     assertions = [
@@ -125,11 +139,15 @@ in
         assertion = !config.boot.loader.grub.enable && !config.boot.loader.systemd-boot.enable;
         message = "Native zbm-rs publication owns installBootLoader; disable other publishers.";
       }
+      {
+        assertion = !cfg.efi.enable || config.boot.loader.efi.canTouchEfiVariables;
+        message = "zbm-rs EFI publication needs boot.loader.efi.canTouchEfiVariables.";
+      }
     ];
     boot.bootspec.enable = lib.mkIf (lib.versionOlder config.system.nixos.release "26.11") true;
     boot.loader.grub.enable = lib.mkDefault false;
     boot.loader.systemd-boot.enable = lib.mkDefault false;
-    boot.loader.efi.canTouchEfiVariables = false;
+    boot.loader.efi.canTouchEfiVariables = lib.mkDefault cfg.efi.enable;
     boot.loader.external = {
       enable = true;
       installHook = installer;
