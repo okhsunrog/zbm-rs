@@ -109,6 +109,8 @@ pub(super) fn intent_action(
             }
         }
         Intent::Kernels => {
+            state.pool_view = false;
+            state.snapshot_view = false;
             state.targets = environment.targets;
             state.rejected_generations = environment.rejected_generations;
             state.selected_target = environment.default_target.unwrap_or(0);
@@ -119,5 +121,51 @@ pub(super) fn intent_action(
             pool,
             dataset: environment.dataset,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kernels_leave_pool_and_snapshot_views() {
+        let environment = serde_json::from_value(serde_json::json!({
+            "pool_guid": 42, "dataset": "tank/root", "is_default": true,
+            "targets": [], "default_target": null, "default_error": null,
+            "rejected_generations": [{"generation": 2, "error": "Invalid Bootspec"}],
+            "unavailable": null, "root": null,
+            "properties": {
+                "mountpoint": "/", "canmount": "noauto", "encryption": "off",
+                "encryptionroot": null, "keystatus": "-", "keyformat": "none",
+                "active": "on", "commandline": null, "kernel": null, "rootprefix": null
+            }
+        }))
+        .unwrap();
+        let mut state = State {
+            pool_view: true,
+            snapshot_view: true,
+            pools: vec![zbm_core::Pool {
+                name: "tank".into(),
+                guid: 42,
+                health: "ONLINE".into(),
+            }],
+            environments: vec![environment],
+            ..State::default()
+        };
+        let options = Options {
+            preview: false,
+            supervised: true,
+            events: crate::diagnostics::Events::default(),
+            config: crate::config::Config::default(),
+        };
+        let mut ui = Ui::default();
+        ui.sync(&mut state);
+        assert!(intent_action(Intent::Kernels, &mut state, &mut ui, &options, &mut None).is_none());
+        ui.sync(&mut state);
+        assert!(!state.pool_view);
+        assert!(!state.snapshot_view);
+        assert_eq!(ui.telemetry(&state)["view"], "Generations");
+        assert_eq!(ui.telemetry(&state)["selected_row"]["Rejected"], 2);
     }
 }
