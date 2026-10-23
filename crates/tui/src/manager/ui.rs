@@ -66,8 +66,10 @@ enum RowId {
     Environment(String),
     Snapshot(u64),
     Generation(u64),
+    Specialisation(u64, String),
     Kernel(String),
     Rejected(u64),
+    RejectedSpecialisation(u64, String),
 }
 #[derive(Clone, Copy)]
 enum Kind {
@@ -133,8 +135,18 @@ pub enum Input {
 
 fn target_id(t: &BootTarget) -> RowId {
     t.generation()
-        .map(RowId::Generation)
+        .map(|g| match t.specialisation() {
+            Some(name) => RowId::Specialisation(g, name.into()),
+            None => RowId::Generation(g),
+        })
         .unwrap_or_else(|| RowId::Kernel(t.inputs().kernel.display().to_string()))
+}
+
+fn variant_title(generation: u64, variant: Option<&str>) -> String {
+    match variant {
+        Some(name) => format!("Generation {generation} · {}", clean(name)),
+        None => format!("Generation {generation}"),
+    }
 }
 
 fn clean(value: impl AsRef<str>) -> String {
@@ -279,7 +291,7 @@ impl Ui {
                                 kind: Kind::Generation(i),
                                 title: t
                                     .generation()
-                                    .map(|g| format!("Generation {g}"))
+                                    .map(|g| variant_title(g, t.specialisation()))
                                     .unwrap_or_else(|| t.label.clone()),
                                 subtitle: t.issue().map(str::to_owned).unwrap_or_else(|| {
                                     if t.generation().is_some() {
@@ -310,9 +322,14 @@ impl Ui {
                         (
                             e.generation,
                             Row {
-                                id: RowId::Rejected(e.generation),
+                                id: match &e.specialisation {
+                                    Some(name) => {
+                                        RowId::RejectedSpecialisation(e.generation, name.clone())
+                                    }
+                                    None => RowId::Rejected(e.generation),
+                                },
                                 kind: Kind::Rejected(i),
-                                title: format!("Generation {}", e.generation),
+                                title: variant_title(e.generation, e.specialisation.as_deref()),
                                 subtitle: e.error.clone(),
                                 tag: "UNAVAILABLE",
                             },
@@ -836,6 +853,8 @@ impl Ui {
     fn prepared_target(&self, target: &BootTarget) -> Option<&BootPlan> {
         self.prepared.as_ref().filter(|plan| {
             plan.target.generation() == target.generation()
+                && plan.target.specialisation() == target.specialisation()
+                && plan.target.toplevel() == target.toplevel()
                 && plan.target.inputs().kernel == target.inputs().kernel
                 && plan
                     .target
@@ -918,6 +937,9 @@ impl Ui {
             Some(Kind::Rejected(i)) => {
                 let e = &state.rejected_generations[i];
                 field("Generation", e.generation.to_string());
+                if let Some(name) = &e.specialisation {
+                    field("Variant", clean(name));
+                }
                 field("Unavailable", e.error.clone());
                 field("Boot", "Blocked; usable peers remain available".into());
             }
@@ -928,6 +950,9 @@ impl Ui {
                 }
                 if let Some(g) = t.generation() {
                     field("Generation", g.to_string());
+                    if let Some(name) = t.specialisation() {
+                        field("Variant", clean(name));
+                    }
                 }
                 field("Label", t.label.clone());
                 field("Dataset", t.dataset.clone());
@@ -996,6 +1021,32 @@ mod tests {
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
+    #[test]
+    fn variants_of_one_generation_have_distinct_selectable_rows() {
+        let base: BootTarget = serde_json::from_value(serde_json::json!({
+            "dataset": "tank/root", "generation": 7, "label": "base", "root": "/guest",
+            "toplevel": "/nix/store/base", "backend": {"kind": "Nixos"}, "snapshot": null,
+            "mountpoint": null, "issue": null,
+            "inputs": {"kernel": "/shared/kernel", "initrd": null, "init": "/nix/store/base/init", "kernel_params": []}
+        })).unwrap();
+        let mut child = serde_json::to_value(&base).unwrap();
+        child["specialisation"] = "niri".into();
+        child["toplevel"] = "/nix/store/child".into();
+        let child: BootTarget = serde_json::from_value(child).unwrap();
+        assert_ne!(target_id(&base), target_id(&child));
+        assert_eq!(
+            variant_title(7, child.specialisation()),
+            "Generation 7 · niri"
+        );
+        let state = State {
+            targets: vec![base, child],
+            ..State::default()
+        };
+        let rows = Ui::rows(&state);
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0].id, rows[1].id);
+    }
+
     #[test]
     fn filter_never_runs_letter_commands_and_function_recovery_stays_available() {
         let mut state = State {
@@ -1302,6 +1353,7 @@ mod tests {
             mountpoint: None,
             backend: zbm_core::boot::Backend::Nixos(zbm_core::boot::NixosTarget {
                 generation: 1,
+                specialisation: None,
                 toplevel: "/nix/store/fixture".into(),
                 kernel: "/nix/store/fixture/kernel".into(),
                 initrd: None,
@@ -1313,6 +1365,7 @@ mod tests {
             targets: vec![target],
             rejected_generations: vec![GenerationIssue {
                 generation: 2,
+                specialisation: None,
                 error: "Invalid Bootspec".into(),
             }],
             ..State::default()

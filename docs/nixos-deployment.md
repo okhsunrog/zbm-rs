@@ -66,6 +66,44 @@ not disable module verification or modify unsigned module derivations in place.
 outside Nix, independently verify every module and make it suitable as an
 externally signed build input. Keep that input and its exact kernel ABI paired.
 
+## Specialisations
+
+Installing a generation also prepares the named children declared in its
+`org.nixos.specialisation.v1` Bootspec extension. Each declaration must match the
+Bootspec reached through `<parent>/specialisation/<name>`. The loader reads each
+child's own Bootspec and source-bound prepared record. One invalid child is shown
+as unavailable without hiding its usable parent or siblings.
+
+The target list shows `Generation N · name` beside the main `Generation N` row.
+The default remains the main configuration selected by the system profile;
+choosing a variant in the menu does not rewrite that profile. The broker resolves
+its own catalog and distinguishes the generation, variant and system closure,
+including variants with the same kernel. Exact argument and artifact verification
+still applies in enforced mode.
+
+```nix
+{ lib, ... }:
+{
+  specialisation.niri.configuration = {
+    services.desktopManager.plasma6.enable = lib.mkForce false;
+    services.displayManager.defaultSession = lib.mkForce "niri";
+    programs.niri.enable = true;
+    fileSystems."/home".device = lib.mkForce "pool/data/home-niri";
+  };
+}
+```
+
+Create the alternate home dataset separately. Specialisations do not clone ZFS
+data or isolate `/var/lib`. Reboot to change a `neededForBoot` home mount. A root
+snapshot clone retains the selected variant's explicit home destination.
+
+Publication validates every child before changing prepared links. If a later
+child fails preparation or signing, earlier variants' prepared links and GC roots
+are restored. This is failure rollback within the installation process, not a
+crash-atomic multi-file transaction. Signed authorization records can remain after
+a failed installation; they do not make an unlisted or modified target bootable.
+The optional EFI update runs once after all variants have been prepared.
+
 ## Optional EFI publication and independent rescue
 
 `boot.loader.zbm-rs.efi` accepts a runtime `image` path, public `certificate`,

@@ -25,6 +25,10 @@
           loaderConfig = builtins.fromJSON (builtins.readFile ./config/test-snapshot.json); };
         zbm-rs = production.passthru.binary;
         zbm-rs-boot-fixture = import ./nix/boot-fixture.nix { inherit pkgs nixpkgs system; };
+        zbm-rs-boot-fixture-specialisations = import ./nix/boot-fixture.nix {
+          inherit pkgs nixpkgs system;
+          withSpecialisation = true;
+        };
         # One libc across the complete staged userspace; native tools build the
         # image, and the kernel/ZFS module pair stays on the same kernelPackages.
         zbm-rs-efi-musl = mkImage { runtimePkgs = muslPkgs; };

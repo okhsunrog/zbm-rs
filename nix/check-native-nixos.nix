@@ -15,7 +15,18 @@ let
         ({ lib, ... }: {
           networking.hostName = "native-nixos";
           networking.hostId = "00bab10c";
-          boot.loader.zbm-rs.enable = true;
+          boot.loader.zbm-rs = {
+            enable = true;
+            signing = {
+              enable = true;
+              kernelKey = "/var/lib/zbm-test/key.pem";
+              kernelCertificate = "/var/lib/zbm-test/cert.pem";
+              imaKey = "/var/lib/zbm-test/key.pem";
+              imaCertificate = "/var/lib/zbm-test/cert.pem";
+              authorityKey = "/var/lib/zbm-test/key.pem";
+              authorityCertificate = "/var/lib/zbm-test/cert.pem";
+            };
+          };
           boot.initrd.secrets."/etc/zfs/test.key" = "/etc/zfs/test.key";
           boot.initrd.systemd.services.zfs-import-testpool = {
             requires = [ "initrd-nixos-copy-secrets.service" ];
@@ -48,7 +59,11 @@ let
           ];
           system.extraDependencies = [ imageConfig ];
           environment.etc.generation-marker.text = "original";
-          specialisation.updated.configuration.environment.etc.generation-marker.text = lib.mkForce "updated";
+          specialisation.updated.configuration = {
+            environment.etc.generation-marker.text = lib.mkForce "updated";
+            fileSystems."/home".device = lib.mkForce "testpool/nixos/home-updated";
+            boot.initrd.secrets."/etc/zfs/variant.key" = "/etc/zfs/variant.key";
+          };
           system.stateVersion = "26.05";
         })
       ];
@@ -71,6 +86,7 @@ pkgs.testers.runNixOSTest {
       pkgs.kexec-tools
       pkgs.nixos-install-tools
       pkgs.jq
+      pkgs.openssl
       loader
     ];
   };
@@ -82,6 +98,8 @@ pkgs.testers.runNixOSTest {
     machine.succeed("zpool create -O mountpoint=none -O overlay=off -O acltype=posixacl -O xattr=sa -O encryption=aes-256-gcm -O keyformat=passphrase -O keylocation=file:///etc/zfs/test.key testpool /dev/vdb")
     machine.succeed("zfs create -u -o mountpoint=none testpool/nixos; zfs create -u -o mountpoint=/ -o canmount=noauto testpool/nixos/root; zfs create -u -o mountpoint=/home -o canmount=noauto testpool/nixos/home")
     machine.succeed("mkdir /mnt; mount -t zfs -o zfsutil testpool/nixos/root /mnt; mkdir /mnt/home; mount -t zfs -o zfsutil testpool/nixos/home /mnt/home; mkdir -p /mnt/etc/zfs; cp /etc/zfs/test.key /mnt/etc/zfs/test.key")
+    machine.succeed("zfs snapshot testpool/nixos/home@variant; zfs clone -u -o mountpoint=/home -o canmount=noauto testpool/nixos/home@variant testpool/nixos/home-updated; cp /etc/zfs/test.key /mnt/etc/zfs/variant.key")
+    machine.succeed("mkdir -p /mnt/var/lib/zbm-test; openssl req -new -x509 -newkey rsa:2048 -nodes -subj /CN=disposable-variant-test/ -addext basicConstraints=critical,CA:FALSE -addext keyUsage=critical,digitalSignature -keyout /mnt/var/lib/zbm-test/key.pem -out /mnt/var/lib/zbm-test/cert.pem -days 1 >/dev/null 2>&1; chmod 600 /mnt/var/lib/zbm-test/key.pem")
     machine.succeed("nixos-install --root /mnt --system ${target} --no-root-passwd --no-channel-copy", timeout=300)
     machine.succeed("test ! -e /mnt/boot/vmlinuz-nixos; test ! -e /mnt/boot/nixos-current; zfs snapshot testpool/nixos/root@original")
     def plan(root, dataset, system):
@@ -107,13 +125,18 @@ pkgs.testers.runNixOSTest {
     assert "/etc/zfs/test.key" in missing
     machine.succeed("readlink /boot/zbm-rs/nixos/${builtins.baseNameOf target} > /tmp/after; cmp /tmp/before /tmp/after; mv /etc/zfs/test.key.saved /etc/zfs/test.key")
     updated = "${target}/specialisation/updated"
-    machine.succeed(updated + "/bin/switch-to-configuration boot", timeout=120)
+    # Parent installation must already prepare every child; no child activation.
+    machine.succeed("test -e /boot/zbm-rs/nixos/$(basename $(readlink -f " + updated + "))/prepared.json")
+    machine.succeed("readlink /boot/zbm-rs/nixos/${builtins.baseNameOf target} > /tmp/parent-before; mv /etc/zfs/variant.key /etc/zfs/variant.key.saved")
+    failed_child = machine.fail("${target}/bin/switch-to-configuration boot 2>&1", timeout=120)
+    assert "/etc/zfs/variant.key" in failed_child
+    machine.succeed("readlink /boot/zbm-rs/nixos/${builtins.baseNameOf target} > /tmp/parent-after; cmp /tmp/parent-before /tmp/parent-after; mv /etc/zfs/variant.key.saved /etc/zfs/variant.key")
     handoff(plan("/", "testpool/nixos/root", updated))
     machine.execute("systemctl --no-block kexec", check_return=False)
     machine.connected = False
     machine.connect()
     machine.wait_for_unit("multi-user.target")
-    machine.succeed("test $(cat /etc/generation-marker) = updated; test $(findmnt -n -o SOURCE /home) = testpool/nixos/home")
+    machine.succeed("test $(cat /etc/generation-marker) = updated; test $(findmnt -n -o SOURCE /home) = testpool/nixos/home-updated")
     # The root's snapshot retains both the store closure and prepared artifacts.
     machine.succeed("zfs clone -o mountpoint=/ -o canmount=noauto testpool/nixos/root@original testpool/nixos/recovery; mkdir -p /mnt/recovery; mount -t zfs -o zfsutil testpool/nixos/recovery /mnt/recovery")
     print(machine.succeed("findmnt -t zfs; ls -ld /mnt/recovery/nix/store/${builtins.baseNameOf target}; ls -l /mnt/recovery/boot/zbm-rs/nixos; ls -l /mnt/recovery/boot/zbm-rs/bundles"))

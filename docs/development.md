@@ -71,6 +71,22 @@ cargo xtask boot-smoke --image result-test --fixture result-fixture \
   --run target/vm/nixos-new --tcg
 ```
 
+Specialisation acceptance selects a named child through the real menu after a
+manager restart, then checks its exact closure and variant marker:
+
+```sh
+nix build .#zbm-rs-boot-fixture-specialisations --out-link result-specialisations
+cargo xtask boot-smoke --specialisation --image result-test \
+  --fixture result-specialisations --run target/vm/specialisation-new --port 2232
+nix build .#checks.x86_64-linux.native-nixos
+```
+
+The native NixOS check additionally signs and installs parent and child together
+with disposable runtime keys, boots both
+with different home datasets, and verifies restoration of prepared links when a
+child-only runtime initrd secret is missing. Installer regression checks run with
+`uv run --offline --no-project python nix/check-nixos-install.py`.
+
 Snapshot acceptance needs a writable-import test profile. It verifies the clone
 root and preserves the source dataset and snapshot:
 

@@ -42,7 +42,7 @@ Those operations belong to the selected OS. See [TPM ownership](tpm.md),
 ## Boot support and release work
 
 - Automatic key-source handling and raw/hex-key input beyond passphrase unlock.
-- NixOS specialisation selection and separate `/nix` layouts.
+- Separate `/nix` layouts.
 - Locked/degraded pool recovery and clear diagnostics for unsupported layouts.
 - Explicit autoboot policy and timeout behavior.
 - Deployment, signing-key rotation and trusted recovery packaging.

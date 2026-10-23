@@ -25,6 +25,8 @@ jobs:
         working-directory: zbm-rs
       - run: nix develop -c uv run --no-project nix/check-security-tools.py
         working-directory: zbm-rs
+      - run: nix develop -c uv run --offline --no-project python nix/check-nixos-install.py
+        working-directory: zbm-rs
       - run: nix build .#checks.x86_64-linux.hardware-probe --out-link result-hardware-probe
         working-directory: zbm-rs
       - run: nix build .#zbm-rs-efi .#checks.x86_64-linux.image-size --out-link result
@@ -46,6 +48,12 @@ jobs:
         working-directory: zbm-rs
       - run: cargo xtask boot-smoke --image result-test --fixture result-fixture --run target/vm/ci-nixos-boot --tcg
         working-directory: zbm-rs
+      - run: nix build .#checks.x86_64-linux.native-nixos --out-link result-native-nixos
+        working-directory: zbm-rs
+      - run: nix build .#zbm-rs-boot-fixture-specialisations --out-link result-specialisations
+        working-directory: zbm-rs
+      - run: cargo xtask boot-smoke --specialisation --image result-test --fixture result-specialisations --run target/vm/ci-specialisation-boot --port 2232 --tcg
+        working-directory: zbm-rs
       - run: nix build .#zbm-rs-efi-test-snapshot --out-link result-snapshot
         working-directory: zbm-rs
       - run: cargo xtask boot-smoke --snapshot --image result-snapshot --fixture result-fixture --run target/vm/ci-snapshot-boot --tcg
@@ -58,6 +66,7 @@ jobs:
             zbm-rs/result/sizes.json
             zbm-rs/result-test/sizes.json
             zbm-rs/target/vm/ci-lifecycle
+            zbm-rs/target/vm/ci-specialisation-boot
             zbm-rs/target/vm/ci-nixos-boot
             zbm-rs/target/vm/ci-snapshot-boot
             zbm-rs/target/vm/ci-host-only-scsi

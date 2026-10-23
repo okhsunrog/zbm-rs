@@ -13,6 +13,7 @@ pub struct Options<'a> {
     pub tcg: bool,
     pub port: u16,
     pub snapshot: bool,
+    pub specialisation: bool,
     pub secure_vars: Option<&'a Path>,
     pub swtpm: bool,
 }
@@ -21,14 +22,19 @@ pub fn run(run: &Path, image: &Path, fixture: &Path, options: Options<'_>) -> Re
         tcg,
         port,
         snapshot,
+        specialisation,
         secure_vars,
         swtpm,
     } = options;
     crate::smoke::install_interrupt()?;
     let owned_tpm = swtpm.then(|| Swtpm::start(run)).transpose()?;
-    let expected = fs::read_to_string(fixture.join("generation-1"))?
-        .trim()
-        .to_owned();
+    let expected = fs::read_to_string(fixture.join(if specialisation {
+        "specialisation-niri"
+    } else {
+        "generation-1"
+    }))?
+    .trim()
+    .to_owned();
     let mut command = Command::new("/proc/self/exe");
     command
         .args(["vm", "--run"])
@@ -140,7 +146,7 @@ ln -s $fake /fixture-root/nix/var/nix/profiles/system-4-link"#,
             );
         }
         vm::key(run, "k")?;
-        targets(run, secure_vars.is_some())?;
+        targets(run, secure_vars.is_some(), specialisation)?;
         if secure_vars.is_some() {
             select_generation(run, 4)?;
             vm::key(run, "ret")?;
@@ -164,8 +170,12 @@ ln -s $fake /fixture-root/nix/var/nix/profiles/system-4-link"#,
         wait_for(20, None, || new_manager(run, old, 1))?;
         environments(run)?;
         vm::key(run, "k")?;
-        targets(run, secure_vars.is_some())?;
-        select_generation(run, 1)?;
+        targets(run, secure_vars.is_some(), specialisation)?;
+        if specialisation {
+            select_specialisation(run, 1, "niri")?;
+        } else {
+            select_generation(run, 1)?;
+        }
         vm::screenshot(run, &run.join("selected-generation.png"))?;
         // A foreign dataset replacing an owned mount must survive preparation.
         let mountinfo = vm::ssh(run, "cat /proc/self/mountinfo")?;
@@ -248,6 +258,12 @@ ln -s $fake /fixture-root/nix/var/nix/profiles/system-4-link"#,
                 !log.contains("kexec-returned"),
                 "Supervisor classified kexec as failed"
             );
+            if specialisation {
+                ensure!(
+                    log.contains("ZBM_VARIANT_SUCCESS variant=niri"),
+                    "Wrong specialisation marker"
+                );
+            }
             if swtpm {
                 ensure!(
                     log.contains("ZBM_TARGET_TPM_SRK_READY"),
@@ -266,7 +282,7 @@ ln -s $fake /fixture-root/nix/var/nix/profiles/system-4-link"#,
         fs::write(
             run.join("boot-report.json"),
             serde_json::to_vec_pretty(
-                &serde_json::json!({"passed":true,"generation":1,"toplevel":expected,"loader_boot_id":original_boot.trim(),"proof":proof,
+                &serde_json::json!({"passed":true,"specialisation":specialisation,"generation":1,"toplevel":expected,"loader_boot_id":original_boot.trim(),"proof":proof,
                     "firmware_secure_boot":secure_vars.is_some(),"swtpm":swtpm,"unauthorized_parameters_rejected":secure_vars.is_some(),
                     "scope":"selected OS boot and loader protection; target TPM consumer integration has separate gates",
                     "checks":["UEFI-loader","ZFS-root","Bootspec","non-default-generation","manager-restart-reconciliation","foreign-mount-protection","kexec_file_load","NixOS-multi-user","guest-poweroff"]}),
@@ -284,6 +300,30 @@ ln -s $fake /fixture-root/nix/var/nix/profiles/system-4-link"#,
     }
     result
 }
+fn select_specialisation(run: &Path, generation: u64, name: &str) -> Result<()> {
+    for _ in 0..12 {
+        let state = vm::screen(run)?;
+        let row = state["ui"]["selected_row"].clone();
+        if row["Specialisation"][0] == generation && row["Specialisation"][1] == name {
+            let selected = state["state"]["selected_target"].as_u64().unwrap() as usize;
+            ensure!(
+                state["state"]["targets"][selected]["specialisation"] == name,
+                "Variant selection mismatch"
+            );
+            return Ok(());
+        }
+        vm::key(run, "down")?;
+        wait_for(5, None, || {
+            ensure!(
+                vm::screen(run)?["ui"]["selected_row"] != row,
+                "Waiting for variant selection"
+            );
+            Ok(())
+        })?;
+    }
+    anyhow::bail!("Specialisation {generation}/{name} not reachable")
+}
+
 fn select_generation(run: &Path, generation: u64) -> Result<()> {
     // Rejected generations are inspectable rows too. A fixed number of Down
     // keys can select a different target as the catalog grows.
@@ -309,7 +349,7 @@ fn select_generation(run: &Path, generation: u64) -> Result<()> {
     }
     anyhow::bail!("Generation {generation} not reachable in visible rows")
 }
-fn targets(run: &Path, secure: bool) -> Result<()> {
+fn targets(run: &Path, secure: bool, specialisation: bool) -> Result<()> {
     wait_for(30, None, || {
         let state = vm::screen(run)?;
         ensure!(
@@ -324,7 +364,17 @@ fn targets(run: &Path, secure: bool) -> Result<()> {
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("Missing targets"))?;
         ensure!(
-            if secure {
+            if specialisation {
+                targets.len() == 4
+                    && targets[0]["generation"] == 2
+                    && targets[0]["specialisation"].is_null()
+                    && targets[1]["generation"] == 2
+                    && targets[1]["specialisation"] == "niri"
+                    && targets[2]["generation"] == 1
+                    && targets[2]["specialisation"].is_null()
+                    && targets[3]["generation"] == 1
+                    && targets[3]["specialisation"] == "niri"
+            } else if secure {
                 targets.len() == 3
                     && targets[0]["generation"] == 4
                     && targets[1]["generation"] == 2

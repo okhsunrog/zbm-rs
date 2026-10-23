@@ -30,8 +30,11 @@ clones. Existing initramfs images are used unchanged. Paths and matching pairs
 are checked again before handoff; ZFS properties are freshly read.
 
 The NixOS backend assumes that /nix/store and /nix/var/nix/profiles are in the
-selected root filesystem. Separate /nix datasets, initrdSecrets,
-specialisations and kernel arguments requiring whitespace/quoting are unsupported.
+selected root filesystem. Separate /nix datasets and extra-initrd Bootspec
+extensions are unsupported. Runtime initrd secrets require prepared artifacts.
+Named specialisations appear beside their parent generation in the target list;
+the default remains the current profile's main configuration. Each variant uses
+its own Bootspec, prepared inputs and explicit data mounts.
 A configured root different from the selected dataset requires an automatically
 recognized systemd initrd for root override; scripted NixOS initrd root override
 is unsupported. No target initrd is rewritten.
@@ -148,7 +151,8 @@ status, kernel-argument editing, diff or other unimplemented ZBM actions.
 | NixOS Bootspec generations with `/nix` in the selected root | Ordinary boot and verified VM boot. |
 | Snapshot clone with a recognized systemd initramfs | Explicit writable-clone boot for the supported root layout. |
 | Encrypted boot environment requiring interactive unlock | Passphrase input; ordinary Arch root and writable snapshot-clone boot tested in disposable VMs. The target initramfs must support its own unlock after kexec. |
-| Separate `/nix`, NixOS specialisations or `initrdSecrets` | Pending. |
+| NixOS specialisations | Named variants of each generation; parent installation prepares their runtime secrets and boot inputs. |
+| Separate `/nix` or extra-initrd Bootspec extensions | Unsupported. |
 | Automatic boot timeout | Reserved configuration; not implemented. |
 
 Read [verified boot](secure-boot-model.md) for protected-mode policy and

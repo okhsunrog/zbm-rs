@@ -29,7 +29,8 @@ Native NixOS installation prepares source-bound signed artifacts outside the
 store; see [NixOS deployment](nixos-deployment.md). Discovery never executes
 runtime secret appenders and handoff revalidates both source and authorization.
 Mount failures are attached to the affected BE. Generation discovery preserves
-usable targets and separate rejected-generation diagnostics, including when
+usable targets and separate rejected-generation diagnostics, including named
+specialisations with distinct closure identities and prepared inputs, and when
 browsing snapshots; one malformed Bootspec never invalidates its peers.
 
 The manager owns one asynchronous boot operation at a time. It freezes selection

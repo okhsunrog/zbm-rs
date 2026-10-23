@@ -30,7 +30,7 @@ Bootspec generations and snapshots from one keyboard-driven interface.
   initramfs, arguments and permitted ZFS root before handoff. Trusted snapshot
   clones follow the same policy.
 - **Native NixOS generations.** Select the generation's system closure directly
-  from Bootspec, including generations that share a kernel.
+  from Bootspec, including named specialisations and generations that share a kernel.
 - **Writable snapshot boot.** Prepare an owned clone without rolling back the
   source dataset. Ordinary mode also supports confirmed rollback, persistent
   clones and promotion.

@@ -5,6 +5,8 @@ use super::*;
 pub(super) struct TargetRecord {
     dataset: String,
     generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    specialisation: Option<String>,
     label: String,
     root: PathBuf,
     toplevel: Option<PathBuf>,
@@ -29,6 +31,7 @@ impl From<BootTarget> for TargetRecord {
     fn from(target: BootTarget) -> Self {
         Self {
             generation: target.generation(),
+            specialisation: target.specialisation().map(str::to_owned),
             toplevel: target.toplevel().map(Path::to_owned),
             inputs: target.inputs(),
             issue: target.issue().map(str::to_owned),
@@ -59,6 +62,7 @@ impl TryFrom<TargetRecord> for BootTarget {
                 }
                 Backend::Nixos(NixosTarget {
                     generation: record.generation.ok_or("Missing NixOS generation")?,
+                    specialisation: record.specialisation,
                     toplevel: record.toplevel.ok_or("Missing NixOS toplevel")?,
                     init: inputs.init.ok_or("Missing NixOS init")?,
                     kernel: inputs.kernel,
@@ -70,7 +74,10 @@ impl TryFrom<TargetRecord> for BootTarget {
                 rootprefix,
                 commandline,
             } => {
-                if record.generation.is_some() || record.toplevel.is_some() || inputs.init.is_some()
+                if record.generation.is_some()
+                    || record.specialisation.is_some()
+                    || record.toplevel.is_some()
+                    || inputs.init.is_some()
                 {
                     return Err("Linux target cannot carry NixOS selectors");
                 }

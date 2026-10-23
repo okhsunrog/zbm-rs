@@ -16,6 +16,7 @@ are separate observations.
 | Encrypted Arch | Hidden passphrase input, cancellation/wrong-key refusal, ordinary and writable snapshot-clone boot; also through enforced OVMF Secure Boot, CMS/IMA and `zfs=` root authorization. |
 | Framework image integration | DMI-scoped recovery module built for Linux 7.2.9, immutable module options and required early loading checked in staged images. Physical deployment is not established. |
 | NixOS | Exact-generation ZFS-root boot and writable snapshot-clone boot, preserving the source dataset and snapshot. |
+| NixOS specialisations | Menu selection checks the exact child closure; native installation prepares signed parent/child inputs, mounts distinct home datasets, and restores prepared links after a missing child secret. This does not establish enforced Secure Boot for the variant. |
 | Protected loader | OVMF Secure Boot; forced kernel/module signatures, lockdown, signed IMA policy, sealed boot inputs and an unprivileged UI. |
 | Target authorization | Kernel/initramfs/argument rejection, pinned CMS policy, authorized root selection and actual signed second-kernel boot. |
 | TPM | PCR11/PCR15 replay, read-only startup, no loader SRK/NV allocation, required absence refusal and optional absence with target checks preserved. |

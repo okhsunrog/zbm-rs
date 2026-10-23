@@ -1,6 +1,6 @@
 # Disposable NixOS roots for exact-generation kexec acceptance.
 { pkgs, nixpkgs, system, kernelPackages ? pkgs.linuxPackages
-, extraNixosModules ? [] }:
+, extraNixosModules ? [], withSpecialisation ? false }:
 let
   generation = number: nixpkgs.lib.nixosSystem {
     inherit system;
@@ -75,10 +75,18 @@ let
             test -s /var/lib/systemd/tpm2-srk-public-key.pem
             echo ZBM_TARGET_TPM_SRK_READY > /dev/ttyS0
           fi
+          ${nixpkgs.lib.optionalString withSpecialisation ''
+            echo "ZBM_VARIANT_SUCCESS variant=$(cat /etc/fixture-variant)" > /dev/ttyS0
+          ''}
           echo "ZBM_BOOT_SUCCESS generation=${toString number} system=$(readlink -f /run/current-system) root=$actual_root boot_id=$(cat /proc/sys/kernel/random/boot_id)" > /dev/ttyS0
           ${pkgs.systemd}/bin/systemctl poweroff
         '';
         path = [ pkgs.util-linux pkgs.coreutils ];
+      };
+    }) ] ++ nixpkgs.lib.optionals withSpecialisation [ ({ lib, ... }: {
+      environment.etc.fixture-variant.text = "base";
+      specialisation.niri.configuration = {
+        environment.etc.fixture-variant.text = lib.mkForce "niri";
       };
     }) ] ++ extraNixosModules;
   };
@@ -95,4 +103,5 @@ in pkgs.runCommand "zbm-nixos-boot-fixture" { nativeBuildInputs = [ pkgs.gnutar 
   tar -rf $out/root.tar -C / -T store-paths
   printf '%s\n' ${first} > $out/generation-1
   printf '%s\n' ${second} > $out/generation-2
+  ${nixpkgs.lib.optionalString withSpecialisation "readlink -f ${first}/specialisation/niri > $out/specialisation-niri"}
 ''

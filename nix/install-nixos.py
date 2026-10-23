@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import unicodedata
 
 HERE = Path(__file__).resolve().parent
 
@@ -44,15 +45,7 @@ def main():
         raise ValueError("Generation installation requires root")
     config = json.loads(args.config.read_text())
     system = args.system.resolve(strict=True)
-    if system.parent != Path("/nix/store"):
-        raise ValueError("Expected a NixOS system toplevel in /nix/store")
-    document_bytes = (system / "boot.json").read_bytes()
-    if len(document_bytes) > 1024 * 1024:
-        raise ValueError("Oversized Bootspec")
-    document = json.loads(document_bytes)
-    spec = document["org.nixos.bootspec.v1"]
-    if Path(spec["toplevel"]).resolve() != system or document.get("org.nixos.extra-initrd.v1") is not None:
-        raise ValueError("Mismatched toplevel or unsupported extra initrd")
+    systems = installation_set(system)
     # nixos-enter retains the outer mount prefixes: identify / by device ID.
     device = os.stat("/").st_dev
     mounts = command(["findmnt", "-rn", "-t", "zfs", "-o", "MAJ:MIN,SOURCE,FSROOT"]).decode().splitlines()
@@ -68,9 +61,63 @@ def main():
     base.mkdir(parents=True, exist_ok=True)
     with (base / ".publish.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        install(config, system, spec, document_bytes, dataset, base)
+        install_set(config, systems, dataset, base)
         if config.get("efi"):
             load("efi_installer", "install-efi.py").deploy(config["efi"])
+
+
+def read_system(system):
+    if system.parent != Path("/nix/store"):
+        raise ValueError("Expected a NixOS system toplevel in /nix/store")
+    path = system / "boot.json"
+    if not path.is_file() or path.stat().st_size > 1024 * 1024:
+        raise ValueError("Invalid or oversized Bootspec")
+    data = path.read_bytes()
+    document = json.loads(data)
+    spec = document["org.nixos.bootspec.v1"]
+    if Path(spec["toplevel"]).resolve(strict=True) != system or document.get("org.nixos.extra-initrd.v1") is not None:
+        raise ValueError("Mismatched toplevel or unsupported extra initrd")
+    return spec, data, document
+
+
+def installation_set(system):
+    spec, data, document = read_system(system)
+    systems = [(system, spec, data)]
+    seen = {system}
+    for name, declared in sorted(document.get("org.nixos.specialisation.v1", {}).items()):
+        if not name or name in (".", "..") or "/" in name or any(unicodedata.category(c) == "Cc" for c in name):
+            raise ValueError("Invalid specialisation name")
+        child = (system / "specialisation" / name).resolve(strict=True)
+        child_spec, child_data, child_document = read_system(child)
+        if child_document != declared:
+            raise ValueError("Specialisation Bootspec does not match parent declaration")
+        if child not in seen:
+            systems.append((child, child_spec, child_data))
+            seen.add(child)
+    return systems
+
+
+def restore_link(path, previous):
+    if previous is None:
+        path.unlink(missing_ok=True)
+    else:
+        replace_link(path, previous)
+
+
+def install_set(config, systems, dataset, base):
+    receipts = []
+    try:
+        for system, spec, data in systems:
+            receipts.append(install(config, system, spec, data, dataset, base))
+    except BaseException:
+        # All previously published variants return to their old prepared inputs.
+        # Signed authorization records may remain, but no catalog entry points
+        # at the abandoned bundles and boot still requires exact inputs.
+        for destination, previous, stage, gcroot, previous_gcroot in reversed(receipts):
+            restore_link(destination, previous)
+            restore_link(gcroot, previous_gcroot)
+            shutil.rmtree(stage)
+        raise
 
 
 def install(config, system, spec, document_bytes, dataset, base):
@@ -81,9 +128,14 @@ def install(config, system, spec, document_bytes, dataset, base):
     if destination.exists() and not destination.is_symlink():
         raise ValueError("Refusing to replace a foreign generation directory")
     previous = os.readlink(destination) if destination.is_symlink() else None
+    gcroot = Path("/nix/var/nix/gcroots/zbm-rs") / system.name
+    if gcroot.exists() and not gcroot.is_symlink():
+        raise ValueError("Refusing to replace a foreign generation GC root")
+    previous_gcroot = os.readlink(gcroot) if gcroot.is_symlink() else None
     stage = Path(tempfile.mkdtemp(prefix=system.name + ".", dir=bundles))
     committed = False
     linked = False
+    gcroot_linked = False
     try:
         for name in ("kernel", "initrd"):
             source = Path(spec[name]).resolve(strict=True)
@@ -134,17 +186,18 @@ def install(config, system, spec, document_bytes, dataset, base):
             authorizer.publish(staged_authorizations, base / "authorizations", Path(signing["authorityCertificate"]))
         gcroots = Path("/nix/var/nix/gcroots/zbm-rs")
         gcroots.mkdir(parents=True, exist_ok=True)
-        replace_link(gcroots / system.name, system)
+        replace_link(gcroot, system)
+        gcroot_linked = True
         command(["sync", "-f", base])
         committed = True
         print(f"Prepared native NixOS generation {system.name} for {dataset}")
+        return destination, previous, stage, gcroot, previous_gcroot
     finally:
         if not committed:
             if linked:
-                if previous is None:
-                    destination.unlink(missing_ok=True)
-                else:
-                    replace_link(destination, previous)
+                restore_link(destination, previous)
+            if gcroot_linked:
+                restore_link(gcroot, previous_gcroot)
             shutil.rmtree(stage)
 
 

@@ -6,7 +6,7 @@ use record::TargetRecord;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     fs, io,
     path::{Component, Path, PathBuf},
 };
@@ -28,6 +28,20 @@ impl BootTarget {
             Backend::Nixos(t) => Some(t.generation),
             Backend::Linux(_) => None,
         }
+    }
+    pub fn specialisation(&self) -> Option<&str> {
+        match &self.backend {
+            Backend::Nixos(t) => t.specialisation.as_deref(),
+            Backend::Linux(_) => None,
+        }
+    }
+    /// Catalog identity, including variants sharing a kernel within one generation.
+    pub fn same_identity(&self, other: &Self) -> bool {
+        self.dataset == other.dataset
+            && self.generation() == other.generation()
+            && self.specialisation() == other.specialisation()
+            && self.toplevel() == other.toplevel()
+            && self.inputs().kernel == other.inputs().kernel
     }
     pub fn toplevel(&self) -> Option<&Path> {
         match &self.backend {
@@ -97,6 +111,7 @@ pub enum Backend {
 #[derive(Debug, Clone)]
 pub struct NixosTarget {
     pub generation: u64,
+    pub specialisation: Option<String>,
     pub toplevel: PathBuf,
     pub init: PathBuf,
     pub kernel: PathBuf,
@@ -122,6 +137,8 @@ pub struct SnapshotSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerationIssue {
     pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specialisation: Option<String>,
     pub error: String,
 }
 
@@ -147,6 +164,8 @@ struct Document {
     boot: Bootspec,
     #[serde(rename = "org.nixos.extra-initrd.v1")]
     extra_initrd: Option<serde_json::Value>,
+    #[serde(rename = "org.nixos.specialisation.v1", default)]
+    specialisations: BTreeMap<String, serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -225,13 +244,17 @@ pub fn rooted_path(root: &Path, path: &Path) -> io::Result<PathBuf> {
     Ok(root.join(relative))
 }
 
-fn read_document(root: &Path, toplevel: &Path) -> io::Result<Document> {
+fn source_document(root: &Path, toplevel: &Path) -> io::Result<Vec<u8>> {
     let path = rooted_path(root, &toplevel.join("boot.json"))?;
     let metadata = fs::metadata(&path)?;
     if !metadata.is_file() || metadata.len() > 1024 * 1024 {
         return Err(invalid("Bootspec exceeds 1 MiB"));
     }
-    let bytes = fs::read(path)?;
+    fs::read(path)
+}
+
+fn read_document(root: &Path, toplevel: &Path) -> io::Result<Document> {
+    let bytes = source_document(root, toplevel)?;
     let mut document: Document = serde_json::from_slice(&bytes).map_err(invalid_error)?;
     if document.extra_initrd.is_some() {
         return Err(invalid(
@@ -341,6 +364,7 @@ pub fn nixos_target(
         root: root.into(),
         backend: Backend::Nixos(NixosTarget {
             generation,
+            specialisation: None,
             toplevel: spec.toplevel,
             init: spec.init,
             kernel: spec.kernel,
@@ -350,6 +374,40 @@ pub fn nixos_target(
         snapshot: None,
         mountpoint: None,
     })
+}
+
+fn specialisation_target(
+    root: &Path,
+    dataset: &str,
+    profile: &Path,
+    generation: u64,
+    name: &str,
+    declared: &serde_json::Value,
+) -> io::Result<BootTarget> {
+    if name.contains('/')
+        || name.is_empty()
+        || name.chars().any(|c| c.is_control())
+        || Path::new(name).components().count() != 1
+        || !matches!(
+            Path::new(name).components().next(),
+            Some(Component::Normal(_))
+        )
+    {
+        return Err(invalid("Invalid specialisation name"));
+    }
+    let child = profile.join("specialisation").join(name);
+    let actual: serde_json::Value =
+        serde_json::from_slice(&source_document(root, &child)?).map_err(invalid_error)?;
+    if actual != *declared {
+        return Err(invalid(
+            "Specialisation Bootspec does not match parent declaration",
+        ));
+    }
+    let mut target = nixos_target(root, dataset, &child, generation)?;
+    if let Backend::Nixos(ref mut nixos) = target.backend {
+        nixos.specialisation = Some(name.into());
+    }
+    Ok(target)
 }
 
 pub fn discover_generations(root: &Path, dataset: &str, limit: u32) -> io::Result<TargetDiscovery> {
@@ -413,21 +471,33 @@ pub fn discover_generations(root: &Path, dataset: &str, limit: u32) -> io::Resul
     let mut discovery = TargetDiscovery::default();
     for generation in candidates {
         let profile = PathBuf::from(format!("/nix/var/nix/profiles/system-{generation}-link"));
-        let target = nixos_target(root, dataset, &profile, generation);
-        match target {
+        let mut add = |variant: Option<String>, result: io::Result<BootTarget>| match result {
             Ok(target) => discovery.targets.push(target),
             Err(error) => discovery.rejected.push(GenerationIssue {
                 generation,
+                specialisation: variant,
                 error: error.to_string(),
             }),
+        };
+        add(None, nixos_target(root, dataset, &profile, generation));
+        // A broken child cannot hide the parent or its usable siblings.
+        if let Ok(bytes) = source_document(root, &profile)
+            && let Ok(document) = serde_json::from_slice::<Document>(&bytes)
+        {
+            for (name, declared) in document.specialisations {
+                add(
+                    Some(name.clone()),
+                    specialisation_target(root, dataset, &profile, generation, &name, &declared),
+                );
+            }
         }
     }
+
     discovery.default_target = current_number
         .and_then(|number| {
-            discovery
-                .targets
-                .iter()
-                .position(|target| target.generation() == Some(number))
+            discovery.targets.iter().position(|target| {
+                target.generation() == Some(number) && target.specialisation().is_none()
+            })
         })
         .or_else(|| {
             if profile_number.is_some() {
@@ -570,6 +640,61 @@ impl planning::SystemdInitrd {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn variants_preserve_identity_defaults_and_sibling_failures() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("zbm-variants-{}", std::process::id()));
+        fs::create_dir_all(root.join("nix/var/nix/profiles")).unwrap();
+        let parent = root.join("nix/store/base");
+        fs::create_dir_all(parent.join("specialisation")).unwrap();
+        let document = |name: &str| {
+            serde_json::json!({"org.nixos.bootspec.v1": {
+                "system": "x86_64-linux", "kernel": "/nix/store/shared/kernel",
+                "init": format!("/nix/store/{name}/init"), "toplevel": format!("/nix/store/{name}"),
+                "kernelParams": [], "label": name
+            }})
+        };
+        let child = document("child");
+        fs::create_dir_all(root.join("nix/store/child")).unwrap();
+        fs::write(
+            root.join("nix/store/child/boot.json"),
+            serde_json::to_vec(&child).unwrap(),
+        )
+        .unwrap();
+        symlink("/nix/store/child", parent.join("specialisation/niri")).unwrap();
+        symlink("/nix/store/child", parent.join("specialisation/wrong")).unwrap();
+        let mut base = document("base");
+        base["org.nixos.specialisation.v1"] = serde_json::json!({
+            "niri": child, "wrong": document("different"), "../escape": child
+        });
+        fs::write(parent.join("boot.json"), serde_json::to_vec(&base).unwrap()).unwrap();
+        symlink(
+            "/nix/store/base",
+            root.join("nix/var/nix/profiles/system-7-link"),
+        )
+        .unwrap();
+        symlink("system-7-link", root.join("nix/var/nix/profiles/system")).unwrap();
+        let discovery = discover_generations(&root, "tank/root", 1).unwrap();
+        assert_eq!(discovery.targets.len(), 2);
+        assert_eq!(discovery.default_target, Some(0));
+        let parent = &discovery.targets[0];
+        let child = &discovery.targets[1];
+        assert_eq!(parent.specialisation(), None);
+        assert_eq!(child.specialisation(), Some("niri"));
+        assert_eq!(parent.inputs().kernel, child.inputs().kernel);
+        assert!(!parent.same_identity(child));
+        assert_eq!(discovery.rejected.len(), 2);
+        assert_eq!(
+            discovery.rejected[0].specialisation.as_deref(),
+            Some("../escape")
+        );
+        assert!(discovery.rejected[1].error.contains("parent declaration"));
+        let roundtrip: BootTarget =
+            serde_json::from_value(serde_json::to_value(child).unwrap()).unwrap();
+        assert!(child.same_identity(&roundtrip));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn guest_absolute_symlinks_never_resolve_against_loader_root() {
         use std::os::unix::fs::symlink;

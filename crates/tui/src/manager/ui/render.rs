@@ -71,6 +71,9 @@ impl Ui {
                 lines.push(Line::raw(""));
                 if let Some(generation) = target.generation() {
                     lines.push(field("Generation", generation.to_string()));
+                    if let Some(name) = target.specialisation() {
+                        lines.push(field("Variant", clean(name)));
+                    }
                 }
                 lines.push(field("Dataset", &target.dataset));
                 lines.push(field(
@@ -293,7 +296,7 @@ impl Ui {
                 let target = &state.targets[i];
                 let name = target
                     .generation()
-                    .map(|g| format!("generation {g}"))
+                    .map(|g| variant_title(g, target.specialisation()))
                     .unwrap_or_else(|| clean(&target.label));
                 format!(
                     "Boot {name}{}",
@@ -914,6 +917,7 @@ mod tests {
             mountpoint: None,
             backend: zbm_core::boot::Backend::Nixos(zbm_core::boot::NixosTarget {
                 generation: 2,
+                specialisation: None,
                 toplevel: "/nix/store/system".into(),
                 kernel: "/nix/store/kernel/bzImage".into(),
                 initrd: Some("/nix/store/initrd/initrd".into()),

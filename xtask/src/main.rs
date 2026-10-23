@@ -75,6 +75,8 @@ enum Task {
         port: u16,
         #[arg(long)]
         snapshot: bool,
+        #[arg(long, conflicts_with_all = ["snapshot", "secure_vars"])]
+        specialisation: bool,
         #[arg(long)]
         secure_vars: Option<PathBuf>,
         #[arg(long)]
@@ -284,6 +286,7 @@ fn main() -> Result<()> {
             tcg,
             port,
             snapshot,
+            specialisation,
             secure_vars,
             swtpm,
         } => boot_smoke::run(
@@ -294,6 +297,7 @@ fn main() -> Result<()> {
                 tcg,
                 port,
                 snapshot,
+                specialisation,
                 secure_vars: secure_vars.as_deref(),
                 swtpm,
             },

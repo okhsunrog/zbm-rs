@@ -309,6 +309,7 @@ mod tests {
             mountpoint: Some("/".into()),
             backend: Backend::Nixos(NixosTarget {
                 generation: 1,
+                specialisation: None,
                 toplevel: "/system".into(),
                 kernel: "/stale-kernel".into(),
                 initrd: None,
