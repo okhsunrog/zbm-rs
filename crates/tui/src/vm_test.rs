@@ -8,6 +8,13 @@ use std::{
 };
 const SOCKET: &str = "/run/zbm-rs/test-control.sock";
 const SUPERVISOR_FAULT: &str = "/run/zbm-rs/supervisor-fault";
+// The supervisor polls this file concurrently with the manager. Publishing the
+// completed command by rename prevents an empty/partial fault from being consumed.
+fn publish_supervisor_fault(path: &std::path::Path, action: &str) -> io::Result<()> {
+    let pending = path.with_extension("pending");
+    fs::write(&pending, action)?;
+    fs::rename(pending, path)
+}
 pub fn supervisor_fault() -> io::Result<()> {
     if !std::path::Path::new("/etc/zbm-test-ssh").exists() {
         return Ok(());
@@ -198,8 +205,8 @@ impl Control {
                 use io::Write;
                 std::io::stdout().write_all(b"\x1b[?1049h\x1b[?25l")?;
                 record_console_damage()?;
-                fs::write(
-                    SUPERVISOR_FAULT,
+                publish_supervisor_fault(
+                    std::path::Path::new(SUPERVISOR_FAULT),
                     if buf[..n] == *b"supervisor-error" {
                         "error"
                     } else {
@@ -274,4 +281,45 @@ fn record_console_damage() -> io::Result<()> {
         }))?,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Barrier,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    #[test]
+    fn concurrent_supervisor_reads_only_complete_fault_commands() {
+        let directory =
+            std::env::temp_dir().join(format!("zbm-fault-publication-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("fault");
+        publish_supervisor_fault(&path, "error").unwrap();
+        let barrier = Barrier::new(2);
+        let done = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let reader_path = &path;
+            let barrier = &barrier;
+            let done = &done;
+            scope.spawn(move || {
+                barrier.wait();
+                while !done.load(Ordering::Acquire) {
+                    let action = fs::read_to_string(reader_path).unwrap();
+                    assert!(
+                        matches!(action.as_str(), "error" | "panic"),
+                        "Partial command: {action:?}"
+                    );
+                }
+            });
+            barrier.wait();
+            for action in ["error", "panic"].into_iter().cycle().take(1000) {
+                publish_supervisor_fault(&path, action).unwrap();
+            }
+            done.store(true, Ordering::Release);
+        });
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

@@ -264,17 +264,24 @@ exit 1"#
         !fs::read_to_string(run.join("serial.log"))?.contains("Attempted to kill init"),
         "Kernel panic killed PID 1"
     );
+    fs::write(run.join("supervisor.log"), &log)?;
+    for evidence in [
+        "forward signal=15",
+        "crash-loop",
+        "kexec-returned",
+        "supervisor error: Deliberate VM supervisor error",
+        "supervisor panic caught",
+        "signal=Some(11)",
+    ] {
+        ensure!(
+            log.contains(evidence),
+            "Missing supervisor evidence: {evidence}"
+        );
+    }
     ensure!(
-        log.contains("forward signal=15")
-            && log.contains("crash-loop")
-            && log.contains("kexec-returned")
-            && log.contains("supervisor error: Deliberate VM supervisor error")
-            && log.contains("supervisor panic caught")
-            && log.matches("last-ditch-return").count() == 2
-            && log.contains("signal=Some(11)"),
-        "Incomplete supervisor evidence"
+        log.matches("last-ditch-return").count() == 2,
+        "Expected two last-ditch recoveries"
     );
-    fs::write(run.join("supervisor.log"), log)?;
     fs::write(
         run.join("lifecycle.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
