@@ -29,6 +29,7 @@ let
         )
         [
           "install-nixos.py"
+          "prune-nixos.py"
           "publish-loader.py"
           "authorize-linux.py"
           "authorize-boot.py"
@@ -66,6 +67,22 @@ let
     export UV_NO_MANAGED_PYTHON=1
     export UV_OFFLINE=1
     exec ${pkgs.uv}/bin/uv run --offline --no-project --python ${pkgs.python3}/bin/python ${support}/install-nixos.py --config ${installerConfig} "$@"
+  '';
+  prune = pkgs.writeShellApplication {
+    name = "zbm-prune-generations";
+    runtimeInputs = [ pkgs.uv pkgs.python3 ];
+    text = ''
+      export UV_NO_CACHE=1
+      exec uv run --offline --no-project --no-managed-python --python ${pkgs.python3}/bin/python ${support}/prune-nixos.py "$@"
+    '';
+  };
+  pruneAfterGc = pkgs.writeShellScript "zbm-prune-after-gc" ''
+    set -eu
+    removed="$(${prune}/bin/zbm-prune-generations --apply)"
+    if [ -n "$removed" ]; then
+      printf '%s\n' "$removed"
+      exec ${config.nix.package.out}/bin/nix-store --gc
+    fi
   '';
   generator = pkgs.replaceVarsWith {
     src = builtins.path {
@@ -156,6 +173,8 @@ in
     };
   };
   config = lib.mkIf cfg.enable {
+    environment.systemPackages = [ prune ];
+    systemd.services.nix-gc.serviceConfig.ExecStartPost = lib.mkIf config.nix.gc.automatic [ pruneAfterGc ];
     assertions = [
       {
         assertion = !cfg.hibernation.enable || builtins.all

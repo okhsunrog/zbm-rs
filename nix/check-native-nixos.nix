@@ -15,6 +15,8 @@ let
         ({ lib, ... }: {
           networking.hostName = "native-nixos";
           networking.hostId = "00bab10c";
+          nix.gc.automatic = true;
+          nix.gc.dates = "yearly";
           boot.loader.zbm-rs = {
             enable = true;
             signing = {
@@ -57,7 +59,7 @@ let
             pkgs.kexec-tools
             self.packages.${system}.zbm-rs
           ];
-          system.extraDependencies = [ imageConfig ];
+          system.extraDependencies = [ imageConfig staleSystem ];
           environment.etc.generation-marker.text = "original";
           specialisation.updated.configuration = {
             environment.etc.generation-marker.text = lib.mkForce "updated";
@@ -71,6 +73,7 @@ let
   target = targetConfig.system.build.toplevel;
   loader = self.packages.${system}.zbm-rs;
   imageConfig = pkgs.writeText "native-nixos-plan-config" "{}";
+  staleSystem = pkgs.runCommand "nixos-system-stale" { } "mkdir $out";
 in
 pkgs.testers.runNixOSTest {
   name = "zbm-native-nixos-generations";
@@ -80,7 +83,7 @@ pkgs.testers.runNixOSTest {
     boot.supportedFilesystems = [ "zfs" ];
     virtualisation.memorySize = 3072;
     virtualisation.emptyDiskImages = [ 16000 ];
-    virtualisation.additionalPaths = [ target ];
+    virtualisation.additionalPaths = [ target staleSystem ];
     environment.systemPackages = [
       pkgs.zfs
       pkgs.kexec-tools
@@ -101,6 +104,8 @@ pkgs.testers.runNixOSTest {
     machine.succeed("zfs snapshot testpool/nixos/home@variant; zfs clone -u -o mountpoint=/home -o canmount=noauto testpool/nixos/home@variant testpool/nixos/home-updated; cp /etc/zfs/test.key /mnt/etc/zfs/variant.key")
     machine.succeed("mkdir -p /mnt/var/lib/zbm-test; openssl req -new -x509 -newkey rsa:2048 -nodes -subj /CN=disposable-variant-test/ -addext basicConstraints=critical,CA:FALSE -addext keyUsage=critical,digitalSignature -keyout /mnt/var/lib/zbm-test/key.pem -out /mnt/var/lib/zbm-test/cert.pem -days 1 >/dev/null 2>&1; chmod 600 /mnt/var/lib/zbm-test/key.pem")
     machine.succeed("nixos-install --root /mnt --system ${target} --no-root-passwd --no-channel-copy", timeout=300)
+    stale = "${builtins.baseNameOf staleSystem}"
+    machine.succeed(f"mkdir /mnt/boot/zbm-rs/bundles/{stale}.fixture; ln -s ../bundles/{stale}.fixture /mnt/boot/zbm-rs/nixos/{stale}; ln -s /nix/store/{stale} /mnt/nix/var/nix/gcroots/zbm-rs/{stale}")
     machine.succeed("test ! -e /mnt/boot/vmlinuz-nixos; test ! -e /mnt/boot/nixos-current; zfs snapshot testpool/nixos/root@original")
     def plan(root, dataset, system):
         output = machine.succeed(f"${loader}/bin/zbm-rs --nixos-plans {root} {dataset} ${imageConfig} {system}")
@@ -119,6 +124,9 @@ pkgs.testers.runNixOSTest {
     machine.connect()
     machine.wait_for_unit("multi-user.target")
     machine.succeed("test $(cat /etc/generation-marker) = original; test $(findmnt -n -o SOURCE /home) = testpool/nixos/home; test $(stat -c %u /home/probe) = 1000")
+    machine.succeed(f"zbm-prune-generations | grep {stale}; test -L /boot/zbm-rs/nixos/{stale}")
+    machine.succeed(f"systemctl start nix-gc.service; test ! -L /boot/zbm-rs/nixos/{stale}; test ! -L /nix/var/nix/gcroots/zbm-rs/{stale}; test ! -e /boot/zbm-rs/bundles/{stale}.fixture", timeout=180)
+    machine.succeed("test -e /boot/zbm-rs/nixos/${builtins.baseNameOf target}/prepared.json; test -e /boot/zbm-rs/nixos/$(basename $(readlink -f ${target}/specialisation/updated))/prepared.json")
     machine.fail("journalctl -b --no-pager | grep 'Duplicate entry'")
     machine.succeed("readlink /boot/zbm-rs/nixos/${builtins.baseNameOf target} > /tmp/before; mv /etc/zfs/test.key /etc/zfs/test.key.saved")
     missing = machine.fail("${target}/bin/switch-to-configuration boot 2>&1", timeout=120)
@@ -140,6 +148,7 @@ pkgs.testers.runNixOSTest {
     # The root's snapshot retains both the store closure and prepared artifacts.
     machine.succeed("zfs clone -o mountpoint=/ -o canmount=noauto testpool/nixos/root@original testpool/nixos/recovery; mkdir -p /mnt/recovery; mount -t zfs -o zfsutil testpool/nixos/recovery /mnt/recovery")
     print(machine.succeed("findmnt -t zfs; ls -ld /mnt/recovery/nix/store/${builtins.baseNameOf target}; ls -l /mnt/recovery/boot/zbm-rs/nixos; ls -l /mnt/recovery/boot/zbm-rs/bundles"))
+    machine.succeed(f"test -L /mnt/recovery/boot/zbm-rs/nixos/{stale}")
     p = plan("/mnt/recovery", "testpool/nixos/recovery", "${target}")
     handoff(p)
     machine.succeed("umount /mnt/recovery")

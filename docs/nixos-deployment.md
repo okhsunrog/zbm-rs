@@ -128,10 +128,16 @@ TPM SRK/NvPCR setup remains owned by the selected OS. Package the actual loader'
 signed PCR policy and public key in that OS's initrd as appropriate; don't reset
 the TPM or treat an EFI signature as a substitute for OS policy.
 
-Failed publication restores the preceding prepared-generation link. Bundles and
-per-system GC roots are retained; cleanup is explicit rather than destructive
-during updates. Keep `/boot` and `/nix` within the selected root so snapshots
-contain the system closure, prepared files and authorizations together.
+Failed publication restores the preceding prepared-generation link. Publication
+does not delete older bundles. `zbm-prune-generations` previews stale entries;
+`zbm-prune-generations --apply` removes recognized stale entries, their GC roots
+and unshared bundles. Retained profiles, current and booted systems, and their
+specialisations are protected. Unknown entries and authorizations are retained.
+The automatic Nix GC service runs this reconciliation after pruning profiles,
+then runs GC again. Explicit `nix-collect-garbage` does not invoke the service;
+run the reconciliation separately after such manual generation deletion.
+Keep `/boot` and `/nix` within the selected root so snapshots contain the system
+closure, prepared files and authorizations together.
 
 There is no ZFSBootMenu-style kernel alias, stable `init=/boot/nixos-current/...`
 or command-line property. Arch's separate generic-Linux path is unchanged.
