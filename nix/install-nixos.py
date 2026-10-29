@@ -44,8 +44,7 @@ def main():
     if os.geteuid() != 0:
         raise ValueError("Generation installation requires root")
     config = json.loads(args.config.read_text())
-    system = args.system.resolve(strict=True)
-    systems = installation_set(system)
+    systems = installation_set(installation_root(args.system))
     # nixos-enter retains the outer mount prefixes: identify / by device ID.
     device = os.stat("/").st_dev
     mounts = command(["findmnt", "-rn", "-t", "zfs", "-o", "MAJ:MIN,SOURCE,FSROOT"]).decode().splitlines()
@@ -78,6 +77,44 @@ def read_system(system):
     if Path(spec["toplevel"]).resolve(strict=True) != system or document.get("org.nixos.extra-initrd.v1") is not None:
         raise ValueError("Mismatched toplevel or unsupported extra initrd")
     return spec, data, document
+
+
+def installation_root(requested, profiles=Path("/nix/var/nix/profiles")):
+    """Find the owning installed generation before publishing a variant.
+
+    A resolved store path has no parent backlink. Use the explicit variant
+    link when supplied, then the current profile and retained generations.
+    Only an exact, validated Bootspec declaration establishes ownership.
+    """
+    system = requested.resolve(strict=True)
+    candidates = []
+    if requested.parent.name == "specialisation":
+        candidates.append(requested.parent.parent)
+    candidates.append(profiles / "system")
+    candidates.extend(sorted(
+        (path for path in profiles.glob("system-*-link") if path.name[7:-5].isdigit()),
+        key=lambda path: int(path.name[7:-5]), reverse=True,
+    ))
+    seen = {system}
+    for candidate in candidates:
+        try:
+            parent = candidate.resolve(strict=True)
+        except FileNotFoundError:
+            continue
+        if parent in seen:
+            continue
+        seen.add(parent)
+        # Unrelated profiles need not be readable/valid Bootspec generations.
+        variants = parent / "specialisation"
+        if not variants.is_dir() or not any(
+            child.resolve() == system for child in variants.iterdir()
+        ):
+            continue
+        systems = installation_set(parent)
+        if any(entry[0] == system for entry in systems):
+            return parent
+        raise ValueError("Specialisation link is missing from parent Bootspec")
+    return system
 
 
 def installation_set(system):

@@ -32,6 +32,56 @@ class Installation(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "name"):
                         installer.installation_set(parent)
 
+    def test_variant_invocation_publishes_the_installed_family(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent, child, sibling = (root / name for name in ("parent", "child", "sibling"))
+            (parent / "specialisation").mkdir(parents=True)
+            child.mkdir()
+            sibling.mkdir()
+            (parent / "specialisation/niri").symlink_to(child)
+            (parent / "specialisation/other").symlink_to(sibling)
+            profiles = root / "profiles"
+            profiles.mkdir()
+            (profiles / "system").symlink_to(parent)
+            family = [(parent, {}, b"parent"), (child, {}, b"child"), (sibling, {}, b"sibling")]
+            with patch.object(installer, "installation_set", return_value=family) as collect:
+                self.assertEqual(installer.installation_root(child, profiles), parent)
+                collect.assert_called_once_with(parent)
+            # Explicit links also work before a generation enters the profile.
+            (profiles / "system").unlink()
+            with patch.object(installer, "installation_set", return_value=family):
+                self.assertEqual(installer.installation_root(parent / "specialisation/niri", profiles), parent)
+            (profiles / "system-63-link").symlink_to(parent)
+            with patch.object(installer, "installation_set", return_value=family):
+                self.assertEqual(installer.installation_root(child, profiles), parent)
+                self.assertEqual(installer.installation_root(parent, profiles), parent)
+                self.assertEqual(installer.installation_root(root, profiles), root)
+            with patch.object(installer, "installation_set", side_effect=ValueError("parent declaration mismatch")):
+                with self.assertRaisesRegex(ValueError, "parent declaration"):
+                    installer.installation_root(child, profiles)
+            with patch.object(installer, "installation_set", return_value=[family[0]]):
+                with self.assertRaisesRegex(ValueError, "missing from parent Bootspec"):
+                    installer.installation_root(child, profiles)
+
+    def test_resolved_child_collects_parent_and_all_variants(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent, child = root / "parent", root / "child"
+            (parent / "specialisation").mkdir(parents=True)
+            child.mkdir()
+            (parent / "specialisation/niri").symlink_to(child)
+            profiles = root / "profiles"
+            profiles.mkdir()
+            (profiles / "system").symlink_to(parent)
+            child_document = {"org.nixos.bootspec.v1": {"toplevel": str(child)}}
+            parent_document = {"org.nixos.specialisation.v1": {"niri": child_document}}
+            documents = {parent: ({}, b"parent", parent_document), child: ({}, b"child", child_document)}
+            with patch.object(installer, "read_system", side_effect=lambda path: documents[path]):
+                resolved = installer.installation_root(child, profiles)
+                family = installer.installation_set(resolved)
+                self.assertEqual([entry[0] for entry in family], [parent, child])
+
     def test_failed_child_restores_parent_bundle_and_gcroot(self):
         for previous in (None, "old-bundle"):
             with self.subTest(previous=previous), tempfile.TemporaryDirectory() as temporary:

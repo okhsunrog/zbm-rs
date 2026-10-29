@@ -31,6 +31,11 @@ Bootspec generations and snapshots from one keyboard-driven interface.
   clones follow the same policy.
 - **Native NixOS generations.** Select the generation's system closure directly
   from Bootspec, including named specialisations and generations that share a kernel.
+  The installation hook publishes the parent and all declared variants even when
+  invoked from an installed specialisation: it finds the parent through the
+  supplied specialisation link or retained system profiles, then validates the
+  exact Bootspec relationship before publishing. An unregistered standalone
+  store closure without a discoverable parent is published on its own.
 - **Writable snapshot boot.** Prepare an owned clone without rolling back the
   source dataset. Ordinary mode also supports confirmed rollback, persistent
   clones and promotion.
