@@ -34,6 +34,7 @@ static CLIENT: OnceLock<Arc<Mutex<UnixStream>>> = OnceLock::new();
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 enum Request {
+    ResumeStatus,
     Hello,
     Discover,
     Operation(Box<Action>),
@@ -43,6 +44,8 @@ enum Request {
 
 #[derive(Serialize, Deserialize)]
 enum Reply {
+    ResumeStatus(zbm_core::resume::Status),
+    ResumeCancelled,
     Unlock(zbm_core::unlock::Status),
     Ready,
     Pools(Vec<Pool>),
@@ -205,8 +208,16 @@ pub async fn perform(action: Action) -> Result<Outcome> {
         Reply::Targets(v) => Ok(Outcome::Targets(v)),
         Reply::Prepared(v) => Ok(Outcome::Prepared(v)),
         Reply::Discarded(v) => Ok(Outcome::Discarded(v)),
+        Reply::ResumeCancelled => Ok(Outcome::ResumeCancelled),
         Reply::Boot(v) => Ok(Outcome::Boot(v, LoadedKernel::remote())),
         _ => bail!("Unexpected broker operation response"),
+    })
+    .await?
+}
+pub async fn resume_status() -> Result<zbm_core::resume::Status> {
+    tokio::task::spawn_blocking(|| match call(Request::ResumeStatus)? {
+        Reply::ResumeStatus(status) => Ok(status),
+        _ => bail!("Unexpected resume status response"),
     })
     .await?
 }
@@ -236,7 +247,7 @@ async fn target(zfs: &Zfs, pool: &Pool, wanted: &BootTarget, limit: u32) -> Resu
             .await?
             .targets
     } else {
-        boot_zfs::environments(zfs, pool, false, limit)
+        boot_zfs::environments(zfs, pool, crate::resume::current()?.protected(), limit)
             .await?
             .into_iter()
             .flat_map(|be| be.targets)
@@ -251,13 +262,17 @@ async fn target(zfs: &Zfs, pool: &Pool, wanted: &BootTarget, limit: u32) -> Resu
 }
 
 async fn normalize(action: Action, config: &Config) -> Result<Action> {
+    let resume = crate::resume::status(config)?;
+    action.guard_resume(&resume)?;
     let zfs = Zfs::new();
     let limit = config.nixos.generation_limit;
-    let readonly = matches!(
-        config.zfs.import_policy,
-        crate::config::ImportPolicy::ReadOnly
-    );
+    let readonly = resume.protected()
+        || matches!(
+            config.zfs.import_policy,
+            crate::config::ImportPolicy::ReadOnly
+        );
     Ok(match action {
+        Action::CancelResume { session_id } => Action::CancelResume { session_id },
         Action::Unlock {
             pool: p,
             dataset,
@@ -348,6 +363,7 @@ pub fn run() -> Result<()> {
         };
         let reply: Result<Reply> = (|| {
             Ok(match request {
+                Request::ResumeStatus => Reply::ResumeStatus(crate::resume::status(&config)?),
                 Request::Hello => Reply::Ready,
                 Request::Discover => Reply::Pools(
                     runtime
@@ -361,6 +377,7 @@ pub fn run() -> Result<()> {
                     );
                     let action = runtime.block_on(normalize(*action, &config))?;
                     match runtime.block_on(action.run_local())? {
+                        Outcome::ResumeCancelled => Reply::ResumeCancelled,
                         Outcome::Environments(v) => Reply::Environments(v),
                         Outcome::Unlock(v) => Reply::Unlock(v),
                         Outcome::Snapshots(v) => Reply::Snapshots(v),

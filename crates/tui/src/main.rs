@@ -2,6 +2,7 @@ mod broker;
 mod config;
 mod diagnostics;
 mod manager;
+mod resume;
 mod security;
 mod session;
 mod supervisor;
@@ -20,6 +21,9 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if resume::utility(&args)? {
+        return Ok(());
+    }
     if args.first().is_some_and(|arg| arg == "--nixos-plans") {
         anyhow::ensure!(
             args.len() == 5,

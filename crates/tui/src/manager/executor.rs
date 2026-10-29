@@ -4,6 +4,7 @@ use zbm_core::boot::BootPlan;
 
 pub struct LoadedKernel {
     state: LoadedState,
+    resume_id: Option<String>,
 }
 
 enum LoadedState {
@@ -15,6 +16,7 @@ impl LoadedKernel {
     pub(crate) fn remote() -> Self {
         Self {
             state: LoadedState::Remote,
+            resume_id: None,
         }
     }
     pub fn load(plan: &BootPlan) -> io::Result<Self> {
@@ -44,6 +46,7 @@ impl LoadedKernel {
         }
         Ok(Self {
             state: LoadedState::Local,
+            resume_id: None,
         })
     }
     pub(crate) fn load_verified(
@@ -78,6 +81,7 @@ impl LoadedKernel {
         }
         let loaded = Self {
             state: LoadedState::Verified(verified),
+            resume_id: None,
         };
         loaded.record_evidence()?;
         Ok(loaded)
@@ -94,10 +98,16 @@ impl LoadedKernel {
         Ok(())
     }
 
+    pub fn bind_resume(&mut self, pool_guid: u64, plan: &BootPlan) -> anyhow::Result<()> {
+        self.resume_id = crate::resume::handoff(pool_guid, plan)?;
+        Ok(())
+    }
     pub fn execute(&self) -> io::Result<()> {
         if matches!(self.state, LoadedState::Remote) {
             return crate::broker::execute().map_err(|e| io::Error::other(e.to_string()));
         }
+        crate::resume::check_handoff(self.resume_id.as_deref())
+            .map_err(|e| io::Error::other(e.to_string()))?;
         unsafe {
             libc::sync();
         }

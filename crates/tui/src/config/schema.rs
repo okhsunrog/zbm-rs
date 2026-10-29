@@ -11,8 +11,15 @@ pub struct Config {
     pub nixos: Nixos,
     pub security: Security,
     pub diagnostics: Diagnostics,
+    pub resume: Resume,
     /// Additional target kernel arguments, validated again by the boot backend.
     pub kernel_args: Vec<String>,
+}
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Resume {
+    /// Dedicated unencrypted swap partition. Disabled by default.
+    pub swap_partuuid: Option<String>,
 }
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -166,6 +173,25 @@ impl Config {
     pub fn validate(&self) -> Result<(), String> {
         self.security.validate()?;
         self.build_policy().validate()?;
+        if let Some(id) = &self.resume.swap_partuuid {
+            if id.len() != 36
+                || !id.bytes().enumerate().all(|(i, b)| {
+                    if [8, 13, 18, 23].contains(&i) {
+                        b == b'-'
+                    } else {
+                        b.is_ascii_hexdigit()
+                    }
+                })
+            {
+                return Err("resume.swap_partuuid must be a GPT partition UUID".into());
+            }
+            if self.security.mode == SecurityMode::Enforce {
+                return Err("Native hibernation image authentication is not implemented for enforced images".into());
+            }
+            if self.diagnostics.esp_partuuid.is_some() {
+                return Err("Resume requires ESP diagnostics disabled until storage coordination is implemented".into());
+            }
+        }
         if !(1..=300).contains(&self.boot.timeout_secs) {
             return Err("boot.timeout_secs must be in 1..=300".into());
         }

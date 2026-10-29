@@ -391,6 +391,10 @@ fn emergency(console: &mut Console, active: &mut Option<i32>) -> io::Result<()> 
 
 fn recovery_shell(console: &mut Console, active: &mut Option<i32>, notice: &str) -> io::Result<()> {
     console.restore()?;
+    if crate::resume::current().map_or(true, |status| status.protected()) {
+        console.notice("Saved session protection: unrestricted shell is unavailable until the session is discarded in the manager.");
+        return protected_recovery(console);
+    }
     if crate::config::image_enforced() {
         console.notice("zbm-rs protected recovery. PID 1 is alive.");
         return protected_recovery(console);

@@ -17,6 +17,9 @@ const DEADLINE: Duration = Duration::from_secs(30);
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Action {
+    CancelResume {
+        session_id: String,
+    },
     Unlock {
         pool: Pool,
         dataset: String,
@@ -66,6 +69,7 @@ pub enum Action {
 }
 
 pub enum Outcome {
+    ResumeCancelled,
     Unlock(zbm_core::unlock::Status),
     Changed {
         environments: Vec<BootEnvironment>,
@@ -83,12 +87,14 @@ pub enum Outcome {
 impl Action {
     fn recovery(&self) -> RecoveryAction {
         match self {
+            Self::CancelResume { .. } => RecoveryAction::RestartRequired,
             Self::Rollback { .. } | Self::Clone { .. } => RecoveryAction::RestartRequired,
             _ => RecoveryAction::Retry,
         }
     }
     fn description(&self) -> &'static str {
         match self {
+            Self::CancelResume { .. } => "Cancelling saved session",
             Self::Unlock { .. } => "Unlocking selected boot environment",
             Self::Rollback { .. } => "Rolling back selected dataset",
             Self::Clone { .. } => "Creating persistent boot environment",
@@ -103,6 +109,7 @@ impl Action {
 
     fn error_event(&self) -> &'static str {
         match self {
+            Self::CancelResume { .. } => "resume-cancel-error",
             Self::Unlock { .. } => "unlock-error",
             Self::Rollback { .. } => "rollback-error",
             Self::Clone { .. } => "clone-error",
@@ -121,8 +128,32 @@ impl Action {
         self.run_local().await
     }
 
-    pub(crate) async fn run_local(self) -> Result<Outcome> {
+    pub(crate) async fn run_local(mut self) -> Result<Outcome> {
         let zfs = Zfs::new();
+        if let Self::CancelResume { session_id } = &self {
+            let id = session_id.clone();
+            tokio::task::spawn_blocking(move || crate::resume::cancel(&id)).await??;
+            return Ok(Outcome::ResumeCancelled);
+        }
+        let resume = crate::resume::current()?;
+        self.guard_resume(&resume)?;
+        if let Self::Environments { readonly, .. } = &mut self {
+            *readonly |= resume.protected();
+        }
+        if !resume.protected()
+            && let Some(pool) = self.write_pool()
+        {
+            let config = crate::config::load(true)?;
+            if config.resume.swap_partuuid.is_some()
+                && !matches!(
+                    config.zfs.import_policy,
+                    crate::config::ImportPolicy::ReadOnly
+                )
+            {
+                // A cancelled session may leave a read-only catalog import.
+                boot_zfs::reopen_writable(&zfs, pool, config.nixos.generation_limit).await?;
+            }
+        }
         if crate::config::image_enforced()
             && let Self::Prepare { target, args, .. } | Self::Boot { target, args, .. } = &self
         {
@@ -146,6 +177,7 @@ impl Action {
             .await??;
         }
         Ok(match self {
+            Self::CancelResume { .. } => unreachable!(),
             Self::Unlock {
                 pool,
                 dataset,
@@ -216,7 +248,7 @@ impl Action {
                 };
                 let load_plan = plan.clone();
                 let owned_clone = boot_zfs::validate_handoff_clone(&zfs, &pool, &plan).await?;
-                let loaded = tokio::task::spawn_blocking(move || {
+                let mut loaded = tokio::task::spawn_blocking(move || {
                     if crate::config::image_enforced() {
                         LoadedKernel::load_verified(&load_plan, owned_clone.as_ref())
                     } else {
@@ -224,11 +256,44 @@ impl Action {
                     }
                 })
                 .await??;
+                loaded.bind_resume(pool.guid, &plan)?;
                 boot_zfs::retain_snapshot_clone(&zfs, &pool, &plan).await?;
                 boot_zfs::release_owned(&zfs, &pool).await?;
                 Outcome::Boot(plan, loaded)
             }
         })
+    }
+
+    pub(crate) fn guard_resume(&self, status: &zbm_core::resume::Status) -> Result<()> {
+        use zbm_core::resume::Status;
+        if matches!(self, Self::CancelResume { .. }) {
+            return Ok(());
+        }
+        if let Status::Blocked { reason } = status {
+            anyhow::bail!("Resume status unavailable: {reason}");
+        }
+        if !status.protected() {
+            return Ok(());
+        }
+        match self {
+            Self::Unlock { .. }
+            | Self::Environments { .. }
+            | Self::Snapshots { .. }
+            | Self::Targets { .. } => Ok(()),
+            Self::Boot { pool, target, .. } if status.matches(pool.guid, target) => Ok(()),
+            _ => anyhow::bail!("Cancel the saved session before this action"),
+        }
+    }
+
+    fn write_pool(&self) -> Option<&Pool> {
+        match self {
+            Self::Prepare { pool, .. }
+            | Self::Discard { pool, .. }
+            | Self::Clone { pool, .. }
+            | Self::Rollback { pool, .. } => Some(pool),
+            Self::Boot { pool, target, .. } if target.snapshot.is_some() => Some(pool),
+            _ => None,
+        }
     }
 }
 

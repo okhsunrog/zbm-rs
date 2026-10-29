@@ -90,6 +90,27 @@ mod tests {
     }
 
     #[test]
+    fn resume_is_opt_in_and_rejects_unsupported_security_and_disk_logging() {
+        assert!(parse("{}").unwrap().resume.swap_partuuid.is_none());
+        let mut value = serde_json::json!({"resume": {"swap_partuuid": "12345678-1234-1234-1234-123456789abc"}});
+        assert!(parse(&value.to_string()).is_ok());
+        value["diagnostics"] =
+            serde_json::json!({"esp_partuuid": "12345678-1234-1234-1234-123456789def"});
+        assert!(parse(&value.to_string()).is_err());
+        value.as_object_mut().unwrap().remove("diagnostics");
+        value["security"] = serde_json::json!({"mode": "enforce", "target_authorities": ["/etc/zbm-rs/trust/owner.pem"], "ima_certificate": "/etc/zbm-rs/trust/ima.der"});
+        assert!(
+            parse(&value.to_string())
+                .unwrap_err()
+                .to_string()
+                .contains("authentication")
+        );
+        value.as_object_mut().unwrap().remove("security");
+        value["resume"]["swap_partuuid"] = "../../sda".into();
+        assert!(parse(&value.to_string()).is_err());
+    }
+
+    #[test]
     fn enforced_configuration_requires_trust_and_valid_tpm_policy() {
         assert!(parse(r#"{"security":{"mode":"enforce"}}"#).is_err());
         assert!(parse(r#"{"security":{"require_firmware_secure_boot":true}}"#).is_err());

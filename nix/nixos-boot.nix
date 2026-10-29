@@ -92,6 +92,24 @@ let
   earlyFstab = pkgs.runCommand "zbm-rs-initrd-fstab" { nativeBuildInputs = [ pkgs.gawk ]; } ''
     awk 'NR == FNR { keep[$0] = 1; next } $2 in keep' ${earlyMounts} ${config.environment.etc.fstab.source} > $out
   '';
+  resumeDevice = "/dev/disk/by-partuuid/${cfg.hibernation.swapPartuuid}";
+  resumeDeviceUnit = "${utils.escapeSystemdPath resumeDevice}.device";
+  resumePools = lib.unique (
+    [ pool ] ++ config.boot.zfs.extraPools ++ map
+      (fs: builtins.head (lib.splitString "/" fs.device))
+      (builtins.filter (fs: fs.fsType == "zfs") (builtins.attrValues config.fileSystems))
+  );
+  recordResume = pkgs.writeShellScript "zbm-record-resume" ''
+    set -eu
+    export PATH=${lib.makeBinPath [ pkgs.util-linux config.boot.zfs.package ]}
+    swapoff ${lib.escapeShellArg resumeDevice}
+    trap 'swapon ${lib.escapeShellArg resumeDevice}' EXIT
+    ${loader}/bin/zbm-rs --resume-record-current \
+      ${lib.escapeShellArg cfg.hibernation.swapPartuuid} \
+      ${lib.escapeShellArg config.fileSystems."/".device} ${loaderConfig}
+    swapon ${lib.escapeShellArg resumeDevice}
+    trap - EXIT
+  '';
   runtimePath =
     description:
     lib.mkOption {
@@ -102,6 +120,14 @@ in
 {
   options.boot.loader.zbm-rs = {
     enable = lib.mkEnableOption "native NixOS generation publication for zbm-rs";
+    hibernation = {
+      enable = lib.mkEnableOption "experimental native hibernation integration (requires a matching loader image)";
+      swapPartuuid = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = "Dedicated unencrypted swap partition; must match loader resume.swap_partuuid.";
+      };
+    };
     kernelArgs = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
@@ -132,6 +158,20 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
+        assertion = !cfg.hibernation.enable || builtins.all
+          (fs: !(utils.fsNeededForBoot fs) || builtins.elem fs.fsType [ "zfs" "tmpfs" "ramfs" ])
+          (builtins.attrValues config.fileSystems);
+        message = "Native resume currently requires all persistent initramfs filesystems to use gated ZFS imports.";
+      }
+      {
+        assertion = !cfg.hibernation.enable || builtins.match "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" cfg.hibernation.swapPartuuid != null;
+        message = "zbm-rs hibernation requires a dedicated swap PARTUUID.";
+      }
+      {
+        assertion = !cfg.hibernation.enable || config.boot.zfs.unsafeAllowHibernation;
+        message = "ZFS hibernation remains experimental; opt in explicitly with boot.zfs.unsafeAllowHibernation.";
+      }
+      {
         assertion = config.fileSystems."/".fsType == "zfs" && !(config.fileSystems ? "/nix");
         message = "zbm-rs requires a ZFS root with /nix inside that dataset.";
       }
@@ -156,11 +196,45 @@ in
     boot.supportedFilesystems = [ "zfs" ];
     boot.zfs.forceImportRoot = false;
     boot.initrd.systemd.enable = true;
+    boot.kernelParams = lib.mkIf cfg.hibernation.enable [ "hibernate=noresume" ];
+    boot.initrd.systemd.suppressedUnits = lib.mkIf cfg.hibernation.enable [ "systemd-hibernate-resume.service" "systemd-hibernate-resume@.service" ];
+    boot.initrd.systemd.contents."/etc/systemd/system-generators/systemd-hibernate-resume-generator" = lib.mkIf cfg.hibernation.enable {
+      source = "${pkgs.coreutils}/bin/true";
+    };
+    # All imports require successful completion, not just ordering after a failed
+    # guard. Suppress stock automatic resume without disabling systemd sleep.
+    boot.initrd.systemd.services = {
+      initrd-parse-etc.environment.SYSTEMD_SYSROOT_FSTAB = lib.mkForce earlyFstab;
+    } // lib.optionalAttrs cfg.hibernation.enable (
+      {
+        zbm-resume = {
+          description = "Restore saved session before importing ZFS";
+          wantedBy = [ "initrd.target" ];
+          requires = [ resumeDeviceUnit ];
+          after = [ resumeDeviceUnit ];
+          before = [ "initrd-root-fs.target" ];
+          unitConfig.DefaultDependencies = false;
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            ExecStart = "${loader}/bin/zbm-rs --resume-restore ${cfg.hibernation.swapPartuuid}";
+          };
+        };
+      } // lib.genAttrs (map (name: "zfs-import-${name}") resumePools) (_: {
+        requires = [ "zbm-resume.service" ];
+        after = [ "zbm-resume.service" ];
+      })
+    );
+    systemd.services.systemd-hibernate = lib.mkIf cfg.hibernation.enable {
+      preStart = "${recordResume}";
+    };
+    systemd.sleep.settings.Sleep = lib.mkIf cfg.hibernation.enable {
+      AllowHybridSleep = false;
+      AllowSuspendThenHibernate = false;
+    };
     boot.initrd.systemd.root = null;
     boot.initrd.systemd.storePaths = [ earlyFstab ];
     boot.initrd.systemd.managerEnvironment.SYSTEMD_SYSROOT_FSTAB = lib.mkForce earlyFstab;
-    boot.initrd.systemd.services.initrd-parse-etc.environment.SYSTEMD_SYSROOT_FSTAB =
-      lib.mkForce earlyFstab;
     boot.initrd.systemd.contents."/etc/zbm-rs/root-selection-v1".text = "zfs-pool-root-v1\n";
     boot.initrd.systemd.contents."/etc/systemd/system-generators/zbm-rs-root".source = generator;
     # Explicit fileSystems mounts only, never bulk-mount foreign boot environments.

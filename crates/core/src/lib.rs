@@ -5,6 +5,7 @@ pub mod boot_zfs;
 pub mod environment;
 mod initrd;
 pub mod linux;
+pub mod resume;
 pub mod security;
 pub mod unlock;
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,7 @@ impl TryFrom<DiscoveredPool> for Pool {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct State {
+    pub resume: resume::Status,
     pub pool_view: bool,
     pub pool_errors: std::collections::BTreeMap<u64, String>,
     pub countdown_secs: Option<u32>,

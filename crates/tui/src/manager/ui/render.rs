@@ -64,6 +64,11 @@ fn tag_style(tag: &str) -> Style {
 impl Ui {
     fn summary(&self, state: &State, options: &Options) -> Vec<Line<'static>> {
         let mut lines = vec![Line::raw("")];
+        if self.resume_selected(state) {
+            lines.push(heading("Resume saved session", GOOD));
+            lines.push(Line::raw("Enter continues where you left off."));
+            lines.push(Line::raw(""));
+        }
         match self.selected(state).map(|row| row.kind) {
             Some(Kind::Generation(i)) => {
                 let target = &state.targets[i];
@@ -115,6 +120,7 @@ impl Ui {
                 lines.push(field(
                     "Import",
                     match options.config.zfs.import_policy {
+                        _ if state.resume.protected() => "Read-only while a saved session exists",
                         crate::config::ImportPolicy::ReadOnly => "Read-only",
                         crate::config::ImportPolicy::HostId => "Host ID guarded",
                     },
@@ -152,9 +158,11 @@ impl Ui {
                     lines.push(Line::raw(clean(error)));
                 } else {
                     lines.push(heading("Boot this system", FOCUS));
-                    lines.push(Line::raw(
-                        "Enter boots the default. K opens kernels or generations.",
-                    ));
+                    lines.push(Line::raw(if self.resume_selected(state) {
+                        "Enter resumes the saved session. K opens other targets."
+                    } else {
+                        "Enter boots the default. K opens kernels or generations."
+                    }));
                     if options.config.ui.show_snapshots {
                         lines.push(Line::raw("T opens this environment's snapshots."));
                     }
@@ -281,6 +289,9 @@ impl Ui {
     }
 
     fn action_label(&self, command: Command, state: &State) -> String {
+        if command == Command::Open && self.resume_selected(state) {
+            return "Resume saved session".into();
+        }
         if command != Command::Open {
             return command.label().into();
         }
@@ -318,6 +329,12 @@ impl Ui {
     fn selection_hint(&self, state: &State, options: &Options) -> String {
         if let Some(reason) = self.reason(Command::Open, state, options) {
             return format!("Unavailable: {}", clean(reason));
+        }
+        if self.resume_selected(state) {
+            return "Enter resumes the saved session.".into();
+        }
+        if self.cancels_resume(Command::Open, state) {
+            return "Booting this system requires discarding the saved session. Confirmation will be requested.".into();
         }
         match self.selected(state).map(|row| row.kind) {
             Some(Kind::Generation(i)) if state.targets[i].snapshot.is_some() => {
@@ -489,6 +506,15 @@ impl Ui {
         };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
+                Span::styled(
+                    match &state.resume {
+                        zbm_core::resume::Status::Inactive => "",
+                        zbm_core::resume::Status::Pending { .. } => "[Resume pending] ",
+                        zbm_core::resume::Status::Blocked { .. }
+                        | zbm_core::resume::Status::Unavailable { .. } => "[Resume unavailable] ",
+                    },
+                    strong(NOTICE),
+                ),
                 Span::styled("ZFS / ", ink(MUTED)),
                 Span::styled(
                     clean(context.unwrap_or("Discover pools")),
@@ -569,11 +595,25 @@ impl Ui {
             rows.iter()
                 .map(|row| {
                     // Only show tags that distinguish state; ordinary backend names add noise.
-                    let tag = if matches!(row.tag, "NIXOS" | "KERNEL" | "POOL" | "BE") {
+                    let resumable = match row.kind {
+                        Kind::Generation(i) => state
+                            .pools
+                            .get(state.selected)
+                            .is_some_and(|p| state.resume.matches(p.guid, &state.targets[i])),
+                        Kind::Environment(i) => state.resume.session().is_some_and(|s| {
+                            s.pool_guid == state.environments[i].pool_guid
+                                && s.target.dataset == state.environments[i].dataset
+                        }),
+                        _ => false,
+                    };
+                    let mut tag = if matches!(row.tag, "NIXOS" | "KERNEL" | "POOL" | "BE") {
                         String::new()
                     } else {
                         format!("  [{}]", row.tag)
                     };
+                    if resumable {
+                        tag.push_str("  [RESUME]");
+                    }
                     ListItem::new(vec![
                         Line::from(vec![
                             Span::styled(clean(&row.title), strong(INK)),
@@ -619,7 +659,11 @@ impl Ui {
             (
                 "Autoboot: ",
                 FOCUS,
-                format!("Booting the default system in {seconds}s. Any key opens the menu."),
+                if state.resume.session().is_some() {
+                    format!("Resuming saved session in {seconds}s. Any key opens the menu.")
+                } else {
+                    format!("Booting the default system in {seconds}s. Any key opens the menu.")
+                },
             )
         } else if self.searching {
             (
@@ -660,6 +704,10 @@ impl Ui {
             Panel::Help => 32,
             Panel::Actions => 30,
             Panel::Details => 34,
+            Panel::ConfirmResume
+            | Panel::ConfirmRollback
+            | Panel::ConfirmDiscard
+            | Panel::ConfirmPromote => 20,
             _ => 14,
         });
         let popup = Rect::new(
@@ -670,7 +718,7 @@ impl Ui {
         );
         frame.render_widget(Clear, popup);
         let accent = match self.panel {
-            Panel::ConfirmRollback | Panel::ConfirmDiscard => DANGER,
+            Panel::ConfirmRollback | Panel::ConfirmDiscard | Panel::ConfirmResume => DANGER,
             Panel::ConfirmPromote => NOTICE,
             _ => FOCUS,
         };
@@ -682,6 +730,7 @@ impl Ui {
                 Panel::ConfirmDiscard => "Discard prepared clone? [Enter] confirm [Esc] cancel",
                 Panel::ConfirmRollback => "Rollback dataset [Esc] cancel",
                 Panel::ConfirmPromote => "Clone and promote [Enter] confirm [Esc] cancel",
+                Panel::ConfirmResume => "Discard saved session? [Enter] continue [Esc] cancel",
                 Panel::Unlock => "Unlock boot environment [Enter] unlock [Esc] cancel",
                 Panel::None => unreachable!(),
             },
@@ -765,7 +814,17 @@ impl Ui {
                 hints,
             );
         } else {
-            let text = match self.panel {
+            let mut text = match self.panel {
+                Panel::ConfirmResume => vec![
+                    Line::raw(
+                        self.resume_confirmation
+                            .as_ref()
+                            .map(|(_, command)| self.action_label(*command, state))
+                            .unwrap_or_default(),
+                    ),
+                    Line::raw(""),
+                    Line::raw("Enter: discard saved session and continue    Esc: go back"),
+                ],
                 Panel::Unlock => vec![
                     Line::raw(self.unlock_prompt.as_ref().map(clean).unwrap_or_else(|| {
                         state
@@ -827,6 +886,26 @@ impl Ui {
                 ],
                 _ => unreachable!(),
             };
+            if self.resume_confirmation.is_some()
+                && matches!(
+                    self.panel,
+                    Panel::ConfirmResume
+                        | Panel::ConfirmDiscard
+                        | Panel::ConfirmPromote
+                        | Panel::ConfirmRollback
+                )
+            {
+                let mut warning = vec![
+                    Line::styled(
+                        "This action also discards the saved session.",
+                        strong(DANGER),
+                    ),
+                    Line::raw("Unsaved work in running applications will be lost."),
+                    Line::raw(""),
+                ];
+                warning.append(&mut text);
+                text = warning;
+            }
             let scrollable = matches!(self.panel, Panel::Help | Panel::Details);
             let inner = block.inner(popup);
             let [content, hints] = Layout::vertical([

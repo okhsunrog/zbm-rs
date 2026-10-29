@@ -284,6 +284,20 @@ pub async fn environments(
         .iter()
         .find(|p| p.pool_guid.parse::<u64>().ok() == Some(pool.guid));
     let mut lease = if existing.is_some() {
+        if readonly
+            && zfs
+                .pool(&pool.name)
+                .map_err(failure)?
+                .get_property("readonly")
+                .await
+                .map_err(failure)?
+                .value
+                != "on"
+        {
+            return Err(failure(
+                "An existing writable import cannot be used for protected inspection",
+            ));
+        }
         // Never claim or later export a pool imported outside this manager.
         load(pool)
             .map_err(|_| failure("Pool is already imported outside zbm-rs; refusing ownership"))?
@@ -436,6 +450,30 @@ pub async fn release(zfs: &Zfs, pool: &Pool) -> io::Result<()> {
         .await
         .map_err(failure)?;
     fs::remove_file(ledger(pool))
+}
+
+/// Called only after session cancellation and with a writable image policy.
+pub async fn reopen_writable(zfs: &Zfs, pool: &Pool, limit: u32) -> io::Result<()> {
+    if !managed_pools(zfs)
+        .await?
+        .iter()
+        .any(|p| p.guid == pool.guid && p.name == pool.name)
+    {
+        return Err(failure("Cannot reopen a pool not owned by this manager"));
+    }
+    if zfs
+        .pool(&pool.name)
+        .map_err(failure)?
+        .get_property("readonly")
+        .await
+        .map_err(failure)?
+        .value
+        == "on"
+    {
+        release(zfs, pool).await?;
+        environments(zfs, pool, false, limit).await?;
+    }
+    Ok(())
 }
 
 async fn unmount_owned(zfs: &Zfs, pool: &Pool) -> io::Result<()> {

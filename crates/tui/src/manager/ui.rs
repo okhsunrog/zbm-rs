@@ -103,11 +103,13 @@ pub enum Panel {
     ConfirmDiscard,
     ConfirmRollback,
     ConfirmPromote,
+    ConfirmResume,
     Unlock,
 }
 
 #[derive(Default)]
 pub struct Ui {
+    pub resume_confirmation: Option<(String, Command)>,
     pub unlock_prompt: Option<String>,
     screens: BTreeMap<String, Screen>,
     key: String,
@@ -235,12 +237,16 @@ impl Ui {
                         .clone()
                         .or_else(|| e.default_error.clone())
                         .unwrap_or_else(|| {
-                            e.default_target
-                                .and_then(|index| e.targets.get(index))
+                            e.targets
+                                .iter()
+                                .find(|target| state.resume.matches(e.pool_guid, target))
+                                .or_else(|| e.default_target.and_then(|index| e.targets.get(index)))
                                 .map(|target| {
                                     target
                                         .generation()
-                                        .map(|number| format!("Generation {number}"))
+                                        .map(|number| {
+                                            variant_title(number, target.specialisation())
+                                        })
                                         .unwrap_or_else(|| target.label.clone())
                                 })
                                 .unwrap_or_else(|| {
@@ -361,6 +367,56 @@ impl Ui {
             _ => None,
         }
     }
+    pub fn resume_selected(&self, state: &State) -> bool {
+        match self.selected(state).map(|r| r.kind) {
+            Some(Kind::Environment(i)) => {
+                let e = &state.environments[i];
+                !e.properties.locked()
+                    && e.targets
+                        .iter()
+                        .any(|t| state.resume.matches(e.pool_guid, t))
+            }
+            Some(Kind::Generation(i)) => state
+                .pools
+                .get(state.selected)
+                .is_some_and(|p| state.resume.matches(p.guid, &state.targets[i])),
+            _ => false,
+        }
+    }
+    pub fn cancels_resume(&self, command: Command, state: &State) -> bool {
+        if state.resume.session_id().is_none() {
+            return false;
+        }
+        match command {
+            Command::Open => match self.selected(state).map(|r| r.kind) {
+                Some(Kind::Environment(i)) => {
+                    let e = &state.environments[i];
+                    !state.resume.session().is_some_and(|session| {
+                        e.pool_guid == session.pool_guid && e.dataset == session.target.dataset
+                    })
+                }
+                Some(Kind::Generation(_)) => !self.resume_selected(state),
+                _ => false,
+            },
+            Command::Prepare
+            | Command::Discard
+            | Command::Clone
+            | Command::ClonePromote
+            | Command::Rollback
+            | Command::Shell => true,
+            _ => false,
+        }
+    }
+    pub fn confirm_resume(&mut self, command: Command, state: &State) {
+        let panel = match command {
+            Command::Discard => Panel::ConfirmDiscard,
+            Command::ClonePromote => Panel::ConfirmPromote,
+            Command::Rollback => Panel::ConfirmRollback,
+            _ => Panel::ConfirmResume,
+        };
+        self.open_panel(panel);
+        self.resume_confirmation = state.resume.session_id().map(|id| (id.into(), command));
+    }
     pub fn sync(&mut self, state: &mut State) {
         if state.activity.operation().is_none() {
             self.operation_started = None;
@@ -469,12 +525,26 @@ impl Ui {
         }
         if matches!(
             command,
-            Command::Help | Command::Actions | Command::Details | Command::Exit | Command::Shell
+            Command::Help | Command::Actions | Command::Details | Command::Exit
         ) {
             return None;
         }
         if matches!(command, Command::Restart | Command::PowerOff) {
             return (!options.supervised).then(|| "Requires the PID 1 supervisor".into());
+        }
+        if let zbm_core::resume::Status::Blocked { reason } = &state.resume
+            && !matches!(
+                command,
+                Command::Search | Command::Back | Command::Rescan | Command::Pools
+            )
+        {
+            return Some(format!(
+                "Saved session could not be checked: {}",
+                clean(reason)
+            ));
+        }
+        if command == Command::Shell && !state.resume.protected() {
+            return None;
         }
         if state.activity.requires_restart() {
             return Some("Restart manager to reconcile the timed-out operation".into());
@@ -486,7 +556,7 @@ impl Ui {
         }
         if matches!(
             command,
-            Command::Search | Command::Back | Command::Rescan | Command::Pools
+            Command::Search | Command::Back | Command::Rescan | Command::Pools | Command::Shell
         ) {
             return None;
         }
@@ -592,6 +662,9 @@ impl Ui {
         }
     }
     pub fn open_label(&self, state: &State) -> &'static str {
+        if self.resume_selected(state) {
+            return "Resume";
+        }
         match View::of(state) {
             View::Pools => "Import",
             View::Environments
@@ -616,6 +689,7 @@ impl Ui {
             self.passphrase.reserve_exact(1024);
         }
         self.confirmation.clear();
+        self.resume_confirmation = None;
         if self.panel == Panel::None && self.searching {
             self.resume_search = true;
         }
@@ -748,9 +822,20 @@ impl Ui {
         }
         if self.panel != Panel::None {
             if key.code == KeyCode::Esc {
+                self.resume_confirmation = None;
                 self.panel = Panel::None;
                 self.searching = std::mem::take(&mut self.resume_search);
                 return Input::Changed("panel-closed");
+            }
+            if self.panel == Panel::ConfirmResume {
+                if command == Some(Command::Open)
+                    && let Some((_, pending)) = self.resume_confirmation.as_ref()
+                {
+                    let pending = *pending;
+                    self.panel = Panel::None;
+                    return Input::Command(pending, true);
+                }
+                return Input::Ignored;
             }
             if self.panel == Panel::ConfirmDiscard {
                 if command == Some(Command::Open) {
@@ -875,6 +960,23 @@ impl Ui {
         };
         if let Some(error) = &state.error {
             field("Notice", error.clone());
+        }
+        match &state.resume {
+            zbm_core::resume::Status::Pending { session } => {
+                field(
+                    "Saved session",
+                    format!("{}: {}", session.target.dataset, session.target.label),
+                );
+                field(
+                    "Resume",
+                    "The matching target resumes; other boot actions require cancellation.".into(),
+                );
+            }
+            zbm_core::resume::Status::Unavailable { reason, .. }
+            | zbm_core::resume::Status::Blocked { reason } => {
+                field("Resume unavailable", reason.clone())
+            }
+            _ => (),
         }
         match self.selected(state).map(|row| row.kind) {
             Some(Kind::Pool(i)) => {
@@ -1010,6 +1112,137 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn resume_state() -> State {
+        let target: BootTarget = serde_json::from_value(serde_json::json!({
+            "dataset":"tank/root","generation":7,"label":"NixOS","root":"/guest",
+            "toplevel":"/nix/store/base","backend":{"kind":"Nixos"},"snapshot":null,
+            "mountpoint":null,"issue":null,
+            "inputs":{"kernel":"/shared/kernel","initrd":null,"init":"/nix/store/base/init","kernel_params":[]}
+        })).unwrap();
+        let mut other = target.clone();
+        if let zbm_core::boot::Backend::Nixos(n) = &mut other.backend {
+            n.generation = 6;
+        }
+        State {
+            resume: zbm_core::resume::Status::Pending {
+                session: Box::new(zbm_core::resume::Session {
+                    id: "session-one".into(),
+                    pool_guid: 42,
+                    target: target.clone(),
+                }),
+            },
+            pools: vec![zbm_core::Pool {
+                name: "tank".into(),
+                guid: 42,
+                health: "ONLINE".into(),
+            }],
+            targets: vec![target, other],
+            ..State::default()
+        }
+    }
+    #[test]
+    fn resume_navigation_does_not_cancel_or_add_a_startup_panel() {
+        let mut state = resume_state();
+        let mut ui = Ui::default();
+        ui.sync(&mut state);
+        assert_eq!(ui.panel, Panel::None);
+        assert_eq!(ui.open_label(&state), "Resume");
+        assert!(!ui.cancels_resume(Command::Open, &state));
+        for command in [
+            Command::PowerOff,
+            Command::Restart,
+            Command::Rescan,
+            Command::Search,
+            Command::Help,
+            Command::Details,
+            Command::Kernels,
+            Command::Snapshots,
+            Command::Pools,
+            Command::Back,
+        ] {
+            assert!(!ui.cancels_resume(command, &state), "{command:?}");
+        }
+        ui.input(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
+        assert!(ui.cancels_resume(Command::Open, &state));
+        assert_eq!(ui.panel, Panel::None);
+        ui.confirm_resume(Command::Open, &state);
+        assert_eq!(ui.panel, Panel::ConfirmResume);
+        ui.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+        assert_eq!(state.resume.session_id(), Some("session-one"));
+        assert_eq!(state.selected_target, 1);
+        assert!(ui.resume_confirmation.is_none());
+    }
+    #[test]
+    fn f10_never_confirms_cancellation_and_rollback_keeps_typed_confirmation() {
+        let mut state = resume_state();
+        let mut ui = Ui::default();
+        ui.sync(&mut state);
+        for panel in [
+            Panel::ConfirmResume,
+            Panel::ConfirmRollback,
+            Panel::ConfirmPromote,
+            Panel::ConfirmDiscard,
+            Panel::Unlock,
+            Panel::Help,
+            Panel::Details,
+            Panel::Actions,
+        ] {
+            ui.open_panel(panel);
+            ui.resume_confirmation = Some(("session-one".into(), Command::Open));
+            assert!(matches!(
+                ui.input(
+                    KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE),
+                    &mut state
+                ),
+                Input::Command(Command::PowerOff, false)
+            ));
+            assert_eq!(state.resume.session_id(), Some("session-one"));
+        }
+        ui.confirm_resume(Command::Rollback, &state);
+        assert_eq!(ui.panel, Panel::ConfirmRollback);
+        assert!(!matches!(
+            ui.input(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut state
+            ),
+            Input::Command(_, true)
+        ));
+        for c in "ROLLBACK".chars() {
+            ui.input(key(c), &mut state);
+        }
+        assert!(matches!(
+            ui.input(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut state
+            ),
+            Input::Command(Command::Rollback, true)
+        ));
+    }
+    #[test]
+    fn compact_resume_indicator_and_combined_dialog_fit() {
+        let mut state = resume_state();
+        let mut ui = Ui::default();
+        ui.sync(&mut state);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|f| ui.draw(f, &state, &options())).unwrap();
+        let text = |t: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+            t.backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+        };
+        assert!(text(&terminal).contains("[Resume pending]"));
+        assert!(text(&terminal).contains("Resume"));
+        ui.confirm_resume(Command::Rollback, &state);
+        terminal.draw(|f| ui.draw(f, &state, &options())).unwrap();
+        let rendered = text(&terminal);
+        assert!(rendered.contains("discards the saved session"));
+        assert!(rendered.contains("Type ROLLBACK"), "{rendered}");
+        assert!(rendered.contains("Power off"));
+    }
     fn options() -> Options {
         Options {
             config: crate::config::Config::default(),

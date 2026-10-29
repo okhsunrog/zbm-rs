@@ -23,6 +23,15 @@ pub(super) fn readonly(options: &Options) -> bool {
     )
 }
 pub(super) fn preferred(state: &State, options: &Options) -> Option<usize> {
+    if let Some(session) = state.resume.session() {
+        return state
+            .environments
+            .iter()
+            .position(|e| e.pool_guid == session.pool_guid && e.dataset == session.target.dataset);
+    }
+    if state.resume.protected() {
+        return None;
+    }
     zbm_core::environment::preferred_environment(
         &state.environments,
         options
@@ -90,9 +99,20 @@ pub(super) fn intent_action(
     match intent {
         Intent::Menu => None,
         Intent::Boot => {
-            let target = environment
-                .default_target
-                .and_then(|index| environment.targets.get(index));
+            let target = if let Some(session) = state
+                .resume
+                .session()
+                .filter(|s| s.pool_guid == pool.guid && s.target.dataset == environment.dataset)
+            {
+                environment
+                    .targets
+                    .iter()
+                    .find(|t| session.matches(pool.guid, t))
+            } else {
+                environment
+                    .default_target
+                    .and_then(|index| environment.targets.get(index))
+            };
             match target {
                 Some(target) => Some(Action::Boot {
                     pool,
@@ -113,7 +133,12 @@ pub(super) fn intent_action(
             state.snapshot_view = false;
             state.targets = environment.targets;
             state.rejected_generations = environment.rejected_generations;
-            state.selected_target = environment.default_target.unwrap_or(0);
+            state.selected_target = state
+                .targets
+                .iter()
+                .position(|t| state.resume.matches(pool.guid, t))
+                .or(environment.default_target)
+                .unwrap_or(0);
             state.error = environment.unavailable;
             None
         }

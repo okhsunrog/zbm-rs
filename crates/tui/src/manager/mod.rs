@@ -56,6 +56,9 @@ async fn tui(
     #[cfg(feature = "vm-test")] control: Option<&crate::vm_test::Control>,
 ) -> Result<()> {
     let mut state = State::default();
+    if options.supervised && !options.preview {
+        state.resume = crate::resume::display_status(&options.config).await;
+    }
     let mut ui = Ui::default();
     ui.sync(&mut state);
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -70,6 +73,8 @@ async fn tui(
     let mut resume_unlock = false;
     let mut auto_cancelled = false;
     let mut auto_deadline: Option<Instant> = None;
+    let mut after_cancellation: Option<UiCommand> = None;
+    let mut continuation: Option<UiCommand> = None;
     loop {
         #[cfg(feature = "vm-test")]
         if let Some(control) = control
@@ -81,6 +86,9 @@ async fn tui(
             break;
         }
         if rescan && workflow.start_scan() {
+            if options.supervised && !options.preview {
+                state.resume = crate::resume::display_status(&options.config).await;
+            }
             state.activity = workflow.view();
             rescan = false;
             refresh(terminal, &mut state, options, &mut ui)?;
@@ -119,6 +127,19 @@ async fn tui(
         if let Some(mut completed) = workflow.take_finished() {
             state.activity = workflow.view();
             let event = match completed.finish().await {
+                Ok(Outcome::ResumeCancelled) => {
+                    state.resume = crate::resume::display_status(&options.config).await;
+                    if state.resume.protected() {
+                        after_cancellation = None;
+                        state.error =
+                            Some("Saved session cancellation could not be verified".into());
+                    } else {
+                        continuation = after_cancellation.take();
+                        ui.resume_confirmation = None;
+                        state.error = None;
+                    }
+                    "resume-cancelled"
+                }
                 Ok(Outcome::Unlock(zbm_core::unlock::Status::Passphrase(challenge))) => {
                     ui.unlock_prompt = Some(format!(
                         "{}{}",
@@ -210,6 +231,10 @@ async fn tui(
                     unreachable!("successful kexec leaves this kernel")
                 }
                 Err(error) => {
+                    after_cancellation = None;
+                    if options.config.resume.swap_partuuid.is_some() {
+                        state.resume = crate::resume::display_status(&options.config).await;
+                    }
                     workflow.recover(error.recovery);
                     state.activity = workflow.view();
                     state.error = Some(format!(
@@ -327,8 +352,16 @@ async fn tui(
             refresh(terminal, &mut state, options, &mut ui)?;
             last_tick = Instant::now();
         }
-        if event::poll(Duration::from_millis(50))? {
-            let input = event::read()?;
+        let continued = continuation.take();
+        if continued.is_some() || event::poll(Duration::from_millis(50))? {
+            let input = if continued.is_some() {
+                Event::Key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Enter,
+                    crossterm::event::KeyModifiers::NONE,
+                ))
+            } else {
+                event::read()?
+            };
             if matches!(input, Event::Resize(..)) {
                 refresh(terminal, &mut state, options, &mut ui)?;
                 emit(options, "resize", &state, &ui)?;
@@ -347,7 +380,10 @@ async fn tui(
                 }
                 let mut action = None;
                 let mut observed = cancelled_timer.then_some("autoboot-cancelled");
-                match ui.input(key, &mut state) {
+                let input = continued
+                    .map(|command| Input::Command(command, true))
+                    .unwrap_or_else(|| ui.input(key, &mut state));
+                match input {
                     Input::Unlock(passphrase) => {
                         if let Some(selection) = &unlocking
                             && let Some(challenge) = &selection.challenge
@@ -370,6 +406,28 @@ async fn tui(
                         if let Some(reason) = ui.reason(command, &state, options) {
                             state.error = Some(reason);
                             observed = Some("command-disabled");
+                        } else if ui.cancels_resume(command, &state) {
+                            if !confirmed {
+                                ui.confirm_resume(command, &state);
+                                observed = Some("resume-cancel-confirmation");
+                            } else if let Some((id, expected_command)) = &ui.resume_confirmation {
+                                if *expected_command == command
+                                    && state.resume.session_id() == Some(id.as_str())
+                                {
+                                    after_cancellation = Some(command);
+                                    action = Some(Action::CancelResume {
+                                        session_id: id.clone(),
+                                    });
+                                } else {
+                                    state.error = Some(
+                                        "Saved session changed; select the action again".into(),
+                                    );
+                                    ui.resume_confirmation = None;
+                                }
+                            } else {
+                                state.error =
+                                    Some("Saved session cancellation requires confirmation".into());
+                            }
                         } else {
                             match command {
                                 UiCommand::Exit => {
