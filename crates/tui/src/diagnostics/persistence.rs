@@ -33,12 +33,11 @@ pub fn persist_failure() {
     }
 }
 
-struct Mounted;
+pub(super) struct Mounted(CString);
 impl Drop for Mounted {
     fn drop(&mut self) {
-        let target = CString::new(MOUNT).unwrap();
         // Never detach a still-busy filesystem or alter a foreign mount.
-        if unsafe { libc::umount(target.as_ptr()) } < 0 {
+        if unsafe { libc::umount(self.0.as_ptr()) } < 0 {
             supervisor(&format!(
                 "Diagnostic ESP unmount failed: {}",
                 io::Error::last_os_error()
@@ -48,6 +47,16 @@ impl Drop for Mounted {
 }
 
 fn save(partuuid: &str) -> io::Result<()> {
+    let _mounted = mount_esp(partuuid, MOUNT)?;
+    write_report(Path::new(MOUNT), &report())?;
+    let directory = File::open(MOUNT)?;
+    if unsafe { libc::syncfs(directory.as_raw_fd()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+pub(super) fn mount_esp(partuuid: &str, mountpoint: &str) -> io::Result<Mounted> {
     let device = fs::canonicalize(format!(
         "/dev/disk/by-partuuid/{}",
         partuuid.to_ascii_lowercase()
@@ -57,9 +66,9 @@ fn save(partuuid: &str) -> io::Result<()> {
             "Configured diagnostic ESP is not a block device",
         ));
     }
-    fs::create_dir_all(MOUNT)?;
+    fs::create_dir_all(mountpoint)?;
     let source = CString::new(device.as_os_str().as_encoded_bytes())?;
-    let target = CString::new(MOUNT)?;
+    let target = CString::new(mountpoint)?;
     let kind = c"vfat";
     // FAT has no Unix permissions. Only PID 1's root-owned mount can write it.
     let flags = libc::MS_NODEV | libc::MS_NOSUID | libc::MS_NOEXEC;
@@ -77,13 +86,7 @@ fn save(partuuid: &str) -> io::Result<()> {
     {
         return Err(io::Error::last_os_error());
     }
-    let _mounted = Mounted;
-    write_report(Path::new(MOUNT), &report())?;
-    let directory = File::open(MOUNT)?;
-    if unsafe { libc::syncfs(directory.as_raw_fd()) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    Ok(Mounted(target))
 }
 
 fn report() -> String {

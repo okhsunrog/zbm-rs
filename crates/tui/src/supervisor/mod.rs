@@ -30,7 +30,12 @@ struct Recovery {
 }
 
 pub fn run() -> ! {
-    std::panic::set_hook(Box::new(|info| log(&format!("supervisor panic: {info}"))));
+    std::panic::set_hook(Box::new(|info| {
+        log(&format!("supervisor panic: {info}"));
+        if crate::diagnostics::continuous() {
+            log(&format!("{}", std::backtrace::Backtrace::force_capture()));
+        }
+    }));
     // Keep console baseline and child identity outside the unwind boundary.
     let mut recovery = Recovery::default();
     loop {
@@ -196,6 +201,7 @@ fn supervise(recovery: &mut Recovery) -> io::Result<()> {
         }
         recovery.bootstrapped = true;
     }
+    crate::diagnostics::recorder::start();
     let config = loop {
         match crate::config::load(true) {
             Ok(config) => break config,
@@ -219,6 +225,9 @@ fn supervise(recovery: &mut Recovery) -> io::Result<()> {
             .env("LD_LIBRARY_PATH", "/usr/lib")
             .env("PATH", "/usr/bin:/usr/sbin:/bin:/sbin")
             .env(session::FD_ENV, socket.as_raw_fd().to_string());
+        if crate::diagnostics::continuous() {
+            command.env("RUST_BACKTRACE", "full");
+        }
         // Keep the preceding failure and capture stderr before a manager can
         // drop privileges. Diagnostics are optional even if storage fails.
         let _ = fs::rename(
@@ -254,6 +263,7 @@ fn supervise(recovery: &mut Recovery) -> io::Result<()> {
             status.code(),
             status.signal()
         ));
+        crate::diagnostics::recorder::checkpoint(false);
         if !status.success()
             && let Ok(error) =
                 crate::diagnostics::tail(std::path::Path::new(crate::diagnostics::STDERR), 4096)
@@ -279,6 +289,7 @@ fn supervise(recovery: &mut Recovery) -> io::Result<()> {
                     libc::RB_AUTOBOOT
                 };
                 log(&format!("shutdown request={request:?}"));
+                crate::diagnostics::recorder::checkpoint(true);
                 unsafe {
                     libc::sync();
                 }
@@ -292,6 +303,7 @@ fn supervise(recovery: &mut Recovery) -> io::Result<()> {
             (_, Some(Request::KexecStarting)) => {
                 // A successful kexec never returns to this kernel. Returning is a failed handoff.
                 log("kexec-returned; recovery required");
+                crate::diagnostics::recorder::start();
                 crate::diagnostics::persist_failure();
                 emergency(console, active)?;
                 policy.reset();
@@ -320,6 +332,7 @@ fn wait(
     let mut deadline = None;
     let mut killed = false;
     loop {
+        crate::diagnostics::recorder::tick();
         #[cfg(feature = "vm-test")]
         crate::vm_test::supervisor_fault()?;
         let pending = signals::take();
@@ -359,6 +372,15 @@ fn drain(
         for _ in 0..8 {
             match session::receive(channel) {
                 Ok(Some(value)) if request.is_none() => {
+                    log(&format!("received supervisor request={value:?}"));
+                    if crate::diagnostics::continuous() && value == Request::KexecStarting {
+                        crate::diagnostics::recorder::checkpoint(true);
+                        if let Err(error) = channel.send(&[value as u8]) {
+                            log(&format!(
+                                "diagnostic handoff acknowledgement failed: {error}"
+                            ));
+                        }
+                    }
                     *request = Some(value);
                     *deadline = Some(
                         Instant::now()

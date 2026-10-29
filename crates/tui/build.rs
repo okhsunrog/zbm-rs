@@ -13,6 +13,10 @@ fn main() {
         let policy: schema::BuildPolicy = serde_json::from_str(&input)?;
         policy.validate()?;
         println!(
+            "cargo::rustc-env=ZBM_CONTINUOUS_DIAGNOSTICS={}",
+            policy.continuous_diagnostics
+        );
+        println!(
             "cargo::rustc-env=ZBM_DIAGNOSTIC_ESP_PARTUUID={}",
             policy.diagnostic_esp_partuuid.as_deref().unwrap_or("")
         );

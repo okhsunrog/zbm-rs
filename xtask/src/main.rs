@@ -109,6 +109,9 @@ enum Task {
         failures: bool,
         #[arg(long)]
         scsi: bool,
+        /// Terminate the VM without guest shutdown and inspect persisted logs.
+        #[arg(long, requires = "lifecycle")]
+        power_cut: bool,
     },
 }
 #[derive(Subcommand)]
@@ -267,6 +270,7 @@ fn main() -> Result<()> {
             lifecycle,
             failures,
             scsi,
+            power_cut,
         } => smoke::run(
             &run,
             &image,
@@ -277,6 +281,7 @@ fn main() -> Result<()> {
                 lifecycle,
                 failures,
                 scsi,
+                power_cut,
             },
         )?,
         Task::BootSmoke {

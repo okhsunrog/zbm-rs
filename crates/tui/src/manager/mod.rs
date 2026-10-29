@@ -27,7 +27,7 @@ struct Options {
 }
 
 fn emit(options: &Options, event: &str, state: &State, ui: &Ui) -> Result<()> {
-    let value = serde_json::json!({"event": event, "state": state, "pid": std::process::id(), "terminal_size": crossterm::terminal::size().ok(), "config": options.config, "ui": ui.telemetry(state)});
+    let value = serde_json::json!({"event": event, "uptime": crate::diagnostics::timestamp(), "state": state, "pid": std::process::id(), "terminal_size": crossterm::terminal::size().ok(), "config": options.config, "ui": ui.telemetry(state)});
     // The leading separator also recovers from another writer's partial line.
     options.events.write(format!("\n{value}\n").as_bytes());
     Ok(())
@@ -380,6 +380,7 @@ async fn tui(
                 }
                 let mut action = None;
                 let mut observed = cancelled_timer.then_some("autoboot-cancelled");
+                let input_panel = ui.panel;
                 let input = continued
                     .map(|command| Input::Command(command, true))
                     .unwrap_or_else(|| ui.input(key, &mut state));
@@ -403,6 +404,12 @@ async fn tui(
                     Input::Ignored => {}
                     Input::Changed(event) => observed = Some(event),
                     Input::Command(command, confirmed) => {
+                        if crate::diagnostics::continuous() {
+                            eprintln!(
+                                "[{}] ui-command={command:?} panel={input_panel:?} confirmed={confirmed}",
+                                crate::diagnostics::timestamp()
+                            );
+                        }
                         if let Some(reason) = ui.reason(command, &state, options) {
                             state.error = Some(reason);
                             observed = Some("command-disabled");

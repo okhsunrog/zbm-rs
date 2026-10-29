@@ -79,14 +79,55 @@ impl Client {
         Ok(Some(Self(socket)))
     }
     pub fn request(&self, request: Request) -> io::Result<()> {
+        if crate::diagnostics::continuous() {
+            eprintln!(
+                "[{}] supervisor-request pid={} request={request:?}",
+                crate::diagnostics::timestamp(),
+                std::process::id()
+            );
+        }
         if self.0.send(&[request as u8])? != 1 {
             return Err(io::Error::other("Short supervisor message"));
+        }
+        if crate::diagnostics::continuous() && request == Request::KexecStarting {
+            // The recorder flushes and unmounts before the broker executes kexec.
+            // A diagnostic failure must not prevent boot.
+            if let Err(error) =
+                wait_acknowledgement(&self.0, request as u8, std::time::Duration::from_secs(3))
+            {
+                eprintln!("diagnostic handoff acknowledgement unavailable: {error}");
+            }
         }
         Ok(())
     }
     #[cfg(feature = "vm-test")]
     pub fn fd(&self) -> i32 {
         self.0.as_raw_fd()
+    }
+}
+
+pub fn wait_acknowledgement(
+    socket: &UnixDatagram,
+    expected: u8,
+    timeout: std::time::Duration,
+) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Diagnostic acknowledgement timeout",
+            ));
+        }
+        socket.set_read_timeout(Some(remaining))?;
+        let mut ack = [0u8; 2];
+        match socket.recv(&mut ack) {
+            Ok(1) if ack[0] == expected => return Ok(()),
+            Ok(_) => continue, // Late acknowledgement of an earlier checkpoint.
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -123,6 +164,14 @@ pub fn cloexec(fd: i32, enabled: bool) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn diagnostic_acknowledgements_skip_stale_replies_and_have_a_deadline() {
+        let (a, b) = UnixDatagram::pair().unwrap();
+        a.send(&[1]).unwrap();
+        a.send(&[2]).unwrap();
+        wait_acknowledgement(&b, 2, std::time::Duration::from_millis(50)).unwrap();
+        assert!(wait_acknowledgement(&b, 2, std::time::Duration::from_millis(5)).is_err());
+    }
     #[test]
     fn datagrams_preserve_boundaries_and_reject_unknown_or_oversized_messages() {
         let (a, b) = UnixDatagram::pair().unwrap();

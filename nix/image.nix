@@ -80,6 +80,7 @@ let
     ZBM_RS_BUILD_POLICY = builtins.toJSON {
       security_mode = if enforced then "enforce" else "off";
       diagnostic_esp_partuuid = rawConfig.diagnostics.esp_partuuid or null;
+      continuous_diagnostics = rawConfig.diagnostics.continuous or false;
     };
     pname = "zbm-rs";
     version = "0.1.0";
@@ -90,9 +91,12 @@ let
     cargoBuildFlags = [ "-p" "zbm-rs" ];
     cargoTestFlags = [ "-p" "zbm-rs" "-p" "zbm-core" ];
     buildFeatures = lib.optional testProfile "vm-test";
+    dontStrip = (rustProfile.strip or "symbols") == "none";
     env = lib.optionalAttrs (rustProfile ? optLevel) { CARGO_PROFILE_RELEASE_OPT_LEVEL = toString rustProfile.optLevel; }
       // lib.optionalAttrs (rustProfile ? lto) { CARGO_PROFILE_RELEASE_LTO = rustProfile.lto; }
       // lib.optionalAttrs (rustProfile ? codegenUnits) { CARGO_PROFILE_RELEASE_CODEGEN_UNITS = toString rustProfile.codegenUnits; }
+      // lib.optionalAttrs (rustProfile ? debug) { CARGO_PROFILE_RELEASE_DEBUG = toString rustProfile.debug; }
+      // lib.optionalAttrs (rustProfile ? strip) { CARGO_PROFILE_RELEASE_STRIP = rustProfile.strip; }
       # Share the musl already needed by C tools instead of embedding another copy.
       // lib.optionalAttrs (runtimeLibc == "musl") { RUSTFLAGS = "-C target-feature=-crt-static"; };
   };
@@ -150,6 +154,12 @@ let
     ln -s usr/sbin root/sbin
     cp -r ${modules}/lib/. root/usr/lib/
     cp ${setup} root/etc/zbm-rs/setup.sh
+    ${lib.optionalString (rawConfig.diagnostics.continuous or false) ''
+      cp ${pkgs.writeText "zbm-build-info.json" (builtins.toJSON {
+        source = toString source; binary = toString binary;
+        kernel = kernel.modDirVersion; profile = profile;
+      })} root/etc/zbm-rs/build-info.json
+    ''}
     ${lib.optionalString (hostId != null) ''
       uv run --offline --no-project --python ${pkgs.python3}/bin/python python -c \
         'import pathlib, struct; pathlib.Path("root/etc/hostid").write_bytes(struct.pack("<I", int("${hostId}", 16)))'
@@ -217,6 +227,8 @@ let
   osRelease = pkgs.writeText "zbm-os-release" "ID=zbm-rs\nNAME=zbm-rs\nVERSION_ID=0.1.0\n";
   cmdline = lib.optionalString testProfile "console=ttyS0,115200 "
     + "console=tty0 loglevel=3 panic=${if enforced then "0" else "-1"}"
+    + lib.optionalString (rawConfig.diagnostics.continuous or false)
+      " log_buf_len=4M printk.time=1 efi_pstore.pstore_disable=0"
     + lib.optionalString (hostId != null) " spl.spl_hostid=0x${hostId}";
   image = pkgs.runCommand "zbm-rs-efi-${profile}${lib.optionalString testProfile "-test"}" {
     nativeBuildInputs = [ pkgs.systemdUkify pkgs.python3 pkgs.uv ];

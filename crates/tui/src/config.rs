@@ -83,6 +83,9 @@ mod tests {
     #[test]
     fn persistent_diagnostics_are_opt_in_and_use_only_explicit_gpt_ids() {
         assert!(parse("{}").unwrap().diagnostics.esp_partuuid.is_none());
+        assert!(!parse("{}").unwrap().diagnostics.continuous);
+        assert!(parse(r#"{"diagnostics":{"continuous":true}}"#).is_err());
+        assert!(parse(r#"{"diagnostics":{"continuous":true,"esp_partuuid":"ed5d4b72-0aac-48d3-8f89-43362d952ca0"}}"#).is_ok());
         assert!(
             parse(r#"{"diagnostics":{"esp_partuuid":"ed5d4b72-0aac-48d3-8f89-43362d952ca0"}}"#)
                 .is_ok()

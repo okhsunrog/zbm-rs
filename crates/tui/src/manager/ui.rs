@@ -446,6 +446,13 @@ impl Ui {
             }
         };
         if self.key != key {
+            if crate::diagnostics::continuous() {
+                eprintln!(
+                    "[{}] ui-view-change previous-panel={:?} next-view={view:?}",
+                    crate::diagnostics::timestamp(),
+                    self.panel
+                );
+            }
             self.searching = false;
             self.resume_search = false;
             self.panel = Panel::None;
@@ -702,6 +709,18 @@ impl Ui {
         self.menu_view = ListState::default();
     }
     pub fn input(&mut self, key: KeyEvent, state: &mut State) -> Input {
+        if crate::diagnostics::continuous()
+            && matches!(key.code, KeyCode::F(_) | KeyCode::Esc | KeyCode::Enter)
+        {
+            // Never format Char, Backspace, the secret buffer or its length.
+            eprintln!(
+                "[{}] ui-control={:?} modifiers={:?} panel={:?}",
+                crate::diagnostics::timestamp(),
+                key.code,
+                key.modifiers,
+                self.panel
+            );
+        }
         let command = Command::from_key(key);
         if self.panel == Panel::Unlock {
             use zeroize::Zeroize;

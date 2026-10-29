@@ -40,6 +40,15 @@ pub fn setup() -> io::Result<()> {
     mount("devpts", "/dev/pts", libc::MS_NOSUID | libc::MS_NOEXEC)?;
     fs::create_dir_all("/run/zbm-rs")?;
     fs::create_dir_all("/root")?;
+    if crate::diagnostics::continuous()
+        && let Err(error) = mount(
+            "pstore",
+            "/sys/fs/pstore",
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        )
+    {
+        super::log(&format!("pstore mount unavailable: {error}"));
+    }
     if std::path::Path::new("/sys/firmware/efi").exists() {
         let result = mount(
             "efivarfs",

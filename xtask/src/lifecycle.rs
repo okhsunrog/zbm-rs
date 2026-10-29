@@ -13,7 +13,7 @@ use std::{
 
 const DIAGNOSTIC_UUID: &str = "ed5d4b72-0aac-48d3-8f89-43362d952ca0";
 
-fn attach_diagnostic_esp(run: &Path) -> Result<()> {
+pub fn attach_diagnostic_esp(run: &Path) -> Result<()> {
     let disk = vm::absolute(run)?.join("diagnostic-esp.img");
     fs::File::create(&disk)?.set_len(64 * 1024 * 1024)?;
     let mut partition = Command::new("sfdisk")
@@ -45,13 +45,19 @@ fn attach_diagnostic_esp(run: &Path) -> Result<()> {
     wait_for(10, None, || {
         vm::ssh(
             run,
-            &format!("test -b /dev/disk/by-partuuid/{DIAGNOSTIC_UUID}"),
+            &format!(
+                "test -b /dev/disk/by-partuuid/{DIAGNOSTIC_UUID}; grep -q 'continuous diagnostics active:' /run/zbm-rs/supervisor.log"
+            ),
         )?;
         Ok(())
     })
 }
 
-pub fn check_persistent_report(run: &Path) -> Result<()> {
+pub fn check_persistent_report(run: &Path, power_cut: bool) -> Result<()> {
+    ensure!(
+        !fs::read_to_string(run.join("serial.log"))?.contains("Diagnostic ESP unmount failed"),
+        "Recorder did not cleanly unmount its ESP"
+    );
     let output = Command::new("mtype")
         .arg("-i")
         .arg(format!(
@@ -72,6 +78,58 @@ pub fn check_persistent_report(run: &Path) -> Result<()> {
         "Incomplete persistent failure report"
     );
     fs::write(run.join("persisted-failure.log"), text)?;
+    let destination = run.join("persisted-diagnostics");
+    fs::create_dir(&destination)?;
+    ensure!(
+        Command::new("mcopy")
+            .args(["-s", "-i"])
+            .arg(format!(
+                "{}@@1048576",
+                run.join("diagnostic-esp.img").display()
+            ))
+            .arg("::/EFI/zbm-rs/diagnostics")
+            .arg(&destination)
+            .status()?
+            .success(),
+        "Cannot extract continuous logs after VM exit"
+    );
+    let mut records = String::new();
+    for boot in fs::read_dir(destination.join("diagnostics"))? {
+        for file in fs::read_dir(boot?.path())? {
+            let path = file?.path();
+            if path.extension().is_some_and(|ext| ext == "log") {
+                records.push_str(&fs::read_to_string(path)?);
+            }
+        }
+    }
+    for evidence in [
+        "continuous diagnostic v1",
+        "heartbeat uptime=",
+        "kernel",
+        "ui-control=Enter",
+        "supervisor panic caught",
+    ] {
+        ensure!(
+            records.contains(evidence),
+            "Missing continuous evidence: {evidence}"
+        );
+    }
+    ensure!(
+        !records.contains("private-secret")
+            && !records.contains("source-passphrase")
+            && !records.contains("disposable-zbm-test-passphrase"),
+        "Passphrase leaked into persistent diagnostics"
+    );
+    ensure!(
+        records.contains("shutdown request=Some(PowerOff)") != power_cut,
+        "Continuous log must distinguish controlled shutdown from power loss"
+    );
+    fs::write(
+        run.join("continuous-diagnostics.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "passed": true, "power_cut": power_cut, "secret_absent": true, "logs": destination,
+        }))?,
+    )?;
     Ok(())
 }
 
@@ -110,6 +168,35 @@ fn changed(run: &Path, previous: u32) -> Result<()> {
 }
 
 pub fn exercise(run: &Path) -> Result<()> {
+    let recorder_pid = || -> Result<u32> {
+        let log = vm::ssh(run, "cat /run/zbm-rs/supervisor.log")?;
+        log.lines()
+            .rev()
+            .find_map(|line| {
+                line.split("diagnostic recorder started pid=")
+                    .nth(1)?
+                    .parse()
+                    .ok()
+            })
+            .ok_or_else(|| anyhow::anyhow!("Missing recorder PID"))
+    };
+    let recorder = recorder_pid()?;
+    vm::ssh(run, &format!("kill -KILL {recorder}"))?;
+    wait_for(20, None, || {
+        ensure!(recorder_pid()? != recorder, "Waiting for recorder restart");
+        vm::ssh(run, &format!("test ! -e /proc/{recorder}; test -d /proc/1"))?;
+        Ok(())
+    })?;
+    wait_for(10, None, || {
+        let recorder = recorder_pid()?;
+        vm::ssh(
+            run,
+            &format!(
+                "! grep -q ' - zfs ' /proc/{recorder}/mountinfo && grep -q ' - zfs ' /proc/1/mountinfo"
+            ),
+        )?;
+        Ok(())
+    })?;
     let first = manager_pid(run)?;
     ensure!(first != 1, "Manager is PID 1");
     vm::ssh(
@@ -117,7 +204,6 @@ pub fn exercise(run: &Path) -> Result<()> {
         "test /init -ef /bin/zbm-rs; test /proc/1/exe -ef /bin/zbm-rs",
     )?;
 
-    attach_diagnostic_esp(run)?;
     // Reproduce a present device node without usable UART hardware. The
     // readiness event must reach RAM even when the optional serial mirror fails.
     // sshd's own test logfile uses ttyS0 too. Keep one already-open SSH

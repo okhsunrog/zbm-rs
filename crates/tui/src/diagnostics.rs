@@ -1,5 +1,6 @@
 //! Bounded, best-effort diagnostics. Logging must never decide whether to boot.
 mod persistence;
+pub mod recorder;
 pub use persistence::persist_failure;
 use std::{
     cell::RefCell,
@@ -13,6 +14,15 @@ pub const EVENTS: &str = "/run/zbm-rs/events.jsonl";
 pub const STDERR: &str = "/run/zbm-rs/manager-stderr.log";
 pub const PREVIOUS_STDERR: &str = "/run/zbm-rs/previous-manager-stderr.log";
 pub const SUPERVISOR: &str = "/run/zbm-rs/supervisor.log";
+pub fn continuous() -> bool {
+    env!("ZBM_CONTINUOUS_DIAGNOSTICS") == "true"
+}
+
+pub fn timestamp() -> String {
+    let mut now: libc::timespec = unsafe { std::mem::zeroed() };
+    unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) };
+    format!("{}.{:03}", now.tv_sec, now.tv_nsec / 1_000_000)
+}
 const LIMIT: u64 = 512 * 1024;
 
 pub fn open(path: &Path) -> io::Result<File> {
@@ -95,7 +105,10 @@ impl Events {
 
 pub fn supervisor(message: &str) {
     if let Ok(mut file) = open(Path::new(SUPERVISOR)) {
-        let _ = append(&mut file, format!("{message}\n").as_bytes());
+        let _ = append(
+            &mut file,
+            format!("[{}] {message}\n", timestamp()).as_bytes(),
+        );
     }
     #[cfg(feature = "vm-test")]
     if let Ok(mut file) = OpenOptions::new()

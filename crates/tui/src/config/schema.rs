@@ -26,6 +26,8 @@ pub struct Resume {
 pub struct Diagnostics {
     /// Explicit GPT partition identity; never search or write arbitrary ESPs.
     pub esp_partuuid: Option<String>,
+    /// Continuously sync bounded logs to the explicit ESP, including before a crash.
+    pub continuous: bool,
 }
 
 /// Only these invariants affect the executable; ordinary settings belong to the image.
@@ -34,10 +36,14 @@ pub struct Diagnostics {
 pub struct BuildPolicy {
     pub security_mode: SecurityMode,
     pub diagnostic_esp_partuuid: Option<String>,
+    pub continuous_diagnostics: bool,
 }
 
 impl BuildPolicy {
     pub fn validate(&self) -> Result<(), String> {
+        if self.continuous_diagnostics && self.diagnostic_esp_partuuid.is_none() {
+            return Err("diagnostics.continuous requires diagnostics.esp_partuuid".into());
+        }
         if self.diagnostic_esp_partuuid.as_ref().is_some_and(|id| {
             id.len() != 36
                 || id.bytes().enumerate().any(|(i, ch)| {
@@ -167,6 +173,7 @@ impl Config {
         BuildPolicy {
             security_mode: self.security.mode,
             diagnostic_esp_partuuid: self.diagnostics.esp_partuuid.clone(),
+            continuous_diagnostics: self.diagnostics.continuous,
         }
     }
 

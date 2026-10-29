@@ -112,6 +112,27 @@ disposable guest disks; keep it out of normal deployments. Follow [the build gui
 for profiles and NixOS integration, or [the development guide](docs/development.md)
 for fixtures and VM controls.
 
+## Persistent diagnostics
+
+For intermittent resets or power loss, build with
+`loaderConfig.diagnostics = { esp_partuuid = "<GPT partition UUID>"; continuous = true; };`.
+The explicitly selected FAT ESP receives `EFI/zbm-rs/diagnostics/boot-*/`:
+kernel messages, process exits, UI control/state transitions, full panic backtraces
+when available, and periodic memory, temperature, battery and watchdog observations.
+No passphrase characters, lengths, backspaces, process memory or RPC payloads are recorded.
+Eight boot directories retain up to 4 MiB of trace data each, plus bounded metadata.
+The recorder syncs approximately every 250 ms and samples health every two seconds.
+Storage stalls and hardware caches can increase the unsaved tail; this cannot
+guarantee a final message when power disappears. Frequent writes can affect timing.
+
+A separate root process owns a private mount namespace; recording failures do
+not stop the UI. Controlled shutdowns and kexec request a bounded flush/unmount.
+`last-failure.log` remains the separate failure-time report. Logs are diagnostic
+data, not trusted boot inputs. Normal images keep continuous recording disabled.
+Inspect/copy the ESP after boot without deleting earlier boot directories.
+The VM lifecycle smoke checks persisted logs and password exclusion; add
+`--power-cut` to terminate QEMU without a guest shutdown and verify surviving logs.
+
 ## Documentation
 
 - [Secure Boot design](docs/secure-boot-model.md) and [owner signing](docs/security-testing.md)

@@ -101,6 +101,7 @@ pub struct Scenarios {
     pub lifecycle: bool,
     pub failures: bool,
     pub scsi: bool,
+    pub power_cut: bool,
 }
 
 pub fn run(
@@ -115,6 +116,7 @@ pub fn run(
         lifecycle,
         failures,
         scsi,
+        power_cut,
     } = scenarios;
     install_interrupt()?;
     // Re-exec this running inode even if Cargo replaces the checkout binary.
@@ -156,6 +158,9 @@ pub fn run(
         );
         fs::write(run.join("empty.txt"), console)?;
         crate::interface::empty(run)?;
+        if lifecycle {
+            crate::lifecycle::attach_diagnostic_esp(run)?;
+        }
         // Disposable guest disk only; never attach host devices to this scenario.
         let disk = vm::ssh(
             run,
@@ -259,7 +264,47 @@ pub fn run(
         if failures {
             crate::failures::start_hung_mount(run)?;
         }
-        vm::key(run, "p")?;
+        if power_cut {
+            // Candidate mounts use mount(8) at private paths, so zfs unmount -a
+            // alone does not necessarily find them. Only disposable guest mounts.
+            vm::ssh(
+                run,
+                r#"set -eu; for point in $(awk '$3 == "zfs" { print $2 }' /proc/mounts | sort -r); do umount "$point"; done; zfs unload-key -a"#,
+            )?;
+            vm::key(run, "r")?;
+            wait_for(20, None, || {
+                ensure!(
+                    vm::screen(run)?["event"] == "catalog-ready",
+                    "Waiting for locked catalog"
+                );
+                Ok(())
+            })?;
+            vm::key(run, "home")?;
+            vm::key(run, "down")?;
+            vm::key(run, "down")?;
+            vm::key(run, "k")?;
+            wait_for(15, None, || {
+                ensure!(
+                    vm::screen(run)?["ui"]["panel"] == "Unlock",
+                    "Expected unlock prompt before power cut"
+                );
+                Ok(())
+            })?;
+            for key in [
+                "p", "r", "i", "v", "a", "t", "e", "minus", "s", "e", "c", "r", "e", "t",
+            ] {
+                vm::key(run, key)?;
+            }
+            ensure!(
+                vm::screen(run)?["ui"]["panel"] == "Unlock",
+                "Typing unexpectedly left unlock prompt"
+            );
+            vm::screenshot(run, &run.join("power-cut-unlock.png"))?;
+            // QEMU exits without notifying the guest or flushing guest RAM.
+            vm::qmp(run)?.request("quit", serde_json::json!({}))?;
+        } else {
+            vm::key(run, "p")?;
+        }
         wait_for(15, None, || {
             ensure!(
                 owned.0.try_wait()?.is_some_and(|s| s.success()),
@@ -268,13 +313,14 @@ pub fn run(
             Ok(())
         })?;
         if lifecycle {
-            crate::lifecycle::check_persistent_report(run)?;
+            crate::lifecycle::check_persistent_report(run, power_cut)?;
         }
         fs::write(
             run.join("report.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
                 "passed": true, "firmware": if direct { "direct-linux" } else { "OVMF-UEFI" },
                 "lifecycle": lifecycle,
+                "power_cut": power_cut,
                 "failures": failures, "disk_bus": if scsi { "scsi" } else { "virtio-blk" },
                 "empty": empty, "pool": pool,
                 "checks": ["boot", "real-zfs-module", "ssh", "snapshot-clone-rename-promote", "native-encryption-local-key", "discovery", "BE-visibility", "inherited-active", "bootfs-selection", "encrypted-BE-diagnostic", "read-only-candidate-mounts", "rescan", "QMP-keyboard", "real-vt-rendering", "shell-return", "guest-poweroff"]

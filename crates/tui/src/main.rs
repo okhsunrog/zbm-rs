@@ -24,6 +24,13 @@ fn main() -> anyhow::Result<()> {
     if resume::utility(&args)? {
         return Ok(());
     }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--diagnostic-recorder")
+    {
+        anyhow::ensure!(args.len() == 1, "Invalid recorder arguments");
+        return diagnostics::recorder::run().map_err(Into::into);
+    }
     if args.first().is_some_and(|arg| arg == "--nixos-plans") {
         anyhow::ensure!(
             args.len() == 5,

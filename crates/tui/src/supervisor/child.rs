@@ -79,6 +79,7 @@ pub fn reap(leader: Option<i32>) -> io::Result<Option<ExitStatus>> {
             return Ok(Some(status));
         } else {
             super::log(&format!("reaped pid={pid} status={status}"));
+            crate::diagnostics::recorder::reaped(pid);
         }
     }
 }
