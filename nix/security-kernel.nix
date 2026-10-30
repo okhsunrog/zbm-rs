@@ -1,4 +1,4 @@
-# A separate loader kernel; owner private keys are never derivation inputs.
+# A protected kernel usable by loader and target; private keys stay outside Nix.
 { pkgs, kernelPackages, trustedCertificates, hibernationTpmSignature ? false }:
 let
   lib = pkgs.lib;

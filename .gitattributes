@@ -1,0 +1,3 @@
+# Unified diffs represent empty context lines with a space. Check introduced
+# kernel-source whitespace with git apply --whitespace=error-all instead.
+*.patch whitespace=-blank-at-eol

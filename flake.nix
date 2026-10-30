@@ -15,6 +15,10 @@
       testing = mkImage { testProfile = true; };
     in {
       lib.mkImage = mkImage;
+      lib.mkTpmHibernationProbe = args: import ./nix/check-tpm-hibernation-kexec.nix
+        ({ inherit pkgs; } // args);
+      lib.mkTpmHibernationTest = args: import ./nix/check-encrypted-hibernation.nix
+        ({ inherit self pkgs nixpkgs system; } // args);
       lib.mkProtectedBootFixture = args: import ./nix/protected-boot-fixture.nix
         ({ inherit pkgs nixpkgs system; } // args);
       packages.${system} = {

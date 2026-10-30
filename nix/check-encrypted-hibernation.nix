@@ -1,11 +1,27 @@
-{ self, pkgs, nixpkgs, system }:
+{ self, pkgs, nixpkgs, system,
+  kernelPackages ? null, signedKernel ? null, signedModules ? null }:
 let
+  authenticated = kernelPackages != null;
+  manifest = if authenticated then builtins.fromJSON
+    (builtins.readFile "${signedModules}/zbm-module-manifest.json") else null;
+  protectedProfile = { lib, ... }: lib.mkIf authenticated {
+    boot.kernelPackages = kernelPackages;
+    system.modulesTree = lib.mkForce [ signedModules ];
+    system.systemBuilderCommands = lib.mkAfter ''
+      rm "$out/kernel"
+      ln -s ${signedKernel} "$out/kernel"
+    '';
+    # Kernel/TPM mechanics only; enforced BootAuthorization/IMA and firmware
+    # Secure Boot are separate acceptance gates.
+    security.lsm = lib.mkForce [ "landlock" "lockdown" "yama" "bpf" ];
+  };
   loader = self.packages.${system}.zbm-rs;
   partuuid = "12345678-1234-1234-1234-123456789abc";
   luksUuid = "ca55a30a-636e-4e69-9e68-bb36bf380408";
   target = (nixpkgs.lib.nixosSystem {
     inherit system;
     modules = [
+      protectedProfile
       (import ./nixos-boot.nix { inherit self; })
       "${nixpkgs}/nixos/modules/profiles/qemu-guest.nix"
       "${nixpkgs}/nixos/modules/testing/test-instrumentation.nix"
@@ -30,8 +46,10 @@ let
           keyFile = "/etc/zfs/test.key";
         };
         boot.initrd.systemd.services.zfs-import-testpool = {
-          requires = [ "initrd-nixos-copy-secrets.service" ];
-          after = [ "initrd-nixos-copy-secrets.service" ];
+          requires = [ "initrd-nixos-copy-secrets.service" ]
+            ++ pkgs.lib.optional authenticated "test-before-pool-import.service";
+          after = [ "initrd-nixos-copy-secrets.service" ]
+            ++ pkgs.lib.optional authenticated "test-before-pool-import.service";
         };
         # A negative fixture: even an early read-only pool import must trip the
         # target gate. This service is not part of the production module.
@@ -52,7 +70,7 @@ let
         boot.kernelParams = [
           "console=ttyS0" "zfs.zfs_arc_max=134217728"
           "sysctl.kernel.kexec_load_disabled=1"
-        ];
+        ] ++ pkgs.lib.optional authenticated "hibernate=nocompress";
         boot.initrd.systemd.services.test-kexec-disabled-early = {
           wantedBy = [ "initrd.target" ];
           before = [ "systemd-udevd.service" "zbm-resume.service" ];
@@ -76,18 +94,38 @@ let
           after = [ "test-kexec-disabled-early.service" ];
           serviceConfig.StandardError = "journal+console";
         };
+        boot.initrd.systemd.services.test-before-pool-import = pkgs.lib.mkIf authenticated {
+          requires = [ "zbm-resume.service" ];
+          after = [ "zbm-resume.service" ];
+          serviceConfig = {
+            Type = "oneshot";
+            StandardOutput = "journal+console";
+          };
+          script = "echo ZBM_TEST_BEFORE_POOL_IMPORT";
+        };
         fileSystems."/" = { device = "testpool/root"; fsType = "zfs"; options = [ "zfsutil" ]; };
         swapDevices = [{ device = "/dev/mapper/resume-swap"; }];
-        environment.systemPackages = [ pkgs.kexec-tools pkgs.cryptsetup pkgs.lvm2 loader ];
+        environment.systemPackages = [ pkgs.kexec-tools pkgs.cryptsetup pkgs.lvm2 loader ]
+          ++ pkgs.lib.optional authenticated pkgs.tpm2-tools;
         system.stateVersion = "26.05";
       }
     ];
   }).config.system.build.toplevel;
   planConfig = pkgs.writeText "resume-plan-config.json" "{}";
-in pkgs.testers.runNixOSTest {
-  name = "zbm-encrypted-hibernation";
+in
+assert (signedKernel != null) == authenticated && (signedModules != null) == authenticated;
+assert !authenticated || manifest.kernel_store_path == toString kernelPackages.kernel;
+assert !authenticated || manifest.module_version == kernelPackages.kernel.modDirVersion;
+pkgs.testers.runNixOSTest {
+  name = if authenticated then "zbm-tpm-authenticated-hibernation" else "zbm-encrypted-hibernation";
   globalTimeout = 900;
   nodes.machine = { lib, ... }: {
+    imports = [ protectedProfile ];
+    boot.loader.grub.enable = lib.mkIf authenticated (lib.mkForce false);
+    boot.loader.systemd-boot.enable = authenticated;
+    virtualisation.useBootLoader = authenticated;
+    virtualisation.useEFIBoot = authenticated;
+    virtualisation.tpm.enable = authenticated;
     # virtio-fs cannot freeze for hibernation. Use an isolated block store and
     # no shared devices; the installed target never mounts the bootstrap disks.
     virtualisation.useNixStoreImage = true;
@@ -100,7 +138,8 @@ in pkgs.testers.runNixOSTest {
     virtualisation.memorySize = 2048;
     virtualisation.emptyDiskImages = [ 12000 2048 ];
     virtualisation.additionalPaths = [ target ];
-    environment.systemPackages = [ pkgs.zfs pkgs.kexec-tools pkgs.nixos-install-tools pkgs.cryptsetup pkgs.lvm2 pkgs.gptfdisk loader ];
+    environment.systemPackages = [ pkgs.zfs pkgs.kexec-tools pkgs.nixos-install-tools pkgs.cryptsetup pkgs.lvm2 pkgs.gptfdisk loader ]
+      ++ lib.optionals authenticated [ pkgs.tpm2-tools pkgs.uv pkgs.python3 ];
   };
   testScript = ''
     import json, shlex, datetime
@@ -118,9 +157,10 @@ in pkgs.testers.runNixOSTest {
     # bootstrap must not import testpool or activate its swap before kexec.
     machine.succeed("cp " + shlex.quote(plan["kernel"]) + " /root/resume-kernel; cp " + shlex.quote(plan["initrd"]) + " /root/resume-initrd")
     cmdline = " ".join('"' + a + '"' if any(c.isspace() for c in a) else a for a in plan["cmdline"])
-    load = "kexec -l /root/resume-kernel --initrd=/root/resume-initrd --command-line=" + shlex.quote(cmdline)
+    load_prefix = "kexec ${pkgs.lib.optionalString authenticated "--kexec-file-syscall "}-l /root/resume-kernel --initrd=/root/resume-initrd --command-line="
+    load = load_prefix + shlex.quote(cmdline)
     machine.succeed("umount /mnt; zpool export testpool")
-    machine.succeed("kexec -l /root/resume-kernel --initrd=/root/resume-initrd --command-line=" + shlex.quote(cmdline + " zbm.test.import-before-resume"))
+    machine.succeed(load_prefix + shlex.quote(cmdline + " zbm.test.import-before-resume"))
     machine.execute("systemctl --no-block kexec", check_return=False)
     machine.wait_for_console_text("A ZFS pool was imported before resume", timeout=90)
     machine.wait_for_shutdown(timeout=datetime.timedelta(seconds=45))
@@ -141,6 +181,10 @@ in pkgs.testers.runNixOSTest {
             assert status != 0 and "Operation not permitted" in output, (mode, status, output)
         machine.succeed("set -eu; test $(cat /proc/sys/kernel/kexec_load_disabled) = 1; test $(cat /sys/kernel/kexec_loaded) = 0")
     check_target_kexec_disabled()
+    ${pkgs.lib.optionalString authenticated ''
+    machine.succeed("set -eu; grep -q '\\[integrity\\]' /sys/kernel/security/lockdown; test -c /dev/tpm0; tpm2_nvreadpublic 0x014c4853")
+    machine.wait_for_console_text("ZBM_TEST_BEFORE_POOL_IMPORT", timeout=10)
+    ''}
     machine.succeed("test $(findmnt -n -o SOURCE /) = testpool/root; test -b /dev/mapper/resume-swap; grep -q /dev/dm- /proc/swaps")
     machine.succeed("test $(cat /sys/power/resume) = $(lsblk -dn -o MAJ:MIN /dev/mapper/resume-swap); grep -qw disk /sys/power/state")
     before = machine.succeed("cat /proc/sys/kernel/random/boot_id").strip()
@@ -161,5 +205,25 @@ in pkgs.testers.runNixOSTest {
     check_target_kexec_disabled()
     machine.succeed("test $(cat /run/resume-proof) = preserved-in-ram; test $(findmnt -n -o SOURCE /) = testpool/root; zpool status -x | grep -q 'all pools are healthy'")
     machine.succeed("journalctl -b --no-pager | grep -E 'hibernation (entry|exit)' ")
+    ${pkgs.lib.optionalString authenticated ''
+    # Create a second authentic image, then corrupt just its ECDSA signature
+    # through LUKS on the isolated bootstrap. Never import the sleeping pool.
+    machine.execute("systemctl --no-block hibernate", check_return=False)
+    machine.wait_for_shutdown(timeout=datetime.timedelta(seconds=180))
+    machine.start()
+    machine.wait_for_unit("multi-user.target")
+    machine.succeed("set -eu; test $(hostname) != resume-target; test ! -e /dev/mapper/resume-swap; ! zpool list -H -o name | grep -qx testpool")
+    machine.succeed("cryptsetup open --key-file /etc/zfs/test.key /dev/vdd1 resume-swap")
+    machine.succeed("uv run --offline --no-project --python ${pkgs.python3}/bin/python ${./tamper-hibernation-signature.py} /dev/mapper/resume-swap")
+    machine.succeed("cryptsetup close resume-swap")
+    machine.succeed(load)
+    console_start = len(machine.get_console_log())
+    machine.execute("systemctl --no-block kexec", check_return=False)
+    machine.wait_for_console_text("Image signature verification failed", timeout=90)
+    machine.wait_for_console_text("Kernel resume returned without restoring the saved session", timeout=30)
+    machine.wait_for_shutdown(timeout=datetime.timedelta(seconds=45))
+    # This marker is a required predecessor of the real ZFS import service.
+    assert "ZBM_TEST_BEFORE_POOL_IMPORT" not in machine.get_console_log()[console_start:]
+    ''}
   '';
 }

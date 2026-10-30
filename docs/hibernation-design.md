@@ -337,3 +337,16 @@ and exercises real RAM restoration through the target initramfs. It verifies the
 unchanged kernel boot ID, a surviving RAM-only file and pool health after resume.
 The intervening bootstrap uses separate disks and never imports the hibernated
 pool or opens its swap. Neither is physical or enforced/Secure Boot acceptance.
+
+The optional `lib.mkTpmHibernationProbe` and `lib.mkTpmHibernationTest` factories
+accept the same experimental `kernelPackages` plus public signed kernel/module
+artifacts. The first checks EFI/PCR5 and the reserved NV index across
+`kexec_file_load`; the second extends the encrypted-root fixture with actual
+authenticated RAM restoration and corruption of one ECDSA trailer byte. The
+negative case requires signature rejection and failure of the resume gate before
+the pool-import predecessor can run. This fixture uses uncompressed images to
+isolate signature validation from decompression/CRC failures. Neither factory
+enables firmware Secure Boot or the loader's enforced BootAuthorization/IMA
+handoff, so those remain separate tests. Signing keys never enter the guest or
+Nix derivations. Adding these fixtures is not a successful runtime result; see
+the patch-set README for the current validation status.

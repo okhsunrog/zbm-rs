@@ -45,9 +45,15 @@ and buffer APIs. Their original commit identifiers are:
 
 `0008` through `0024` contain the RFC in its original order. Each patch retains
 its original author, commit message and upstream link; prerequisite contexts
-are adapted to 7.2.9. `0025` is a local port fix preserving the existing
-`TPM_MAX_RNG_DATA` response bound after moving TPM declarations to public
-headers. The first compilation attempt exposed the missing definition.
+are adapted to 7.2.9. `0025` preserves the existing `TPM_MAX_RNG_DATA` response
+bound and the TPM 1.2 capability types (`cap_t` and their structures/enums) after
+the TPM2 header split. The initial adaptation had removed these still-used
+definitions. Both fixes retain the original 7.2.9 types and limits.
+
+The corrected series passes the dedicated TPM/EFI/power compilation preflight,
+including the EFI stub, TPM kernel-key implementation and RAM-signature backend
+(124 objects with integrity Lockdown and forced signatures enabled). Full-kernel,
+matching ZFS and runtime validation remain separate gates.
 
 ## Opt-in build
 
@@ -61,6 +67,26 @@ The option only builds a kernel; it does not enable host hibernation, change
 the swap configuration, provision a physical TPM, or authorize resume in
 zbm-rs. Use public trust certificates as build inputs; private signing keys
 must remain outside Git and the Nix store.
+
+An optional early compile check can be constructed by importing
+`nix/check-tpm-hibernation-compile.nix` with `{ kernel = kernelPackages.kernel; }`.
+It uses the real configuration/toolchain and compiles only TPM, EFI and power,
+without treating the default `bzImage` build flag as an additional target.
+
+`lib.mkTpmHibernationProbe` accepts `kernelPackages`, a public `signedKernel`
+and `signedModules` produced by the runtime signing tools. It boots through
+OVMF with swtpm and forced integrity Lockdown, checks kernel NV-index protection,
+then uses `kexec_file_load` and compares PCR5 across the handoff. The same kernel
+enters the target role with the early kexec-load prohibition. This optional probe
+does not claim firmware Secure Boot or signed RAM-image restore acceptance;
+those require the subsequent integration tests. Never pass signing keys to it.
+
+`lib.mkTpmHibernationTest` accepts the same public inputs and exercises the real
+ZFS/LUKS2 target resume gate. It must preserve the boot ID and RAM-only state,
+then reject a second image with a deliberately corrupted ECDSA signature before
+ZFS import. It uses `hibernate=nocompress` so the negative case tests the signature
+rather than a decompression checksum. The ordinary encrypted-hibernation check
+retains its default configuration and compressed image path.
 
 ## Security assumptions
 

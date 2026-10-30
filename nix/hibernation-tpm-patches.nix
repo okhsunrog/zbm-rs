@@ -25,5 +25,5 @@
   { name = "0022-pm-hibernate-sign-and-verify-images-with-a-kernel-generated-tpm-key"; patch = ./patches/hibernation-tpm-7.2.9/0022-pm-hibernate-sign-and-verify-images-with-a-kernel-generated-tpm-key.patch; }
   { name = "0023-pm-hibernate-refuse-to-verify-images-with-a-virtual-tpm"; patch = ./patches/hibernation-tpm-7.2.9/0023-pm-hibernate-refuse-to-verify-images-with-a-virtual-tpm.patch; }
   { name = "0024-pm-hibernate-allow-hibernation-under-lockdown-with-signed-images"; patch = ./patches/hibernation-tpm-7.2.9/0024-pm-hibernate-allow-hibernation-under-lockdown-with-signed-images.patch; }
-  { name = "0025-tpm-preserve-the-random-response-bound"; patch = ./patches/hibernation-tpm-7.2.9/0025-tpm-preserve-the-random-response-bound.patch; }
+  { name = "0025-tpm-preserve-7.2-header-definitions"; patch = ./patches/hibernation-tpm-7.2.9/0025-tpm-preserve-7.2-header-definitions.patch; }
 ]
