@@ -1,6 +1,9 @@
 """NixOS variant publication regression checks without host ZFS mutations."""
 import importlib.util
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -11,6 +14,18 @@ spec.loader.exec_module(installer)
 
 
 class Installation(unittest.TestCase):
+    def test_support_imports_do_not_write_into_the_store_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for source in Path(__file__).parent.glob("*.py"):
+                shutil.copyfile(source, root / source.name)
+            before = sorted(path.name for path in root.iterdir())
+            subprocess.run(
+                [sys.executable, "-c", "import runpy, sys; runpy.run_path(sys.argv[1])", str(root / "install-nixos.py")],
+                check=True,
+            )
+            self.assertEqual(sorted(path.name for path in root.iterdir()), before)
+
     def test_parent_declaration_must_match_the_linked_child(self):
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary) / "parent"

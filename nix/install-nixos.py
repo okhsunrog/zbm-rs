@@ -11,8 +11,13 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import unicodedata
+
+# This program runs as root and loads sibling support modules from /nix/store.
+# Writing a cache there changes the registered NAR and breaks closure copies.
+sys.dont_write_bytecode = True
 
 HERE = Path(__file__).resolve().parent
 
