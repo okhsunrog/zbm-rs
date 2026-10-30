@@ -31,7 +31,15 @@ let
     boot.initrd.secrets."/etc/zfs/test.key" = "/etc/zfs/test.key";
   };
   gate = on.boot.initrd.systemd.services.zbm-resume;
+  rescue = self.lib.mkImage {
+    loaderConfig.resume = {
+      role = "cancel-only";
+      swap_partuuid = "12345678-1234-1234-1234-123456789abc";
+    };
+  };
 in
+assert builtins.elem "nohibernate" (nixpkgs.lib.splitString " " rescue.cmdline);
+assert !(builtins.elem "sysctl.kernel.kexec_load_disabled=1" (nixpkgs.lib.splitString " " rescue.cmdline));
 assert !(off.boot.initrd.systemd.services ? zbm-resume);
 assert !(builtins.elem "hibernate=noresume" off.boot.kernelParams);
 assert builtins.elem "hibernate=noresume" on.boot.kernelParams;

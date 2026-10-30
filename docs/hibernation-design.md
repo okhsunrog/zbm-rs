@@ -290,14 +290,22 @@ writes are coordinated too. Any future pool-key-file credential source must
 preserve these boundaries; it is not implemented today.
 
 Rescue is an independently booted, unsigned EFI image requiring firmware Secure
-Boot to be disabled. Its kernel has hibernation disabled and does not advertise
+Boot to be disabled. `resume.role = "cancel-only"` converts recognized saved
+images to cancellable, unavailable sessions; the handoff and configured
+record/restore utilities reject restoration. Its image command line includes
+`nohibernate`, disabling the kernel hibernation interface before userspace.
+It does not advertise
 the protected TPM-hibernation capability. It retains outgoing kexec for recovery.
 It must still inspect the configured swap before the first pool import and use
 the same cancellation-only guard. Entering rescue, navigating or powering off
 does not erase an image. Booting any OS or opening an unrestricted shell first
 requires confirmed, synced and verified image invalidation. Rescue never resumes.
-This rescue role and its configuration are planned; an older pinned image
-without the guard must not be presented as satisfying this contract.
+The cancellation-only role passed the disposable UI scenario: direct configured
+restore is refused, Enter requires cancellation confirmation, Esc preserves the
+image, and standalone discard stays in the menu. The ordinary flow and F10's
+whole-disk preservation check also passed. Integration into the independent
+candidate/known-good deployment remains pending. An older pinned
+image without the guard must not be presented as satisfying this contract.
 
 See [independent rescue publication](nixos-deployment.md#optional-efi-publication-and-independent-rescue)
 for the existing installer and the planned candidate/known-good lifecycle.

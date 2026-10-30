@@ -246,12 +246,13 @@ let
   osRelease = pkgs.writeText "zbm-os-release" "ID=zbm-rs\nNAME=zbm-rs\nVERSION_ID=0.1.0\n";
   cmdline = lib.optionalString testProfile "console=ttyS0,115200 "
     + "console=tty0 loglevel=3 panic=${if enforced then "0" else "-1"}"
+    + lib.optionalString ((rawConfig.resume.role or "resume") == "cancel-only") " nohibernate"
     + lib.optionalString (rawConfig.diagnostics.continuous or false)
       " log_buf_len=4M printk.time=1 efi_pstore.pstore_disable=0 panic_print=67"
     + lib.optionalString (hostId != null) " spl.spl_hostid=0x${hostId}";
   image = pkgs.runCommand "zbm-rs-efi-${profile}${lib.optionalString testProfile "-test"}" {
     nativeBuildInputs = [ pkgs.systemdUkify pkgs.python3 pkgs.uv ];
-    passthru = { inherit binary kernel zfsModule zfsUserspace udevPackage modules initramfs configJson runtime runtimeLibc; inherit sizeCheck kernelCheck; };
+    passthru = { inherit binary kernel zfsModule zfsUserspace udevPackage modules initramfs configJson runtime runtimeLibc cmdline; inherit sizeCheck kernelCheck; };
   } ''
     export UV_CACHE_DIR="$TMPDIR/uv-cache"
     mkdir -p $out/esp/EFI/BOOT

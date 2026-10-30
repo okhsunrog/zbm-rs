@@ -442,6 +442,68 @@ touch /fixture/nix/store/system1/init /fixture/nix/store/system2/init
         })?;
         cancelled_header(run)?;
         vm::screenshot(run, &run.join("after-cold-boot.png"))?;
+        // Rescue uses the same image inspection/cancellation API. It must not
+        // turn a recognized image into a default resume or bypass confirmation.
+        seed_image(run, &target(&after_cold), &guid)?;
+        config["resume"]["role"] = "cancel-only".into();
+        vm::write_file(
+            run,
+            "/etc/zbm-rs/config.json",
+            &serde_json::to_vec(&config)?,
+        )?;
+        vm::key(run, "f6")?;
+        wait_for(25, None, || {
+            let s = state(run, "unavailable")?;
+            ensure!(s["event"] == "catalog-ready", "Waiting for rescue catalog");
+            ensure!(
+                s["state"]["resume"]["reason"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("Rescue cannot resume")),
+                "Rescue did not explain its cancellation-only role"
+            );
+            Ok(())
+        })?;
+        guest(
+            run,
+            "if zbm-rs --resume-restore-config /etc/zbm-rs/config.json > /run/rescue-restore-error 2>&1; then exit 1; fi; grep -q 'Cancellation-only rescue' /run/rescue-restore-error",
+        )?;
+        let rescue_boot_id = guest(run, "cat /proc/sys/kernel/random/boot_id")?;
+        vm::key(run, "ret")?;
+        wait_for(10, None, || {
+            ensure!(
+                vm::screen(run)?["ui"]["panel"] == "ConfirmResume",
+                "Rescue boot bypassed cancellation confirmation"
+            );
+            Ok(())
+        })?;
+        vm::key(run, "esc")?;
+        state(run, "unavailable")?;
+        vm::screenshot(run, &run.join("rescue-cancellation-only.png"))?;
+        action(run, "CancelResume")?;
+        vm::key(run, "ret")?;
+        wait_for(25, None, || {
+            state(run, "inactive")?;
+            cancelled_header(run)
+        })?;
+        ensure!(
+            guest(run, "cat /proc/sys/kernel/random/boot_id")? == rescue_boot_id,
+            "Standalone rescue cancellation booted a kernel"
+        );
+        config["resume"]["role"] = "resume".into();
+        vm::write_file(
+            run,
+            "/etc/zbm-rs/config.json",
+            &serde_json::to_vec(&config)?,
+        )?;
+        vm::key(run, "f6")?;
+        wait_for(25, None, || {
+            let s = state(run, "inactive")?;
+            ensure!(
+                s["event"] == "catalog-ready",
+                "Waiting for normal role after rescue test"
+            );
+            Ok(())
+        })?;
         seed_image(run, &target(&after_cold), &guid)?;
         vm::key(run, "f6")?;
         wait_for(25, None, || {
@@ -497,7 +559,7 @@ touch /fixture/nix/store/system1/init /fixture/nix/store/system2/init
         fs::write(
             run.join("report.json"),
             serde_json::to_vec_pretty(
-                &json!({"passed":true,"checks":["foreign-mapping","metadata-only-before-unlock","wrong-ZFS-password","different-LUKS-password","shared-credential","manager-restart","pending-default","other-generation-confirmation","Esc-preserves-image","expired-consent-blocks-cold-boot","standalone-discard-stays-in-menu","verified-cancel-before-shell","payload-preserved","cold-kexec-pins-saved-generation","F10-preserves-entire-disk","no-secret-telemetry"],"real_ram_restore":false,"cold_handoff_payload":"loader-fixture"}),
+                &json!({"passed":true,"checks":["foreign-mapping","metadata-only-before-unlock","wrong-ZFS-password","different-LUKS-password","shared-credential","manager-restart","pending-default","other-generation-confirmation","Esc-preserves-image","expired-consent-blocks-cold-boot","standalone-discard-stays-in-menu","verified-cancel-before-shell","payload-preserved","cold-kexec-pins-saved-generation","rescue-rejects-restore-utility","rescue-boot-requires-cancellation","rescue-standalone-discard","F10-preserves-entire-disk","no-secret-telemetry"],"real_ram_restore":false,"cold_handoff_payload":"loader-fixture"}),
             )?,
         )?;
         Ok(())

@@ -26,7 +26,9 @@ pub fn status(config: &crate::config::Config) -> Result<Status> {
                     encryption_root: encryption_root.into(),
                 });
             }
-            Ok(Swap::open_device(&device, false)?.status()?)
+            Ok(config
+                .resume
+                .apply_role(Swap::open_device(&device, false)?.status()?))
         }
     }
 }
@@ -92,6 +94,10 @@ pub fn handoff(pool_guid: u64, plan: &BootPlan) -> Result<Option<String>> {
     if !status.protected() {
         return Ok(None);
     }
+    ensure!(
+        config.resume.role != zbm_core::resume::Role::CancelOnly,
+        "Rescue cannot resume; discard the saved session before booting"
+    );
     swap.verify_handoff(pool_guid, plan)?;
     Ok(status.session_id().map(str::to_owned))
 }
@@ -152,6 +158,10 @@ pub fn utility(args: &[std::ffi::OsString]) -> Result<bool> {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid dataset"))?;
         let config = crate::config::parse(&std::fs::read_to_string(&args[dataset_index + 1])?)?;
+        anyhow::ensure!(
+            config.resume.role != zbm_core::resume::Role::CancelOnly,
+            "Cancellation-only rescue cannot record a hibernation image"
+        );
         let device = if configured {
             config
                 .resume
@@ -228,7 +238,12 @@ pub fn utility(args: &[std::ffi::OsString]) -> Result<bool> {
         );
         let device = if args[0] == "--resume-restore-config" || args[0] == "--resume-record-config"
         {
-            crate::config::parse(&std::fs::read_to_string(&args[1])?)?
+            let config = crate::config::parse(&std::fs::read_to_string(&args[1])?)?;
+            anyhow::ensure!(
+                config.resume.role != zbm_core::resume::Role::CancelOnly,
+                "Cancellation-only rescue cannot record or restore a hibernation image"
+            );
+            config
                 .resume
                 .device()
                 .ok_or_else(|| anyhow::anyhow!("Resume is not configured"))?

@@ -6,10 +6,20 @@ use std::io;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Rescue inspects/cancels an image but may never restore or create one.
+    pub role: Role,
     /// Compatibility with existing plain-partition images.
     pub swap_partuuid: Option<String>,
     pub device: Option<Device>,
     pub credential: Option<CredentialSource>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Role {
+    #[default]
+    Resume,
+    CancelOnly,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +47,17 @@ impl CredentialSource {
 }
 
 impl Config {
+    pub fn apply_role(&self, status: super::Status) -> super::Status {
+        match status {
+            super::Status::Pending { session } if self.role == Role::CancelOnly => {
+                super::Status::Unavailable {
+                    session_id: session.id,
+                    reason: "Rescue cannot resume; discard the saved session before booting or modifying pools".into(),
+                }
+            }
+            status => status,
+        }
+    }
     pub fn enabled(&self) -> bool {
         self.device.is_some() || self.swap_partuuid.is_some()
     }

@@ -3,7 +3,7 @@ use crate::boot::BootTarget;
 use serde::{Deserialize, Serialize};
 mod config;
 pub mod device;
-pub use config::{Config, CredentialSource};
+pub use config::{Config, CredentialSource, Role};
 pub mod linux;
 pub mod mapping;
 
@@ -174,5 +174,37 @@ mod tests {
             }
             .protected()
         );
+    }
+
+    #[test]
+    fn rescue_preserves_cancellation_identity_but_never_selects_resume() {
+        let config = Config {
+            role: Role::CancelOnly,
+            ..Config::default()
+        };
+        let session = fixture();
+        let status = config.apply_role(Status::Pending {
+            session: Box::new(session.clone()),
+        });
+        assert!(status.protected());
+        assert_eq!(status.session_id(), Some(session.id.as_str()));
+        assert!(status.session().is_none());
+        assert!(!status.matches(session.pool_guid, &session.target));
+        assert!(matches!(
+            config.apply_role(Status::Inactive),
+            Status::Inactive
+        ));
+        assert!(matches!(
+            config.apply_role(Status::Blocked {
+                reason: "unreadable".into()
+            }),
+            Status::Blocked { .. }
+        ));
+        assert!(matches!(
+            Config::default().apply_role(Status::Pending {
+                session: Box::new(session)
+            }),
+            Status::Pending { .. }
+        ));
     }
 }
