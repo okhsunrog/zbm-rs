@@ -28,6 +28,74 @@ pub enum Status {
     Passphrase(Challenge),
 }
 
+/// An explicitly bound shared credential. Unlike keysource resolution, this
+/// never reads files from a dataset. Both consumers complete before Ready.
+pub async fn resolve_resume(
+    zfs: &Zfs,
+    pool: &Pool,
+    source: &crate::resume::CredentialSource,
+    device: &crate::resume::device::Device,
+    answer: Option<Answer>,
+) -> io::Result<Status> {
+    let (guid, root) = source.target();
+    if guid != pool.guid
+        || !boot_zfs::managed_pools(zfs)
+            .await?
+            .iter()
+            .any(|p| p.guid == pool.guid && p.name == pool.name)
+        || !(root == pool.name || root.starts_with(&format!("{}/", pool.name)))
+    {
+        return Err(error(
+            "Resume credential is outside the configured owned pool",
+        ));
+    }
+    let properties = boot_zfs::properties(zfs, root).await?;
+    if properties.encryptionroot.as_deref() != Some(root) || properties.keyformat != "passphrase" {
+        return Err(error(
+            "Resume credential must identify a passphrase encryption root",
+        ));
+    }
+    if crate::resume::mapping::available(device)? && !properties.locked() {
+        return Ok(Status::Ready);
+    }
+    let Some(answer) = answer else {
+        return challenge(
+            pool,
+            root,
+            &properties,
+            Some("Also unlocks encrypted swap before checking the saved session".into()),
+        );
+    };
+    if !source.matches(
+        answer.challenge.pool_guid,
+        &answer.challenge.encryption_root,
+    ) || answer.passphrase.is_empty()
+        || answer.passphrase.len() > 1024
+        || answer
+            .passphrase
+            .iter()
+            .any(|b| matches!(b, 0 | b'\n' | b'\r'))
+    {
+        return Err(error("Invalid shared resume credential response"));
+    }
+    if properties.locked() {
+        zfskit::encryption::load_key_with_passphrase(
+            zfs.command_runner(),
+            root,
+            &answer.passphrase,
+        )
+        .await
+        .map_err(error)?;
+    } else if !zfskit::encryption::verify_passphrase(zfs.command_runner(), root, &answer.passphrase)
+        .await
+        .map_err(error)?
+    {
+        return Err(error("Incorrect encryption-root passphrase"));
+    }
+    crate::resume::mapping::unlock(device, zfs.command_runner(), &answer.passphrase).await?;
+    Ok(Status::Ready)
+}
+
 fn error(message: impl std::fmt::Display) -> io::Error {
     io::Error::other(message.to_string())
 }

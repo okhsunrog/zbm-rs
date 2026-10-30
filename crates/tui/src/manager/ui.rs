@@ -561,6 +561,16 @@ impl Ui {
                 "An operation is in progress; Restart and Power off remain available".into(),
             );
         }
+        if state.resume.unlock_target().is_some() {
+            return match command {
+                Command::Open
+                | Command::Search
+                | Command::Back
+                | Command::Rescan
+                | Command::Pools => None,
+                _ => Some("Unlock encrypted swap before further boot actions".into()),
+            };
+        }
         if matches!(
             command,
             Command::Search | Command::Back | Command::Rescan | Command::Pools | Command::Shell
@@ -669,6 +679,9 @@ impl Ui {
         }
     }
     pub fn open_label(&self, state: &State) -> &'static str {
+        if state.resume.unlock_target().is_some() {
+            return "Unlock swap";
+        }
         if self.resume_selected(state) {
             return "Resume";
         }
@@ -981,6 +994,14 @@ impl Ui {
             field("Notice", error.clone());
         }
         match &state.resume {
+            zbm_core::resume::Status::Locked {
+                encryption_root, ..
+            } => {
+                field(
+                    "Saved session",
+                    format!("Unlock {encryption_root} and encrypted swap before checking resume"),
+                );
+            }
             zbm_core::resume::Status::Pending { session } => {
                 field(
                     "Saved session",

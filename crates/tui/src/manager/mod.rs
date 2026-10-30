@@ -157,6 +157,7 @@ async fn tui(
                     "unlock-prompt"
                 }
                 Ok(Outcome::Unlock(zbm_core::unlock::Status::Ready)) => {
+                    state.resume = crate::resume::display_status(&options.config).await;
                     queue = state.pools.clone().into();
                     catalog_active = true;
                     resume_unlock = true;
@@ -232,7 +233,7 @@ async fn tui(
                 }
                 Err(error) => {
                     after_cancellation = None;
-                    if options.config.resume.swap_partuuid.is_some() {
+                    if options.config.resume.enabled() {
                         state.resume = crate::resume::display_status(&options.config).await;
                     }
                     workflow.recover(error.recovery);
@@ -290,7 +291,11 @@ async fn tui(
                 if resume_unlock {
                     resume_unlock = false;
                     if let Some(selection) = unlocking.take() {
-                        if let Some(index) = state.environments.iter().position(|e| {
+                        if matches!(selection.intent, Intent::Menu) {
+                            if let Some(index) = preferred(&state, options) {
+                                ui.focus_environment(&mut state, index);
+                            }
+                        } else if let Some(index) = state.environments.iter().position(|e| {
                             e.pool_guid == selection.pool.guid && e.dataset == selection.dataset
                         }) {
                             ui.focus_environment(&mut state, index);
@@ -325,7 +330,24 @@ async fn tui(
                                 .map(|root| (e.pool_guid, root.clone()))
                         })
                         .collect();
-                    if (selected.is_some() || roots.len() == 1)
+                    if let Some((guid, root)) = state.resume.unlock_target()
+                        && let Some(pool) = state.pools.iter().find(|p| p.guid == guid).cloned()
+                    {
+                        let dataset = root.to_owned();
+                        unlocking = Some(UnlockSelection {
+                            pool: pool.clone(),
+                            dataset: dataset.clone(),
+                            intent: Intent::Menu,
+                            challenge: None,
+                        });
+                        action = Some(Action::Unlock {
+                            pool,
+                            dataset,
+                            answer: None,
+                            readonly: true,
+                            limit: options.config.nixos.generation_limit,
+                        });
+                    } else if (selected.is_some() || roots.len() == 1)
                         && state
                             .environments
                             .get(state.selected_environment)

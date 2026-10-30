@@ -11,7 +11,7 @@ use std::{
     process::Command,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Device {
     Partition {
@@ -29,6 +29,32 @@ fn error(message: impl Into<String>) -> io::Error {
 }
 
 impl Device {
+    pub fn path(&self) -> PathBuf {
+        match self {
+            Self::Partition { partuuid } => {
+                PathBuf::from(format!("/dev/disk/by-partuuid/{partuuid}"))
+            }
+            Self::Luks2 { mapping, .. } => Path::new("/dev/mapper").join(mapping),
+        }
+    }
+
+    pub(crate) fn container(&self) -> io::Result<PathBuf> {
+        self.validate()?;
+        let Self::Luks2 {
+            partuuid,
+            luks_uuid,
+            ..
+        } = self
+        else {
+            return Err(error("Not a LUKS2 resume device"));
+        };
+        let backing = fs::canonicalize(format!("/dev/disk/by-partuuid/{partuuid}"))?;
+        if !fs::metadata(&backing)?.file_type().is_block_device() {
+            return Err(error("Resume backing device is not a block device"));
+        }
+        verify_container(&backing, luks_uuid)?;
+        Ok(backing)
+    }
     pub fn validate(&self) -> io::Result<()> {
         let partuuid = match self {
             Self::Partition { partuuid } | Self::Luks2 { partuuid, .. } => partuuid,
@@ -123,6 +149,23 @@ fn verify_mapping(
     {
         return Err(error("Resume mapping uses a different backing partition"));
     }
+    verify_container(backing, uuid)?;
+    // Inspect all segments; filtering to crypt could hide a second linear target.
+    let status = Command::new("dmsetup")
+        .args(["status", "--noflush", mapping])
+        .output()?;
+    let text = String::from_utf8_lossy(&status.stdout);
+    let lines = text.lines().collect::<Vec<_>>();
+    if !status.status.success()
+        || lines.len() != 1
+        || lines[0].split_whitespace().nth(2) != Some("crypt")
+    {
+        return Err(error("Resume mapping is not a single active crypt target"));
+    }
+    Ok(())
+}
+
+fn verify_container(backing: &Path, uuid: &str) -> io::Result<()> {
     let is_luks2 = Command::new("cryptsetup")
         .args(["isLuks", "--type", "luks2"])
         .arg(backing)
@@ -140,19 +183,6 @@ fn verify_mapping(
             .eq_ignore_ascii_case(uuid)
     {
         return Err(error("Resume container UUID does not match configuration"));
-    }
-    // Status exposes target types, never the encryption key (unlike dmsetup
-    // table). Require one crypt segment; linear/foreign mappings are refused.
-    let status = Command::new("dmsetup")
-        .args(["status", "--noflush", mapping])
-        .output()?;
-    let text = String::from_utf8_lossy(&status.stdout);
-    let lines = text.lines().collect::<Vec<_>>();
-    if !status.status.success()
-        || lines.len() != 1
-        || lines[0].split_whitespace().nth(2) != Some("crypt")
-    {
-        return Err(error("Resume mapping is not a single active crypt target"));
     }
     Ok(())
 }

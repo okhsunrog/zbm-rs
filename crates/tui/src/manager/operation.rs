@@ -144,7 +144,7 @@ impl Action {
             && let Some(pool) = self.write_pool()
         {
             let config = crate::config::load(true)?;
-            if config.resume.swap_partuuid.is_some()
+            if config.resume.enabled()
                 && !matches!(
                     config.zfs.import_policy,
                     crate::config::ImportPolicy::ReadOnly
@@ -183,7 +183,7 @@ impl Action {
                 dataset,
                 answer,
                 ..
-            } => Outcome::Unlock(zbm_core::unlock::resolve(&zfs, &pool, &dataset, answer).await?),
+            } => Outcome::Unlock(crate::resume::unlock(&zfs, &pool, &dataset, answer).await?),
             Self::Rollback {
                 pool,
                 source,
@@ -217,7 +217,16 @@ impl Action {
                 pool,
                 readonly,
                 limit,
-            } => Outcome::Environments(boot_zfs::environments(&zfs, &pool, readonly, limit).await?),
+            } => Outcome::Environments(
+                boot_zfs::environment_catalog(
+                    &zfs,
+                    &pool,
+                    readonly,
+                    limit,
+                    !matches!(resume, zbm_core::resume::Status::Locked { .. }),
+                )
+                .await?,
+            ),
             Self::Snapshots { pool, dataset } => {
                 Outcome::Snapshots(boot_zfs::snapshots(&zfs, &pool, &dataset).await?)
             }
@@ -274,6 +283,23 @@ impl Action {
         }
         if !status.protected() {
             return Ok(());
+        }
+        if let Status::Locked {
+            pool_guid,
+            encryption_root,
+        } = status
+        {
+            return match self {
+                Self::Environments { .. } => Ok(()),
+                Self::Unlock { pool, dataset, .. }
+                    if pool.guid == *pool_guid && dataset == encryption_root =>
+                {
+                    Ok(())
+                }
+                _ => anyhow::bail!(
+                    "Unlock the configured encrypted swap before further boot actions"
+                ),
+            };
         }
         match self {
             Self::Unlock { .. }
@@ -426,6 +452,50 @@ mod tests {
             },
             dataset: "fixture/root".into(),
         }
+    }
+
+    #[test]
+    fn closed_swap_allows_only_metadata_and_its_bound_unlock() {
+        let pool = Pool {
+            name: "tank".into(),
+            guid: 42,
+            health: "ONLINE".into(),
+        };
+        let status = zbm_core::resume::Status::Locked {
+            pool_guid: 42,
+            encryption_root: "tank/root".into(),
+        };
+        assert!(status.protected());
+        assert!(
+            Action::Environments {
+                pool: pool.clone(),
+                readonly: false,
+                limit: 1
+            }
+            .guard_resume(&status)
+            .is_ok()
+        );
+        for (guid, dataset, allowed) in [
+            (42, "tank/root", true),
+            (43, "tank/root", false),
+            (42, "tank/other", false),
+        ] {
+            let mut selected = pool.clone();
+            selected.guid = guid;
+            assert_eq!(
+                Action::Unlock {
+                    pool: selected,
+                    dataset: dataset.into(),
+                    answer: None,
+                    readonly: false,
+                    limit: 1
+                }
+                .guard_resume(&status)
+                .is_ok(),
+                allowed
+            );
+        }
+        assert!(action().guard_resume(&status).is_err());
     }
 
     #[test]

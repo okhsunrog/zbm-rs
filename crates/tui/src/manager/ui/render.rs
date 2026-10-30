@@ -509,6 +509,7 @@ impl Ui {
                 Span::styled(
                     match &state.resume {
                         zbm_core::resume::Status::Inactive => "",
+                        zbm_core::resume::Status::Locked { .. } => "[Swap locked] ",
                         zbm_core::resume::Status::Pending { .. } => "[Resume pending] ",
                         zbm_core::resume::Status::Blocked { .. }
                         | zbm_core::resume::Status::Unavailable { .. } => "[Resume unavailable] ",

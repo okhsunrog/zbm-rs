@@ -18,6 +18,8 @@ let
   tpmConfig = security.tpm or {};
   tpmEnabled = (tpmConfig.policy or "off") != "off";
   persistentDiagnostics = (rawConfig.diagnostics.esp_partuuid or null) != null;
+  resumeDevice = rawConfig.resume.device or null;
+  luksResume = resumeDevice != null && (resumeDevice.type or null) == "luks2";
   publicInput = path:
     let content = builtins.readFile path;
     in assert lib.assertMsg (builtins.stringLength content <= 65536 && !(lib.hasInfix "PRIVATE KEY" content))
@@ -43,6 +45,7 @@ let
   roots = lib.unique ([ "zfs" ] ++ (if profile == "portable" then portable else hardware.modules or [])
     ++ extraModules ++ forcedModules ++ lib.optionals testProfile [ "e1000" ]
     ++ lib.optionals tpmEnabled [ "tpm_crb" "tpm_tis" ]
+    ++ lib.optionals luksResume [ "dm_mod" "dm_crypt" "cbc" "xts" "aes_generic" "aesni_intel" ]
     ++ lib.optionals persistentDiagnostics [ "vfat" "nls_cp437" "nls_iso8859_1" ]);
   kernel = selectedKernelPackages.kernel;
   zfsModule = builtins.getAttr zfsUserspace.kernelModuleAttribute selectedKernelPackages;
@@ -108,6 +111,9 @@ let
     { source = "${binary}/bin/zbm-rs"; target = "/bin/zbm-rs"; }
     { source = "${runtimePkgs.busybox}/bin/busybox"; link = "/bin/busybox"; }
     { source = "${runtimePkgs.kmod}/bin/modprobe"; link = "/usr/bin/modprobe"; }
+    # Kernel crypto requests use the default /sbin/modprobe helper, including
+    # CBC(AES) required while the encrypted-keys dependency of dm-crypt loads.
+    { source = "${runtimePkgs.kmod}/bin/modprobe"; link = "/usr/sbin/modprobe"; }
     { source = "${zfsUserspace}/bin/zfs"; link = "/usr/bin/zfs"; }
     { source = "${zfsUserspace}/bin/zpool"; link = "/usr/bin/zpool"; }
     { source = "${zfsUserspace}/bin/mount.zfs"; link = "/usr/sbin/mount.zfs"; }
@@ -117,6 +123,11 @@ let
     { source = "${udevPackage}/lib/udev/scsi_id"; link = "/usr/lib/udev/scsi_id"; }
     { source = "${lib.getLib runtimePkgs.kmod}/lib/libkmod.so.2"; link = "/usr/lib/libkmod.so.2"; }
     { source = "${lib.getLib runtimePkgs.util-linux}/lib/libblkid.so.1"; link = "/usr/lib/libblkid.so.1"; }
+  ] ++ lib.optionals luksResume [
+    { source = "${lib.getBin runtimePkgs.cryptsetup}/bin/cryptsetup"; link = "/usr/bin/cryptsetup"; }
+    { source = "${lib.getBin runtimePkgs.lvm2}/bin/dmsetup"; link = "/usr/bin/dmsetup"; }
+  ] ++ lib.optionals (luksResume && testProfile) [
+    { source = "${lib.getBin runtimePkgs.gptfdisk}/bin/sgdisk"; link = "/usr/bin/sgdisk"; }
   ] ++ lib.optionals testProfile [
     { source = "${runtimePkgs.openssh}/bin/sshd"; link = "/usr/bin/sshd"; }
     { source = "${runtimePkgs.openssh}/bin/ssh-keygen"; link = "/usr/bin/ssh-keygen"; }
@@ -138,7 +149,7 @@ let
   ];
   setup = pkgs.writeText "setup.sh" (lib.replaceStrings
     [ "# NIX_FORCED_MODULES" ]
-    [ ((lib.concatMapStringsSep "\n" (name: "/usr/bin/modprobe " + lib.escapeShellArg name + " || exit 1") (lib.remove "zfs" forcedModules))
+    [ ((lib.concatMapStringsSep "\n" (name: "/usr/bin/modprobe " + lib.escapeShellArg name + " || exit 1") (lib.remove "zfs" (forcedModules ++ lib.optionals luksResume [ "dm_mod" "dm_crypt" ])))
       + lib.optionalString persistentDiagnostics "\n/usr/bin/modprobe -a vfat nls_cp437 nls_iso8859_1 || true") ]
     (builtins.readFile (source + "/boot/setup.sh")));
   runtimeLibc = runtimePkgs.stdenv.hostPlatform.libc;
@@ -204,6 +215,13 @@ let
     cp ${udevRules}/{60-persistent-storage,80-drivers}.rules root/usr/lib/udev/rules.d/
     substituteInPlace root/usr/lib/udev/rules.d/60-persistent-storage.rules \
       --replace-quiet '${udevPackage}/lib/udev' '/usr/lib/udev'
+    ${lib.optionalString luksResume ''
+      # Complete libdevmapper cookies and create mapper links. Do not include
+      # LVM activation rules: discovering a device must not activate volumes.
+      cp ${runtimePkgs.lvm2}/lib/udev/rules.d/{10-dm,13-dm-disk,95-dm-notify}.rules root/usr/lib/udev/rules.d/
+      substituteInPlace root/usr/lib/udev/rules.d/{10-dm,95-dm-notify}.rules \
+        --replace-fail '${lib.getBin runtimePkgs.lvm2}/bin/dmsetup' '/usr/bin/dmsetup'
+    ''}
     ${lib.optionalString testProfile ''
       mkdir -p root/etc/ssh root/root/.ssh
       ssh-keygen -q -t ed25519 -N "" -C zbm-disposable-test -f client-key

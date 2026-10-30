@@ -1,0 +1,126 @@
+{ self, pkgs, nixpkgs, system }:
+let
+  loader = self.packages.${system}.zbm-rs;
+  partuuid = "12345678-1234-1234-1234-123456789abc";
+  luksUuid = "ca55a30a-636e-4e69-9e68-bb36bf380408";
+  target = (nixpkgs.lib.nixosSystem {
+    inherit system;
+    modules = [
+      (import ./nixos-boot.nix { inherit self; })
+      "${nixpkgs}/nixos/modules/profiles/qemu-guest.nix"
+      "${nixpkgs}/nixos/modules/testing/test-instrumentation.nix"
+      {
+        networking.hostName = "resume-target";
+        networking.hostId = "00bab10c";
+        boot.loader.zbm-rs = {
+          enable = true;
+          hibernation = {
+            enable = true;
+            swap = { type = "luks2"; inherit partuuid; luksDevice = "resume-swap"; };
+            # Loader credential resolution is tested separately through the UI.
+            credential = { type = "zfs-unlock"; poolGuid = "42"; encryptionRoot = "testpool"; };
+          };
+        };
+        boot.zfs.unsafeAllowHibernation = true;
+        boot.zfs.devNodes = "/dev/disk/by-path";
+        boot.zfs.requestEncryptionCredentials = [ "testpool" ];
+        boot.initrd.secrets."/etc/zfs/test.key" = "/etc/zfs/test.key";
+        boot.initrd.luks.devices.resume-swap = {
+          device = "/dev/disk/by-uuid/${luksUuid}";
+          keyFile = "/etc/zfs/test.key";
+        };
+        boot.initrd.systemd.services.zfs-import-testpool = {
+          requires = [ "initrd-nixos-copy-secrets.service" ];
+          after = [ "initrd-nixos-copy-secrets.service" ];
+        };
+        # A negative fixture: even an early read-only pool import must trip the
+        # target gate. This service is not part of the production module.
+        boot.initrd.systemd.services.test-import-before-resume = {
+          wantedBy = [ "initrd.target" ];
+          before = [ "zbm-resume.service" ];
+          requires = [ "dev-vdc.device" ];
+          after = [ "dev-vdc.device" "systemd-modules-load.service" ];
+          unitConfig.ConditionKernelCommandLine = "zbm.test.import-before-resume";
+          serviceConfig = {
+            Type = "oneshot";
+            ExecStartPre = "${pkgs.kmod}/bin/modprobe zfs";
+            ExecStart = "${pkgs.zfs}/bin/zpool import -N -o readonly=on -o cachefile=none testpool";
+          };
+        };
+        boot.initrd.systemd.services.zbm-resume.serviceConfig.StandardError = "journal+console";
+        boot.kernelParams = [ "console=ttyS0" "zfs.zfs_arc_max=134217728" ];
+        fileSystems."/" = { device = "testpool/root"; fsType = "zfs"; options = [ "zfsutil" ]; };
+        swapDevices = [{ device = "/dev/mapper/resume-swap"; }];
+        environment.systemPackages = [ pkgs.kexec-tools pkgs.cryptsetup pkgs.lvm2 loader ];
+        system.stateVersion = "26.05";
+      }
+    ];
+  }).config.system.build.toplevel;
+  planConfig = pkgs.writeText "resume-plan-config.json" "{}";
+in pkgs.testers.runNixOSTest {
+  name = "zbm-encrypted-hibernation";
+  globalTimeout = 900;
+  nodes.machine = { lib, ... }: {
+    # virtio-fs cannot freeze for hibernation. Use an isolated block store and
+    # no shared devices; the installed target never mounts the bootstrap disks.
+    virtualisation.useNixStoreImage = true;
+    virtualisation.writableStore = true;
+    virtualisation.mountHostNixStore = false;
+    virtualisation.sharedDirectories = lib.mkForce {};
+    virtualisation.qemu.enableSharedMemory = false;
+    networking.hostId = "00bab10c";
+    boot.supportedFilesystems = [ "zfs" ];
+    virtualisation.memorySize = 2048;
+    virtualisation.emptyDiskImages = [ 12000 2048 ];
+    virtualisation.additionalPaths = [ target ];
+    environment.systemPackages = [ pkgs.zfs pkgs.kexec-tools pkgs.nixos-install-tools pkgs.cryptsetup pkgs.lvm2 pkgs.gptfdisk loader ];
+  };
+  testScript = ''
+    import json, shlex, datetime
+    machine.start()
+    machine.wait_for_unit("multi-user.target")
+    machine.succeed("mkdir -p /etc/zfs; printf disposable-vm-passphrase > /etc/zfs/test.key; chmod 600 /etc/zfs/test.key")
+    machine.succeed("sgdisk --zap-all --new=1:2048:0 --partition-guid=1:${partuuid} /dev/vdd; udevadm settle")
+    machine.succeed("cryptsetup luksFormat --batch-mode --type luks2 --pbkdf pbkdf2 --pbkdf-force-iterations 1000 --uuid ${luksUuid} --key-file /etc/zfs/test.key /dev/vdd1; cryptsetup open --key-file /etc/zfs/test.key /dev/vdd1 resume-swap; mkswap /dev/mapper/resume-swap; cryptsetup close resume-swap")
+    machine.succeed("zpool create -o cachefile=none -O mountpoint=none -O encryption=aes-256-gcm -O keyformat=passphrase -O keylocation=file:///etc/zfs/test.key testpool /dev/vdc; zfs create -u -o mountpoint=/ -o canmount=noauto testpool/root; mkdir /mnt; mount -t zfs -o zfsutil testpool/root /mnt; mkdir -p /mnt/etc/zfs; cp /etc/zfs/test.key /mnt/etc/zfs/test.key")
+    machine.succeed("nixos-install --root /mnt --system ${target} --no-root-passwd --no-channel-copy", timeout=300)
+    plan = json.loads(machine.succeed("${loader}/bin/zbm-rs --nixos-plans /mnt testpool/root ${planConfig} ${target}"))[0]
+    # Save exact prepared boot inputs on the bootstrap VM's separate root disk.
+    # That filesystem is never mounted by the hibernating target. After sleep,
+    # bootstrap must not import testpool or activate its swap before kexec.
+    machine.succeed("cp " + shlex.quote(plan["kernel"]) + " /root/resume-kernel; cp " + shlex.quote(plan["initrd"]) + " /root/resume-initrd")
+    cmdline = " ".join('"' + a + '"' if any(c.isspace() for c in a) else a for a in plan["cmdline"])
+    load = "kexec -l /root/resume-kernel --initrd=/root/resume-initrd --command-line=" + shlex.quote(cmdline)
+    machine.succeed("umount /mnt; zpool export testpool")
+    machine.succeed("kexec -l /root/resume-kernel --initrd=/root/resume-initrd --command-line=" + shlex.quote(cmdline + " zbm.test.import-before-resume"))
+    machine.execute("systemctl --no-block kexec", check_return=False)
+    machine.wait_for_console_text("A ZFS pool was imported before resume", timeout=90)
+    machine.wait_for_shutdown(timeout=datetime.timedelta(seconds=45))
+    machine.start()
+    machine.wait_for_unit("multi-user.target")
+    machine.succeed("test ! -e /dev/mapper/resume-swap; ! zpool list -H -o name | grep -qx testpool")
+    machine.succeed(load)
+    machine.execute("systemctl --no-block kexec", check_return=False)
+    machine.connected = False
+    machine.connect()
+    machine.wait_for_unit("multi-user.target")
+    machine.succeed("test $(findmnt -n -o SOURCE /) = testpool/root; test -b /dev/mapper/resume-swap; grep -q /dev/dm- /proc/swaps")
+    machine.succeed("test $(cat /sys/power/resume) = $(lsblk -dn -o MAJ:MIN /dev/mapper/resume-swap); grep -qw disk /sys/power/state")
+    before = machine.succeed("cat /proc/sys/kernel/random/boot_id").strip()
+    machine.succeed("printf preserved-in-ram > /run/resume-proof; echo 67108864 > /sys/power/image_size")
+    machine.execute("systemctl --no-block hibernate", check_return=False)
+    machine.wait_for_shutdown(timeout=datetime.timedelta(seconds=180))
+    machine.start()
+    machine.wait_for_unit("multi-user.target")
+    machine.succeed("test $(hostname) != resume-target; test ! -e /dev/mapper/resume-swap; ! zpool list -H -o name | grep -qx testpool")
+    machine.succeed(load)
+    machine.execute("systemctl --no-block kexec", check_return=False)
+    # The target's shell resumes too; it does not emit a new boot handshake.
+    machine.wait_for_console_text("PM: hibernation: hibernation exit", timeout=90)
+    machine.wait_for_unit("multi-user.target")
+    after = machine.succeed("cat /proc/sys/kernel/random/boot_id").strip()
+    assert before == after, (before, after, "cold boot occurred instead of RAM restore")
+    machine.succeed("test $(cat /run/resume-proof) = preserved-in-ram; test $(findmnt -n -o SOURCE /) = testpool/root; zpool status -x | grep -q 'all pools are healthy'")
+    machine.succeed("journalctl -b --no-pager | grep -E 'hibernation (entry|exit)' ")
+  '';
+}

@@ -21,6 +21,18 @@
         default = production;
         zbm-rs-efi = production;
         zbm-rs-efi-test = testing;
+        zbm-rs-efi-test-resume = mkImage {
+          testProfile = true;
+          loaderConfig = {
+            resume = {
+              device = { type = "luks2"; partuuid = "12345678-1234-1234-1234-123456789abc";
+                luks_uuid = "ca55a30a-636e-4e69-9e68-bb36bf380408"; mapping = "resume-swap"; };
+              credential = { type = "zfs-unlock"; pool_guid = "42"; encryption_root = "zbm_resume"; };
+            };
+            boot.mode = "menu";
+            zfs.import_policy = "host-id";
+          };
+        };
         zbm-rs-efi-test-snapshot = mkImage { testProfile = true;
           loaderConfig = builtins.fromJSON (builtins.readFile ./config/test-snapshot.json); };
         zbm-rs = production.passthru.binary;
@@ -44,6 +56,7 @@
         zbm-rs-efi-test-host-only-scsi = mkImage { testProfile = true; profile = "host-only"; hardwareManifest = ./nix/scsi-hardware-example.json; };
       };
       checks.${system} = {
+        encrypted-hibernation = import ./nix/check-encrypted-hibernation.nix { inherit self pkgs nixpkgs system; };
         luks2-resume-device = import ./nix/check-luks2-resume.nix { inherit self pkgs; };
         prune-nixos = import ./nix/check-prune-nixos.nix { inherit pkgs; };
         resume-config = import ./nix/check-resume-config.nix { inherit self nixpkgs pkgs system; };

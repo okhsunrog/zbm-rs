@@ -1,4 +1,5 @@
 //! Shared schema and validator for the build host and runtime.
+pub use super::build_policy::{BuildPolicy, SecurityMode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -15,12 +16,7 @@ pub struct Config {
     /// Additional target kernel arguments, validated again by the boot backend.
     pub kernel_args: Vec<String>,
 }
-#[derive(Debug, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Resume {
-    /// Dedicated unencrypted swap partition. Disabled by default.
-    pub swap_partuuid: Option<String>,
-}
+pub type Resume = zbm_core::resume::Config;
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Diagnostics {
@@ -30,35 +26,6 @@ pub struct Diagnostics {
     pub continuous: bool,
 }
 
-/// Only these invariants affect the executable; ordinary settings belong to the image.
-#[derive(Debug, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct BuildPolicy {
-    pub security_mode: SecurityMode,
-    pub diagnostic_esp_partuuid: Option<String>,
-    pub continuous_diagnostics: bool,
-}
-
-impl BuildPolicy {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.continuous_diagnostics && self.diagnostic_esp_partuuid.is_none() {
-            return Err("diagnostics.continuous requires diagnostics.esp_partuuid".into());
-        }
-        if self.diagnostic_esp_partuuid.as_ref().is_some_and(|id| {
-            id.len() != 36
-                || id.bytes().enumerate().any(|(i, ch)| {
-                    if [8, 13, 18, 23].contains(&i) {
-                        ch != b'-'
-                    } else {
-                        !ch.is_ascii_hexdigit()
-                    }
-                })
-        }) {
-            return Err("diagnostics.esp_partuuid must be a GPT partition UUID".into());
-        }
-        Ok(())
-    }
-}
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Ui {
@@ -129,14 +96,6 @@ pub struct Nixos {
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum SecurityMode {
-    #[default]
-    Off,
-    Enforce,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
 pub enum MeasurementPolicy {
     #[default]
     Off,
@@ -180,18 +139,8 @@ impl Config {
     pub fn validate(&self) -> Result<(), String> {
         self.security.validate()?;
         self.build_policy().validate()?;
-        if let Some(id) = &self.resume.swap_partuuid {
-            if id.len() != 36
-                || !id.bytes().enumerate().all(|(i, b)| {
-                    if [8, 13, 18, 23].contains(&i) {
-                        b == b'-'
-                    } else {
-                        b.is_ascii_hexdigit()
-                    }
-                })
-            {
-                return Err("resume.swap_partuuid must be a GPT partition UUID".into());
-            }
+        self.resume.validate().map_err(|e| e.to_string())?;
+        if self.resume.enabled() {
             if self.security.mode == SecurityMode::Enforce {
                 return Err("Native hibernation image authentication is not implemented for enforced images".into());
             }

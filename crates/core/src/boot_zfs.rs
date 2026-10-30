@@ -279,6 +279,17 @@ pub async fn environments(
     readonly: bool,
     limit: u32,
 ) -> io::Result<Vec<BootEnvironment>> {
+    environment_catalog(zfs, pool, readonly, limit, true).await
+}
+
+/// A locked resume container allows metadata discovery, never boot-root mounts.
+pub async fn environment_catalog(
+    zfs: &Zfs,
+    pool: &Pool,
+    readonly: bool,
+    limit: u32,
+    inspect_targets: bool,
+) -> io::Result<Vec<BootEnvironment>> {
     let imported = zfs.list_pools(&Default::default()).await.map_err(failure)?;
     let existing = imported
         .iter()
@@ -378,7 +389,7 @@ pub async fn environments(
             properties,
             root: None,
         };
-        if environment.unavailable.is_some() {
+        if !inspect_targets || environment.unavailable.is_some() {
             environments.push(environment);
             continue;
         }

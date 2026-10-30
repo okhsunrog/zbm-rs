@@ -239,6 +239,7 @@ impl Swap {
                 "configfs",
                 "pstore",
                 "mqueue",
+                "bpf",
             ]
             .contains(&kind)
             {

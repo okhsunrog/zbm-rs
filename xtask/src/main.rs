@@ -4,6 +4,7 @@ mod failures;
 mod interface;
 mod lifecycle;
 mod qmp;
+mod resume_smoke;
 mod security_smoke;
 mod smoke;
 mod vm;
@@ -21,6 +22,16 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Task {
+    ResumeSmoke {
+        #[arg(long)]
+        run: PathBuf,
+        #[arg(long)]
+        image: PathBuf,
+        #[arg(long, default_value_t = 2293)]
+        port: u16,
+        #[arg(long)]
+        tcg: bool,
+    },
     SecureSmoke {
         #[arg(long)]
         run: PathBuf,
@@ -161,6 +172,12 @@ fn main() -> Result<()> {
         .to_owned();
     std::env::set_current_dir(root)?;
     match Cli::parse().command {
+        Task::ResumeSmoke {
+            run,
+            image,
+            port,
+            tcg,
+        } => resume_smoke::run(&run, &image, port, tcg)?,
         Task::SecureSmoke {
             run,
             image,

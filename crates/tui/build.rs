@@ -1,9 +1,9 @@
-#[path = "src/config/schema.rs"]
+#[path = "src/config/build_policy.rs"]
 #[allow(dead_code)]
 mod schema;
 fn main() {
     println!("cargo::rerun-if-env-changed=ZBM_RS_BUILD_POLICY");
-    println!("cargo::rerun-if-changed=src/config/schema.rs");
+    println!("cargo::rerun-if-changed=src/config/build_policy.rs");
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let input = match std::env::var("ZBM_RS_BUILD_POLICY") {
             Ok(input) => input,

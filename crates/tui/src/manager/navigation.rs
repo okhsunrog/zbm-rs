@@ -29,6 +29,12 @@ pub(super) fn preferred(state: &State, options: &Options) -> Option<usize> {
             .iter()
             .position(|e| e.pool_guid == session.pool_guid && e.dataset == session.target.dataset);
     }
+    if let Some((guid, root)) = state.resume.unlock_target() {
+        return state
+            .environments
+            .iter()
+            .position(|e| e.pool_guid == guid && e.dataset == root);
+    }
     if state.resume.protected() {
         return None;
     }
@@ -79,9 +85,28 @@ pub(super) fn intent_action(
     options: &Options,
     unlocking: &mut Option<UnlockSelection>,
 ) -> Option<Action> {
+    if let Some((guid, root)) = state.resume.unlock_target() {
+        let pool = state.pools.iter().find(|p| p.guid == guid)?.clone();
+        let dataset = root.to_owned();
+        *unlocking = Some(UnlockSelection {
+            pool: pool.clone(),
+            dataset: dataset.clone(),
+            intent: Intent::Menu,
+            challenge: None,
+        });
+        return Some(Action::Unlock {
+            pool,
+            dataset,
+            answer: None,
+            readonly: true,
+            limit: options.config.nixos.generation_limit,
+        });
+    }
     let environment = state.environments.get(state.selected_environment)?.clone();
     let pool = state.environment_pool()?.clone();
-    if environment.properties.locked() {
+    if environment.properties.locked()
+        || state.resume.unlock_target() == Some((pool.guid, environment.dataset.as_str()))
+    {
         *unlocking = Some(UnlockSelection {
             pool: pool.clone(),
             dataset: environment.dataset.clone(),

@@ -48,19 +48,17 @@ an authorized mutation. A status read error is never treated as no session.
 
 ## Linux on-disk format
 
-Initial support is deliberately limited to a dedicated, unencrypted GPT swap
-partition with 4096-byte kernel pages and the native Linux S1SUSPEND format.
-LUKS, zvols, swapfiles, other page sizes and alternate image formats are unsupported.
-The image configuration selects only an explicit `resume.swap_partuuid`.
+Support is limited to dedicated plain or LUKS2 GPT swap partitions, 4096-byte
+kernel pages and native Linux S1SUSPEND. Zvols, swapfiles and alternate page/image
+formats are unsupported. Existing plain images may retain `resume.swap_partuuid`;
+new images use `resume.device`.
 
-The preparatory `resume::device::Device` API can inspect an already unlocked
-LUKS2 mapping. It pins the outer PARTUUID, the LUKS UUID and mapping name, checks
-the actual backing partition and requires a single dm-crypt target. It does not
-unlock containers or provide an encrypted resume boot flow. The loader config
-and NixOS integration remain plain-partition-only until credential acquisition,
-pre-import mapping lifecycle and target-initramfs handoff are implemented and
-tested together. A missing, suspended or mismatched mapping is an error, never
-an empty session. No key material is read from `dmsetup table`.
+`resume::device::Device` pins the outer PARTUUID, LUKS UUID and mapping name,
+checks the actual backing partition and requires a single dm-crypt target.
+The loader journals mapping ownership in root-only RAM before activation.
+Foreign mappings are never adopted or closed. Integrity and reencryption layouts
+are refused before activation. A suspended or mismatched mapping is an error,
+never an empty session. No key material is read from `dmsetup table`.
 
 `nix build .#checks.x86_64-linux.luks2-resume-device` exercises this API with real
 GPT/LUKS2 devices inside a disposable VM. The fixture uses synthetic kernel
@@ -92,20 +90,34 @@ again; ambiguous/partial headers remain blocked. Successful cancellation removes
 the marker only after flush and verification. The marker itself never authorizes
 resume or replaces image invalidation.
 
-## Encrypted-swap integration contract (not yet implemented)
+## Encrypted swap and credential ownership
 
-Reuse of a dataset-unlock credential is a suitable explicit policy for LUKS2
-swap; it is not a requirement for every supported layout. The credential means
-the passphrase or key-file bytes, not either filesystem's internal data key.
+The first credential source is explicitly selected `zfs-unlock`: reuse the
+passphrase for an image-pinned pool GUID and encryption root. `zfs-keyfile` and
+other sources are not implemented and are rejected, never used as fallbacks.
+This is not a requirement that every ZFS root share its password with LUKS.
+The credential is the user's passphrase, not either filesystem's internal key.
 Independent ZFS and LUKS volume keys remain independent. Passphrase and key-file
 handling must preserve each backend's byte semantics, including newline handling.
 Unlocking ZFS is not proof that those same bytes can unlock LUKS.
 
-Acquire the swap credential through the existing broker-owned unlock flow,
-without requiring the target root to be mounted just to read a key file. A closed
-container remains an unknown/protected session until unlocking and inspection
-succeed. Wrong or unavailable credentials must not turn into a cold boot with
-writable pools. A failed check preserves the image and power-off remains available.
+The existing password panel supplies both consumers through the privileged unlock
+module. It loads the ZFS key without mounting a dataset, opens LUKS using secret
+stdin, then drops the secret. An already unlocked root still verifies the supplied
+credential if its swap is closed. No secret is retained across menu actions or
+passed on the kernel command line.
+
+`Locked` is distinct from `Blocked`: it permits metadata-only read-only catalogs
+and unlocking exactly the configured root, without boot-root mounts, swapon or an
+unrestricted shell. A correct ZFS password which fails LUKS preserves this state.
+Inspection, not merely successful unlocking, determines whether an image exists.
+
+The owned crypt mapping permits the confirmed cancellation writer; inspection
+and handoff open read-only file descriptors. Cancellation requires an exclusive
+device open and fresh consent. This avoids retaining the password to reopen a
+read-only mapping later. Final image verification precedes closing the owned
+mapping for kexec. The target opens its own mapping using its prepared initramfs
+secret; the loader never appends a newly entered secret to an initramfs.
 
 If the loader needs ZFS metadata or boot files before handoff, every relevant
 import must be read-only at pool level from its first import. `-N` or a read-only
@@ -121,8 +133,11 @@ unnecessary root/key-file dependency; it does not replace either safety boundary
 ## NixOS integration
 
 The optional `boot.loader.zbm-rs.hibernation` module integration adds a native
-pre-hibernation record step and a target-initramfs resume gate. Its swapPartuuid
-must match the loader image's resume.swap_partuuid. The swap partition must
+pre-hibernation record step and a target-initramfs resume gate. Its resolved
+non-secret `resumeConfig` is the policy for both roles. `programs.zbm-rs` uses it
+by default; custom `lib.mkImage` users pass it as `loaderConfig.resume`. The entire
+policy must match, not just the PARTUUID. Legacy plain configurations retain
+`swapPartuuid`. The swap partition must
 already be configured/active; the module neither formats it nor partitions disks.
 The record step temporarily swaps it off, records the booted NixOS target, and
 reactivates it even if recording fails. Failure aborts hibernation. Memory pressure
@@ -130,6 +145,29 @@ can make swapoff fail; that is not overridden. This hooks direct hibernation;
 suspend-then-hibernate and hybrid-sleep are disabled while this integration is
 enabled. Persistent initramfs mounts must all use the gated ZFS imports;
 configurations with other early persistent filesystems are rejected.
+
+```nix
+boot.loader.zbm-rs.hibernation = {
+  enable = true;
+  swap = {
+    type = "luks2";
+    partuuid = "12345678-1234-1234-1234-123456789abc";
+    luksDevice = "nvme-swap"; # boot.initrd.luks.devices.nvme-swap
+  };
+  credential = {
+    type = "zfs-unlock";
+    poolGuid = "13099373940756918353";
+    encryptionRoot = "pool/nixos/root";
+  };
+};
+```
+
+The named LUKS device must use `/dev/disk/by-uuid/<LUKS-UUID>` and a `keyFile`
+provided by `boot.initrd.secrets`. The module derives its identity and mapping,
+includes the native binary/configuration and crypt tools in the initramfs, and
+requires `copy-secrets -> cryptsetup -> zbm-resume -> zfs-import`. Only paths and
+identities enter Nix configuration, never key contents. Existing target runtime
+secret delivery remains independent of the loader prompt.
 
 `hibernate=noresume` disables the kernel's automatic attempt; the stock systemd
 resume generator and units are suppressed in the target initramfs. Plain
@@ -157,7 +195,8 @@ Header identity and artifact hashes cannot detect arbitrary intervening writes
 to ZFS. A strong consistency seal needs kernel/ZFS cooperation tied to the actual
 hibernation snapshot; a pre-sleep TXG reading is not sufficient. Independent
 bootloaders/rescue systems can bypass loader restrictions. Raw swap stores RAM
-contents without encryption. This implementation does not address those risks.
+contents without encryption; LUKS2 protects confidentiality but does not
+authenticate the RAM image or satisfy kernel Lockdown. These risks remain.
 
 Tests cover wrong/stale image identity, cancellation preserving other bytes,
 foreign bootbits, corrupt metadata, artifact changes, normal navigation, modal
@@ -166,3 +205,14 @@ Source/unit checks are not physical resume acceptance. Before any installation,
 exercise the exact image and target initramfs in disposable VMs, including power
 loss, failed resume, restart, other generations and read-only import behavior;
 then validate the actual laptop separately.
+
+`cargo xtask resume-smoke --image IMAGE --run FRESH_DIRECTORY` exercises real
+ZFS/LUKS and the actual password/cancellation UI with synthetic image headers:
+different secrets, foreign mappings, restart, another generation sharing a kernel,
+cancellation before recovery shell and power-off preserving the logical disk.
+`nix build .#checks.x86_64-linux.encrypted-hibernation` instead installs a disposable
+encrypted ZFS-root NixOS, rejects an intentionally early read-only pool import,
+and exercises real RAM restoration through the target initramfs. It verifies the
+unchanged kernel boot ID, a surviving RAM-only file and pool health after resume.
+The intervening bootstrap uses separate disks and never imports the hibernated
+pool or opens its swap. Neither is physical or enforced/Secure Boot acceptance.

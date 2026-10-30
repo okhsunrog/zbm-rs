@@ -8,19 +8,33 @@ use zbm_core::{
 const CANCELLING: &str = "/run/zbm-rs/resume-cancelling";
 
 pub fn status(config: &crate::config::Config) -> Result<Status> {
-    if config.resume.swap_partuuid.is_some() && std::path::Path::new(CANCELLING).try_exists()? {
+    if config.resume.enabled() && std::path::Path::new(CANCELLING).try_exists()? {
         return Ok(Status::Blocked { reason: "Image cancellation was interrupted; reboot or power off before further disk operations".into() });
     }
-    match &config.resume.swap_partuuid {
+    match config.resume.device() {
         None => Ok(Status::Inactive),
-        Some(id) => Ok(Swap::open(id, false)?.status()?),
+        Some(device) => {
+            if !zbm_core::resume::mapping::available(&device)? {
+                let (pool_guid, encryption_root) = config
+                    .resume
+                    .credential
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Missing resume credential source"))?
+                    .target();
+                return Ok(Status::Locked {
+                    pool_guid,
+                    encryption_root: encryption_root.into(),
+                });
+            }
+            Ok(Swap::open_device(&device, false)?.status()?)
+        }
     }
 }
 pub fn current() -> Result<Status> {
     status(&crate::config::load(true)?)
 }
 pub async fn display_status(config: &crate::config::Config) -> Status {
-    if config.resume.swap_partuuid.is_none() {
+    if !config.resume.enabled() {
         return Status::Inactive;
     }
     let result = if crate::broker::enabled() {
@@ -36,12 +50,16 @@ pub async fn display_status(config: &crate::config::Config) -> Status {
 }
 pub fn cancel(expected: &str) -> Result<()> {
     let config = crate::config::load(true)?;
-    let id = config
+    let device = config
         .resume
-        .swap_partuuid
-        .as_ref()
+        .device()
         .ok_or_else(|| anyhow::anyhow!("Resume is not configured"))?;
-    let swap = Swap::open(id, true)?;
+    // Revalidate ownership as well as the crypt identity before a writer opens.
+    ensure!(
+        zbm_core::resume::mapping::available(&device)?,
+        "Resume device is closed"
+    );
+    let swap = Swap::open_device(&device, true)?;
     ensure!(
         swap.status()?.session_id() == Some(expected),
         "Saved session changed; confirmation expired"
@@ -62,10 +80,14 @@ pub fn cancel(expected: &str) -> Result<()> {
 }
 pub fn handoff(pool_guid: u64, plan: &BootPlan) -> Result<Option<String>> {
     let config = crate::config::load(true)?;
-    let Some(id) = config.resume.swap_partuuid.as_ref() else {
+    let Some(device) = config.resume.device() else {
         return Ok(None);
     };
-    let swap = Swap::open(id, false)?;
+    ensure!(
+        zbm_core::resume::mapping::available(&device)?,
+        "Resume device is closed"
+    );
+    let swap = Swap::open_device(&device, false)?;
     let status = swap.status()?;
     if !status.protected() {
         return Ok(None);
@@ -76,7 +98,7 @@ pub fn handoff(pool_guid: u64, plan: &BootPlan) -> Result<Option<String>> {
 pub fn check_handoff(expected: Option<&str>) -> Result<()> {
     let status = current()?;
     ensure!(
-        !matches!(status, Status::Blocked { .. }),
+        !matches!(status, Status::Blocked { .. } | Status::Locked { .. }),
         "Resume status is unknown"
     );
     ensure!(
@@ -86,23 +108,63 @@ pub fn check_handoff(expected: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+pub fn release_mapping() -> Result<()> {
+    if let Some(device) = crate::config::load(true)?.resume.device() {
+        zbm_core::resume::mapping::release(&device)?;
+    }
+    Ok(())
+}
+
+pub async fn unlock(
+    zfs: &zbm_core::Zfs,
+    pool: &zbm_core::Pool,
+    dataset: &str,
+    answer: Option<zbm_core::unlock::Answer>,
+) -> Result<zbm_core::unlock::Status> {
+    let config = crate::config::load(true)?;
+    if let Some(source) = &config.resume.credential
+        && source.matches(pool.guid, dataset)
+    {
+        return Ok(zbm_core::unlock::resolve_resume(
+            zfs,
+            pool,
+            source,
+            &config.resume.device().unwrap(),
+            answer,
+        )
+        .await?);
+    }
+    Ok(zbm_core::unlock::resolve(zfs, pool, dataset, answer).await?)
+}
+
 /// Native early-boot and pre-hibernation roles of the same executable.
 pub fn utility(args: &[std::ffi::OsString]) -> Result<bool> {
-    if args
-        .first()
-        .is_some_and(|arg| arg == "--resume-record-current")
-    {
+    if args.first().is_some_and(|arg| {
+        arg == "--resume-record-current" || arg == "--resume-record-current-config"
+    }) {
+        let configured = args[0] == "--resume-record-current-config";
         anyhow::ensure!(
-            unsafe { libc::geteuid() } == 0 && args.len() == 4,
-            "usage (root): zbm-rs --resume-record-current PARTUUID DATASET IMAGE_CONFIG"
+            unsafe { libc::geteuid() } == 0 && args.len() == if configured { 3 } else { 4 },
+            "usage (root): zbm-rs --resume-record-current-config DATASET IMAGE_CONFIG"
         );
-        let id = args[1]
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid PARTUUID"))?;
-        let dataset = args[2]
+        let dataset_index = if configured { 1 } else { 2 };
+        let dataset = args[dataset_index]
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid dataset"))?;
-        let config = crate::config::parse(&std::fs::read_to_string(&args[3])?)?;
+        let config = crate::config::parse(&std::fs::read_to_string(&args[dataset_index + 1])?)?;
+        let device = if configured {
+            config
+                .resume
+                .device()
+                .ok_or_else(|| anyhow::anyhow!("Resume is not configured"))?
+        } else {
+            zbm_core::resume::device::Device::Partition {
+                partuuid: args[1]
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid PARTUUID"))?
+                    .into(),
+            }
+        };
         let root = std::process::Command::new("findmnt")
             .args([
                 "--noheadings",
@@ -146,26 +208,39 @@ pub fn utility(args: &[std::ffi::OsString]) -> Result<bool> {
             .output()?;
         anyhow::ensure!(output.status.success(), "Cannot read the running pool GUID");
         let guid = std::str::from_utf8(&output.stdout)?.trim().parse()?;
-        zbm_core::resume::linux::Swap::open(id, true)?.record(guid, &plan)?;
+        zbm_core::resume::linux::Swap::open_device(&device, true)?.record(guid, &plan)?;
         return Ok(true);
     }
-    if args
-        .first()
-        .is_some_and(|arg| arg == "--resume-record" || arg == "--resume-restore")
-    {
+    if args.first().is_some_and(|arg| {
+        arg == "--resume-record"
+            || arg == "--resume-record-config"
+            || arg == "--resume-restore"
+            || arg == "--resume-restore-config"
+    }) {
         anyhow::ensure!(
             unsafe { libc::geteuid() } == 0,
             "Resume device operations require root"
         );
-        let recording = args[0] == "--resume-record";
+        let recording = args[0] == "--resume-record" || args[0] == "--resume-record-config";
         anyhow::ensure!(
             args.len() == if recording { 4 } else { 2 },
             "usage: zbm-rs --resume-record PARTUUID POOL_GUID PLAN_JSON | --resume-restore PARTUUID"
         );
-        let id = args[1]
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid PARTUUID"))?;
-        let swap = zbm_core::resume::linux::Swap::open(id, recording)?;
+        let device = if args[0] == "--resume-restore-config" || args[0] == "--resume-record-config"
+        {
+            crate::config::parse(&std::fs::read_to_string(&args[1])?)?
+                .resume
+                .device()
+                .ok_or_else(|| anyhow::anyhow!("Resume is not configured"))?
+        } else {
+            zbm_core::resume::device::Device::Partition {
+                partuuid: args[1]
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid PARTUUID"))?
+                    .into(),
+            }
+        };
+        let swap = zbm_core::resume::linux::Swap::open_device(&device, recording)?;
         if recording {
             use std::io::Read;
             let guid: u64 = args[2]

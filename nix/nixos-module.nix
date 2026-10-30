@@ -12,7 +12,9 @@ let
       diagnostics.continuous = cfg.settings.diagnostics.continuous;
       zfs.import_policy = cfg.settings.zfs.importPolicy;
       nixos.generation_limit = cfg.settings.nixos.generationLimit;
-      resume.swap_partuuid = cfg.settings.resume.swapPartuuid;
+      resume = cfg.settings.resume.policy // lib.optionalAttrs (cfg.settings.resume.swapPartuuid != null) {
+        swap_partuuid = cfg.settings.resume.swapPartuuid;
+      };
       kernel_args = cfg.settings.kernelArgs;
       security = {
         mode = cfg.settings.security.mode;
@@ -53,6 +55,8 @@ in {
       [ [ "hardwareManifest" ] [ "image" "hardwareManifest" ] ]
     ];
   options.programs.zbm-rs = {
+    settings.resume.policy = lib.mkOption { type = lib.types.attrs; default = config.boot.loader.zbm-rs.hibernation.resumeConfig;
+      description = "Non-secret native resume policy; defaults to the target hibernation configuration."; };
     settings.resume.swapPartuuid = lib.mkOption { type = lib.types.nullOr lib.types.str; default = null; description = "Experimental native hibernation guard for a dedicated unencrypted swap partition; must match boot.loader.zbm-rs.hibernation.swapPartuuid."; };
     settings.boot.mode = lib.mkOption { type = lib.types.enum [ "menu" "countdown" "immediate" ]; default = "menu"; };
     settings.boot.timeout = lib.mkOption { type = lib.types.ints.between 1 300; default = 5; };
@@ -83,8 +87,10 @@ in {
   config = lib.mkIf cfg.enable {
     assertions = [{
       assertion = !config.boot.loader.zbm-rs.hibernation.enable
-        || cfg.settings.resume.swapPartuuid == config.boot.loader.zbm-rs.hibernation.swapPartuuid;
-      message = "The loader image and target hibernation integration must use the same explicit swap PARTUUID.";
+        || (cfg.settings.resume.policy // lib.optionalAttrs (cfg.settings.resume.swapPartuuid != null) {
+          swap_partuuid = cfg.settings.resume.swapPartuuid;
+        }) == config.boot.loader.zbm-rs.hibernation.resumeConfig;
+      message = "The loader image and target hibernation integration must use the same complete resume policy.";
     }];
     system.build.zbm-rs-efi = image;
     environment.systemPackages = [ image.passthru.binary ];

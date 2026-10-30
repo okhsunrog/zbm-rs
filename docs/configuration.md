@@ -56,6 +56,9 @@ compares actual derivation paths for changed image settings and compiled policy.
 | `diagnostics.esp_partuuid` | `null` | opt-in GPT partition UUID for failure-only FAT reports; compiled into the image as well as validated JSON |
 | `zfs.import_policy` | `host-id` | host-id or read-only; automatic startup import, never force |
 | `nixos.generation_limit` | `20` | 1..512; maximum generations per root or snapshot |
+| `resume.device` | `null` | explicit plain GPT partition or LUKS2 identity; experimental, security off and ESP logging disabled |
+| `resume.credential` | `null` | required for LUKS2; only `zfs-unlock` with a pinned decimal pool GUID and encryption root |
+| `resume.swap_partuuid` | `null` | legacy dedicated plain swap; mutually exclusive with `resume.device` |
 | `kernel_args` | `[]` | <=64 strings, <=4096 bytes each, no NUL; additional target arguments |
 | `security.mode` | `off` | off/enforce; compiled image mode must agree at runtime |
 | `security.require_firmware_secure_boot` | `false` | enforced mode only; enabled firmware must be positively observed |

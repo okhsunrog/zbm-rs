@@ -1,4 +1,5 @@
 //! Image-owned JSON, read once per process. No config writer or reload service.
+mod build_policy;
 mod schema;
 pub use schema::*;
 
@@ -110,6 +111,37 @@ mod tests {
         );
         value.as_object_mut().unwrap().remove("security");
         value["resume"]["swap_partuuid"] = "../../sda".into();
+        assert!(parse(&value.to_string()).is_err());
+    }
+
+    #[test]
+    fn encrypted_resume_requires_a_supported_explicit_credential() {
+        let mut value = serde_json::json!({"resume": {
+            "device": {"type":"luks2", "partuuid":"12345678-1234-1234-1234-123456789abc", "luks_uuid":"ca55a30a-636e-4e69-9e68-bb36bf380408", "mapping":"resume-swap"},
+            "credential":{"type":"zfs-unlock", "pool_guid":"18446744073709551615", "encryption_root":"tank/root"}
+        }});
+        assert!(parse(&value.to_string()).is_ok());
+        value["resume"]["credential"]["type"] = "zfs-keyfile".into();
+        assert!(
+            parse(&value.to_string())
+                .unwrap_err()
+                .to_string()
+                .contains("unknown variant")
+        );
+        value["resume"]["credential"]["type"] = "zfs-unlock".into();
+        value["resume"]["credential"]["pool_guid"] = "0".into();
+        assert!(parse(&value.to_string()).is_err());
+        value["resume"]["credential"]["pool_guid"] = "42".into();
+        value["resume"]["swap_partuuid"] = "12345678-1234-1234-1234-123456789abc".into();
+        assert!(parse(&value.to_string()).is_err());
+        value["resume"]
+            .as_object_mut()
+            .unwrap()
+            .remove("swap_partuuid");
+        value["resume"]
+            .as_object_mut()
+            .unwrap()
+            .remove("credential");
         assert!(parse(&value.to_string()).is_err());
     }
 

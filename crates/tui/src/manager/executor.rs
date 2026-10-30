@@ -108,6 +108,7 @@ impl LoadedKernel {
         }
         crate::resume::check_handoff(self.resume_id.as_deref())
             .map_err(|e| io::Error::other(e.to_string()))?;
+        crate::resume::release_mapping().map_err(|e| io::Error::other(e.to_string()))?;
         unsafe {
             libc::sync();
         }

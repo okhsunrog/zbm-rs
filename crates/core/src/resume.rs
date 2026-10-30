@@ -1,14 +1,21 @@
 //! Boot-manager policy, not a parser or validator of Linux hibernation images.
 use crate::boot::BootTarget;
 use serde::{Deserialize, Serialize};
+mod config;
 pub mod device;
+pub use config::{Config, CredentialSource};
 pub mod linux;
+pub mod mapping;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Status {
     #[default]
     Inactive,
+    Locked {
+        pool_guid: u64,
+        encryption_root: String,
+    },
     Pending {
         session: Box<Session>,
     },
@@ -45,6 +52,15 @@ impl Session {
 }
 
 impl Status {
+    pub fn unlock_target(&self) -> Option<(u64, &str)> {
+        match self {
+            Self::Locked {
+                pool_guid,
+                encryption_root,
+            } => Some((*pool_guid, encryption_root)),
+            _ => None,
+        }
+    }
     pub fn session_id(&self) -> Option<&str> {
         match self {
             Self::Pending { session } => Some(&session.id),
@@ -66,6 +82,12 @@ impl Status {
     }
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
+            Self::Locked {
+                pool_guid,
+                encryption_root,
+            } if *pool_guid == 0 || zfskit::names::DatasetName::parse(encryption_root).is_err() => {
+                Err("Invalid resume unlock identity")
+            }
             Self::Pending { session }
                 if session.id.is_empty()
                     || session.id.len() > 128
