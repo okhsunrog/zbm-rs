@@ -1,6 +1,7 @@
 //! Boot-manager policy, not a parser or validator of Linux hibernation images.
 use crate::boot::BootTarget;
 use serde::{Deserialize, Serialize};
+pub mod device;
 pub mod linux;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

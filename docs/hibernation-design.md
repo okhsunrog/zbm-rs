@@ -53,6 +53,23 @@ partition with 4096-byte kernel pages and the native Linux S1SUSPEND format.
 LUKS, zvols, swapfiles, other page sizes and alternate image formats are unsupported.
 The image configuration selects only an explicit `resume.swap_partuuid`.
 
+The preparatory `resume::device::Device` API can inspect an already unlocked
+LUKS2 mapping. It pins the outer PARTUUID, the LUKS UUID and mapping name, checks
+the actual backing partition and requires a single dm-crypt target. It does not
+unlock containers or provide an encrypted resume boot flow. The loader config
+and NixOS integration remain plain-partition-only until credential acquisition,
+pre-import mapping lifecycle and target-initramfs handoff are implemented and
+tested together. A missing, suspended or mismatched mapping is an error, never
+an empty session. No key material is read from `dmsetup table`.
+
+`nix build .#checks.x86_64-linux.luks2-resume-device` exercises this API with real
+GPT/LUKS2 devices inside a disposable VM. The fixture uses synthetic kernel
+signatures to test detection and cancellation; it does not claim to restore
+hibernated RAM. It covers closed containers, a wrong key, duplicate LUKS UUIDs
+on different partitions, foreign/forged and mixed-target mappings, read-only
+mappings, suspension, active swap, changed boot artifacts, expired cancellation
+consent and malformed headers.
+
 Linux reserves the first 1024 bytes of swap for bootbits and preserves them when
 marking a hibernation image. Before swapon/hibernation, zbm-rs writes a versioned,
 size-bounded compressed boot record there: a nonce, pool/target identity, hashes
@@ -74,6 +91,32 @@ Power off remains available. A subsequent boot inspects the on-disk signature
 again; ambiguous/partial headers remain blocked. Successful cancellation removes
 the marker only after flush and verification. The marker itself never authorizes
 resume or replaces image invalidation.
+
+## Encrypted-swap integration contract (not yet implemented)
+
+Reuse of a dataset-unlock credential is a suitable explicit policy for LUKS2
+swap; it is not a requirement for every supported layout. The credential means
+the passphrase or key-file bytes, not either filesystem's internal data key.
+Independent ZFS and LUKS volume keys remain independent. Passphrase and key-file
+handling must preserve each backend's byte semantics, including newline handling.
+Unlocking ZFS is not proof that those same bytes can unlock LUKS.
+
+Acquire the swap credential through the existing broker-owned unlock flow,
+without requiring the target root to be mounted just to read a key file. A closed
+container remains an unknown/protected session until unlocking and inspection
+succeed. Wrong or unavailable credentials must not turn into a cold boot with
+writable pools. A failed check preserves the image and power-off remains available.
+
+If the loader needs ZFS metadata or boot files before handoff, every relevant
+import must be read-only at pool level from its first import. `-N` or a read-only
+dataset mount alone is insufficient. Key loading and inspection must not upgrade
+that policy. Unmount and export all loader-owned pools before handoff. The target
+initramfs retains the stricter existing gate: unlock the configured swap and
+attempt resume before any ZFS pool import or persistent filesystem mount.
+
+Credential reuse does not prove that a pool was unchanged during hibernation and
+does not authenticate the saved RAM image for kernel Lockdown. It removes an
+unnecessary root/key-file dependency; it does not replace either safety boundary.
 
 ## NixOS integration
 

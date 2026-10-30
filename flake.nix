@@ -44,6 +44,7 @@
         zbm-rs-efi-test-host-only-scsi = mkImage { testProfile = true; profile = "host-only"; hardwareManifest = ./nix/scsi-hardware-example.json; };
       };
       checks.${system} = {
+        luks2-resume-device = import ./nix/check-luks2-resume.nix { inherit self pkgs; };
         prune-nixos = import ./nix/check-prune-nixos.nix { inherit pkgs; };
         resume-config = import ./nix/check-resume-config.nix { inherit self nixpkgs pkgs system; };
         efi-install = import ./nix/check-efi-install.nix { inherit pkgs; };

@@ -1,4 +1,4 @@
-//! Native Linux swap header handling. Only dedicated 4 KiB-page swap partitions.
+//! Native Linux swap header handling on verified dedicated 4 KiB-page devices.
 //! The first 1024 bytes are Linux swap bootbits; existing nonzero bootbits are
 //! never overwritten unless they carry our versioned record signature.
 //! This records boot identity, NOT a ZFS consistency seal or an image signature.
@@ -7,12 +7,9 @@ use crate::boot::BootPlan;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{self, Read},
-    os::{
-        fd::AsRawFd,
-        unix::fs::{FileExt, FileTypeExt, OpenOptionsExt},
-    },
+    os::{fd::AsRawFd, unix::fs::FileExt},
     path::Path,
 };
 
@@ -80,21 +77,19 @@ pub struct Swap {
 }
 impl Swap {
     pub fn open(partuuid: &str, write: bool) -> io::Result<Self> {
-        if !valid_partuuid(partuuid) {
-            return Err(error("Invalid swap PARTUUID"));
-        }
+        Self::open_device(
+            &super::device::Device::Partition {
+                partuuid: partuuid.into(),
+            },
+            write,
+        )
+    }
+
+    pub fn open_device(device: &super::device::Device, write: bool) -> io::Result<Self> {
         if unsafe { libc::sysconf(libc::_SC_PAGESIZE) } != PAGE as libc::c_long {
             return Err(error("Resume currently requires 4096-byte kernel pages"));
         }
-        let path = fs::canonicalize(format!("/dev/disk/by-partuuid/{partuuid}"))?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(write)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | if write { libc::O_EXCL } else { 0 })
-            .open(path)?;
-        if !file.metadata()?.file_type().is_block_device() {
-            return Err(error("Resume device is not a block device"));
-        }
+        let file = device.open(write)?;
         // O_EXCL prevents cancellation of kernel-active swap; flock serializes
         // cooperating zbm-rs processes. Neither replaces durability barriers.
         if unsafe {
@@ -340,6 +335,7 @@ fn status(h: &[u8; PAGE]) -> io::Result<Status> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     struct Fixture {
