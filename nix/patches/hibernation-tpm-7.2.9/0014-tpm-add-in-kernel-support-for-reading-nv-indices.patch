@@ -1,0 +1,232 @@
+From: Matthew Garrett <matthewg@nvidia.com>
+Date: Thu,  8 Oct 2026 06:20:23 -0700
+Subject: [PATCH] tpm: Add in-kernel support for reading NV indices
+
+Add tpm_nv_read(), which reads a range of a TPM 2.0 NV index using
+TPM2_NV_Read. The caller supplies the authorization handle, which may
+be the index itself or a hierarchy depending on the index's
+attributes, and which must have an empty auth value.
+
+Reads are split into chunks no larger than the TPM's reported
+TPM2_PT_NV_BUFFER_MAX, falling back to the 512 byte minimum required
+by the PC Client profile if it cannot be queried. When HMAC sessions
+are enabled the reads are integrity protected and the responses
+encrypted. If an audit session is already active it is used, so the
+reads appear in its log. TPM errors such as a missing index leave the
+session intact.
+
+Signed-off-by: Matthew Garrett <matthewg@nvidia.com>
+
+Upstream: https://lore.kernel.org/all/20261008132532.1155166-8-matthewg@nvidia.com/
+Backport: Linux 7.2.9; TPM header contexts adapted where needed.
+
+---
+ drivers/char/tpm/tpm-interface.c |  36 +++++++++++++
+ drivers/char/tpm/tpm.h           |   2 +
+ drivers/char/tpm/tpm2-cmd.c      | 106 +++++++++++++++++++++++++++++++++++++++
+ include/linux/tpm.h              |   8 +++
+ 4 files changed, 152 insertions(+)
+
+diff --git a/drivers/char/tpm/tpm-interface.c b/drivers/char/tpm/tpm-interface.c
+index f745a098908b3718c098b6cee48498bd10233677..1d1adf2f6ae843848919b798e6e5190d1d917926 100644
+--- a/drivers/char/tpm/tpm-interface.c
++++ b/drivers/char/tpm/tpm-interface.c
+@@ -358,6 +358,42 @@ int tpm_pcr_read(struct tpm_chip *chip, u32 pcr_idx,
+ }
+ EXPORT_SYMBOL_GPL(tpm_pcr_read);
+ 
++/**
++ * tpm_nv_read - read data from a TPM 2.0 NV index
++ * @chip:	a &struct tpm_chip instance
++ * @nv_index:	the NV index to read
++ * @auth_handle: the handle authorizing the read: @nv_index itself, or
++ *		the owner or platform hierarchy, depending on the index's
++ *		attributes.  Its auth value must be empty.
++ * @offset:	offset within the NV index to start reading at
++ * @data:	buffer to receive the data
++ * @len:	number of bytes to read
++ *
++ * Return: same as with tpm_transmit_cmd()
++ */
++int tpm_nv_read(struct tpm_chip *chip, u32 nv_index, u32 auth_handle,
++		u16 offset, u8 *data, u16 len)
++{
++	int rc;
++
++	if (!chip)
++		return -ENODEV;
++
++	rc = tpm_try_get_ops(chip);
++	if (rc)
++		return rc;
++
++	if (chip->flags & TPM_CHIP_FLAG_TPM2)
++		rc = tpm2_nv_read(chip, nv_index, auth_handle, offset, data,
++				  len);
++	else
++		rc = -EOPNOTSUPP;
++
++	tpm_put_ops(chip);
++	return rc;
++}
++EXPORT_SYMBOL_GPL(tpm_nv_read);
++
+ /**
+  * tpm_pcr_extend - extend a PCR value in SHA1 bank.
+  * @chip:	a &struct tpm_chip instance, %NULL for the default chip
+diff --git a/drivers/char/tpm/tpm.h b/drivers/char/tpm/tpm.h
+index a4ba77644647d4beefef1120e11af1c6c485b310..a7db324007d6d5a57c2fb8bcbb558d21658347c4 100644
+--- a/drivers/char/tpm/tpm.h
++++ b/drivers/char/tpm/tpm.h
+@@ -122,6 +122,8 @@ int tpm2_pcr_read(struct tpm_chip *chip, u32 pcr_idx,
+ int tpm2_pcr_extend(struct tpm_chip *chip, u32 pcr_idx,
+ 		    struct tpm_digest *digests);
+ int tpm2_get_random(struct tpm_chip *chip, u8 *dest, size_t max);
++int tpm2_nv_read(struct tpm_chip *chip, u32 nv_index, u32 auth_handle,
++		 u16 offset, u8 *data, u16 len);
+ ssize_t tpm2_get_tpm_pt(struct tpm_chip *chip, u32 property_id,
+ 			u32 *value, const char *desc);
+ 
+diff --git a/drivers/char/tpm/tpm2-cmd.c b/drivers/char/tpm/tpm2-cmd.c
+index 90eaf628bbc7a9da5760266f433c28b03ff1d118..1bbe597c660c12249616e85f7bf81d91352a5dec 100644
+--- a/drivers/char/tpm/tpm2-cmd.c
++++ b/drivers/char/tpm/tpm2-cmd.c
+@@ -321,6 +321,112 @@ int tpm2_get_random(struct tpm_chip *chip, u8 *dest, size_t max)
+ 	return total ? total : -EIO;
+ }
+ 
++/* Minimum MAX_NV_BUFFER_SIZE required by the PC Client TPM profile */
++#define TPM2_NV_BUFFER_MIN	512
++
++/**
++ * tpm2_nv_read() - read data from an NV index
++ * @chip:	TPM chip to use
++ * @nv_index:	the NV index to read
++ * @auth_handle: the handle authorizing the read, which must have an empty
++ *		auth value
++ * @offset:	offset within the NV index to start reading at
++ * @data:	buffer to receive the data
++ * @len:	number of bytes to read
++ *
++ * Reads are split into chunks no larger than the TPM's NV buffer.  When
++ * HMAC sessions are enabled the read is integrity protected and the
++ * response encrypted.  If an audit session is active it is used, so the
++ * reads are recorded in its log.
++ *
++ * Return: same as with tpm_transmit_cmd()
++ */
++int tpm2_nv_read(struct tpm_chip *chip, u32 nv_index, u32 auth_handle,
++		 u16 offset, u8 *data, u16 len)
++{
++	struct tpm_buf *buf __free(kfree) = NULL;
++	u32 chunk_max;
++	off_t off;
++	int rc;
++
++	if ((u32)offset + len > U16_MAX + 1)
++		return -EINVAL;
++
++	if (tpm2_get_tpm_pt(chip, TPM2_PT_NV_BUFFER_MAX, &chunk_max, NULL) ||
++	    !chunk_max)
++		chunk_max = TPM2_NV_BUFFER_MIN;
++
++	rc = tpm2_start_auth_session(chip, false);
++	/* -EBUSY means an audit session is active, which we can use */
++	if (rc && rc != -EBUSY)
++		return rc;
++
++	buf = kzalloc(TPM_BUFSIZE, GFP_KERNEL);
++	if (!buf) {
++		tpm2_end_auth_session(chip);
++		return -ENOMEM;
++	}
++
++	tpm_buf_init(buf, TPM_BUFSIZE);
++
++	while (len) {
++		u16 chunk = min_t(u32, len, chunk_max);
++		u16 size;
++
++		tpm_buf_reset(buf, TPM2_ST_SESSIONS, TPM2_CC_NV_READ);
++
++		/* these end the session on failure */
++		rc = tpm_buf_append_name(chip, buf, auth_handle, NULL);
++		if (rc)
++			return rc;
++		rc = tpm_buf_append_name(chip, buf, nv_index, NULL);
++		if (rc)
++			return rc;
++
++		tpm_buf_append_hmac_session(chip, buf, TPM2_SA_ENCRYPT |
++					    TPM2_SA_CONTINUE_SESSION, NULL, 0);
++		tpm_buf_append_u16(buf, chunk);
++		tpm_buf_append_u16(buf, offset);
++
++		rc = tpm_buf_fill_hmac_session(chip, buf);
++		if (rc)
++			return rc;
++
++		rc = tpm_transmit_cmd(chip, buf, 0, "attempting to read NV index");
++		rc = tpm_buf_check_hmac_response(chip, buf, rc);
++		if (rc) {
++			/*
++			 * A TPM error such as a missing index leaves the
++			 * session usable, so only end it on a system error.
++			 */
++			if (rc < 0)
++				tpm2_end_auth_session(chip);
++			return rc;
++		}
++
++		/* skip the parameter size */
++		off = TPM_HEADER_SIZE + sizeof(u32);
++		if (tpm_buf_length(buf) < off + sizeof(u16))
++			goto err_short;
++		size = get_unaligned_be16(&buf->data[off]);
++		off += sizeof(u16);
++		if (size != chunk || tpm_buf_length(buf) < off + size)
++			goto err_short;
++
++		memcpy(data, &buf->data[off], size);
++		data += size;
++		offset += size;
++		len -= size;
++	}
++
++	return 0;
++
++err_short:
++	/* the response passed the HMAC check, so the session is still valid */
++	dev_err(&chip->dev, "short NV read response\n");
++	return -EIO;
++}
++
+ /**
+  * tpm2_flush_context() - execute a TPM2_FlushContext command
+  * @chip:	TPM chip to use
+diff --git a/include/linux/tpm.h b/include/linux/tpm.h
+index 1d828b32847ff0bc2a8d38a3feae7434d0f642e1..d5a3320efe8b7702aee15cd2ed312f8c06ec808f 100644
+--- a/include/linux/tpm.h
++++ b/include/linux/tpm.h
+@@ -257,6 +257,8 @@ extern int tpm_pcr_read(struct tpm_chip *chip, u32 pcr_idx,
+ extern int tpm_pcr_extend(struct tpm_chip *chip, u32 pcr_idx,
+ 			  struct tpm_digest *digests);
+ extern int tpm_get_random(struct tpm_chip *chip, u8 *data, size_t max);
++extern int tpm_nv_read(struct tpm_chip *chip, u32 nv_index, u32 auth_handle,
++		       u16 offset, u8 *data, u16 len);
+ extern struct tpm_chip *tpm_default_chip(void);
+ void tpm2_flush_context(struct tpm_chip *chip, u32 handle);
+ int tpm2_find_hash_alg(unsigned int crypto_id);
+@@ -292,6 +294,12 @@ static inline int tpm_get_random(struct tpm_chip *chip, u8 *data, size_t max)
+ 	return -ENODEV;
+ }
+ 
++static inline int tpm_nv_read(struct tpm_chip *chip, u32 nv_index,
++			      u32 auth_handle, u16 offset, u8 *data, u16 len)
++{
++	return -ENODEV;
++}
++
+ static inline struct tpm_chip *tpm_default_chip(void)
+ {
+ 	return NULL;

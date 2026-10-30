@@ -1,0 +1,180 @@
+From: Matthew Garrett <matthewg@nvidia.com>
+Date: Thu,  8 Oct 2026 06:20:28 -0700
+Subject: [PATCH] tpm: Add signing with the kernel signing key
+
+Add tpm2_kernel_key_sign(), which signs a SHA-256 digest with a key
+created by tpm2_kernel_key_create() using TPM2_Sign, and
+tpm2_kernel_key_destroy(), which flushes the key and erases its auth
+value.
+
+Signed-off-by: Matthew Garrett <matthewg@nvidia.com>
+
+Upstream: https://lore.kernel.org/all/20261008132532.1155166-13-matthewg@nvidia.com/
+Backport: Linux 7.2.9; TPM header contexts adapted where needed.
+
+---
+ drivers/char/tpm/tpm2-kernel-key.c | 98 ++++++++++++++++++++++++++++++++++++++
+ include/linux/tpm.h                | 16 +++++++
+ include/linux/tpm_command.h        |  2 +
+ 3 files changed, 116 insertions(+)
+
+diff --git a/drivers/char/tpm/tpm2-kernel-key.c b/drivers/char/tpm/tpm2-kernel-key.c
+index 27815525bc3fca17843e4f182154d5e7573fcf8a..89c11c78097a6532ebd603b3cfeb9a223f832e16 100644
+--- a/drivers/char/tpm/tpm2-kernel-key.c
++++ b/drivers/char/tpm/tpm2-kernel-key.c
+@@ -402,3 +402,101 @@ out:
+ 	return rc;
+ }
+ EXPORT_SYMBOL_GPL(tpm2_kernel_key_create);
++
++/**
++ * tpm2_kernel_key_sign() - sign a digest with a kernel signing key
++ * @chip:	the TPM chip
++ * @key:	a key created by tpm2_kernel_key_create()
++ * @digest:	the SHA-256 digest to sign
++ * @r:		filled with the R component of the ECDSA signature
++ * @s:		filled with the S component of the ECDSA signature
++ *
++ * The key is authorized with its auth value through an HMAC session, so
++ * the auth value is never sent to the TPM in the clear.  The caller must
++ * hold the chip's ops lock.
++ *
++ * Return:
++ * * 0		- OK
++ * * -errno	- A system error
++ * * TPM_RC	- A TPM error
++ */
++int tpm2_kernel_key_sign(struct tpm_chip *chip, struct tpm2_kernel_key *key,
++			 const u8 digest[SHA256_DIGEST_SIZE],
++			 u8 r[EC_PT_SZ], u8 s[EC_PT_SZ])
++{
++	struct tpm_buf *buf __free(kfree) = NULL;
++	struct tpm2_rsp rsp;
++	int rc;
++
++	rc = tpm2_start_auth_session(chip, false);
++	if (rc && rc != -EBUSY)
++		return rc;
++
++	buf = kzalloc(TPM_BUFSIZE, GFP_KERNEL);
++	if (!buf) {
++		tpm2_end_auth_session(chip);
++		return -ENOMEM;
++	}
++
++	tpm_buf_init(buf, TPM_BUFSIZE);
++	tpm_buf_reset(buf, TPM2_ST_SESSIONS, TPM2_CC_SIGN);
++
++	rc = tpm_buf_append_name(chip, buf, key->handle, NULL);
++	if (rc)
++		return rc;
++
++	tpm_buf_append_hmac_session(chip, buf, TPM2_SA_CONTINUE_SESSION,
++				    key->auth, sizeof(key->auth));
++
++	/* digest */
++	tpm_buf_append_u16(buf, SHA256_DIGEST_SIZE);
++	tpm_buf_append(buf, digest, SHA256_DIGEST_SIZE);
++	/* inScheme: use the key's scheme */
++	tpm_buf_append_u16(buf, TPM_ALG_NULL);
++	/* validation: a NULL ticket, as the key is not restricted */
++	tpm_buf_append_u16(buf, TPM2_ST_HASHCHECK);
++	tpm_buf_append_u32(buf, TPM2_RH_NULL);
++	tpm_buf_append_u16(buf, 0);
++
++	rc = tpm_buf_fill_hmac_session(chip, buf);
++	if (rc)
++		return rc;
++
++	rc = tpm_transmit_cmd(chip, buf, 0, "signing with kernel key");
++	rc = tpm_buf_check_hmac_response(chip, buf, rc);
++	if (rc) {
++		if (rc < 0)
++			tpm2_end_auth_session(chip);
++		return rc;
++	}
++
++	tpm2_rsp_init(&rsp, buf);
++	/* parameterSize */
++	tpm2_rsp_u32(&rsp);
++	if (tpm2_rsp_u16(&rsp) != TPM_ALG_ECDSA ||
++	    tpm2_rsp_u16(&rsp) != TPM_ALG_SHA256)
++		return -EIO;
++	tpm2_rsp_ecc_param(&rsp, r);
++	tpm2_rsp_ecc_param(&rsp, s);
++
++	return rsp.err ? -EIO : 0;
++}
++EXPORT_SYMBOL_GPL(tpm2_kernel_key_sign);
++
++/**
++ * tpm2_kernel_key_destroy() - unload a kernel signing key
++ * @chip:	the TPM chip
++ * @key:	a key created by tpm2_kernel_key_create()
++ *
++ * Flushes the key from the TPM and erases its auth value.  The caller must
++ * hold the chip's ops lock.
++ */
++void tpm2_kernel_key_destroy(struct tpm_chip *chip,
++			     struct tpm2_kernel_key *key)
++{
++	if (key->handle)
++		tpm2_flush_context(chip, key->handle);
++
++	memzero_explicit(key, sizeof(*key));
++}
++EXPORT_SYMBOL_GPL(tpm2_kernel_key_destroy);
+diff --git a/include/linux/tpm.h b/include/linux/tpm.h
+index 7ee553688906a447b94864377c74450fa79edef9..505ea6f4bb46b11466655f64f85ca8eea822a9fa 100644
+--- a/include/linux/tpm.h
++++ b/include/linux/tpm.h
+@@ -388,6 +388,11 @@ struct tpm2_key_provenance {
+ #ifdef CONFIG_TCG_TPM2_KERNEL_KEY
+ int tpm2_kernel_key_create(struct tpm_chip *chip, struct tpm2_kernel_key *key,
+ 			   struct tpm2_key_provenance *prov);
++int tpm2_kernel_key_sign(struct tpm_chip *chip, struct tpm2_kernel_key *key,
++			 const u8 digest[SHA256_DIGEST_SIZE],
++			 u8 r[EC_PT_SZ], u8 s[EC_PT_SZ]);
++void tpm2_kernel_key_destroy(struct tpm_chip *chip,
++			     struct tpm2_kernel_key *key);
+ #else
+ static inline int tpm2_kernel_key_create(struct tpm_chip *chip,
+ 					 struct tpm2_kernel_key *key,
+@@ -395,6 +400,17 @@ static inline int tpm2_kernel_key_create(struct tpm_chip *chip,
+ {
+ 	return -EOPNOTSUPP;
+ }
++static inline int tpm2_kernel_key_sign(struct tpm_chip *chip,
++				       struct tpm2_kernel_key *key,
++				       const u8 digest[SHA256_DIGEST_SIZE],
++				       u8 r[EC_PT_SZ], u8 s[EC_PT_SZ])
++{
++	return -EOPNOTSUPP;
++}
++static inline void tpm2_kernel_key_destroy(struct tpm_chip *chip,
++					   struct tpm2_kernel_key *key)
++{
++}
+ #endif
+ 
+ #ifdef CONFIG_TCG_TPM2_HMAC
+diff --git a/include/linux/tpm_command.h b/include/linux/tpm_command.h
+index 977bfa46ab22cd47fcb59e545e2c950216d7d985..f79c1177375b14eb92f06783dbc07144d70766e9 100644
+--- a/include/linux/tpm_command.h
++++ b/include/linux/tpm_command.h
+@@ -76,6 +76,7 @@ enum tpm2_structures {
+ 	TPM2_ST_SESSIONS	= 0x8002,
+ 	TPM2_ST_ATTEST_SESSION_AUDIT = 0x8016,
+ 	TPM2_ST_CREATION	= 0x8021,
++	TPM2_ST_HASHCHECK	= 0x8024,
+ };
+ 
+ /* Indicates from what layer of the software stack the error comes from */
+@@ -123,6 +124,7 @@ enum tpm2_command_codes {
+ 	TPM2_CC_CREATE			= 0x0153,
+ 	TPM2_CC_LOAD			= 0x0157,
+ 	TPM2_CC_SEQUENCE_UPDATE		= 0x015C,
++	TPM2_CC_SIGN			= 0x015D,
+ 	TPM2_CC_UNSEAL			= 0x015E,
+ 	TPM2_CC_CONTEXT_LOAD		= 0x0161,
+ 	TPM2_CC_CONTEXT_SAVE		= 0x0162,

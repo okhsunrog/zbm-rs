@@ -1,5 +1,5 @@
 # A separate loader kernel; owner private keys are never derivation inputs.
-{ pkgs, kernelPackages, trustedCertificates }:
+{ pkgs, kernelPackages, trustedCertificates, hibernationTpmSignature ? false }:
 let
   lib = pkgs.lib;
   bundle = pkgs.runCommand "zbm-loader-trusted-certificates" {
@@ -8,7 +8,7 @@ let
     openssl x509 -in ${lib.escapeShellArg "${certificate}"} -out certificate.pem
     cat certificate.pem >> $out
   '') trustedCertificates);
-  kernel = kernelPackages.kernel.override {
+  kernel = kernelPackages.kernel.override ({
     structuredExtraConfig = lib.mapAttrs (_: value: lib.mkForce value) (with lib.kernel; {
       EFI = yes; EFI_STUB = yes; EFIVAR_FS = yes;
       KEXEC = yes; KEXEC_FILE = yes; KEXEC_SIG = yes;
@@ -35,8 +35,18 @@ let
       IMA_DEFAULT_HASH_SHA256 = yes;
       LSM = freeform "landlock,lockdown,yama,loadpin,safesetid,apparmor,ima,bpf";
       TMPFS_XATTR = yes;
+    } // lib.optionalAttrs hibernationTpmSignature {
+      TCG_TPM = yes; TCG_TPM2_HMAC = yes;
+      TCG_TPM_KERNEL_NVINDEX = yes; TCG_TPM2_KERNEL_KEY = yes;
+      KERNEL_TPM_SECURITY = yes; HIBERNATION_TPM_SIGNATURE = yes;
+      TPM_HIBERNATE_INSECURE = no;
     });
-  };
+  } // lib.optionalAttrs hibernationTpmSignature {
+    kernelPatches = (kernelPackages.kernel.kernelPatches or [])
+      ++ import ./hibernation-tpm-patches.nix;
+  });
 in
 assert lib.assertMsg (trustedCertificates != []) "Enforced loader kernel needs public trust certificates";
+assert lib.assertMsg (!hibernationTpmSignature || kernelPackages.kernel.version == "7.2.9")
+  "The experimental TPM hibernation backport is pinned to Linux 7.2.9.";
 pkgs.linuxPackagesFor kernel

@@ -1,0 +1,64 @@
+From: Matthew Garrett <matthewg@nvidia.com>
+Date: Thu,  8 Oct 2026 06:20:22 -0700
+Subject: [PATCH] tpm: Use TPM2_NV_ReadPublic to read NV index names
+
+tpm2_read_public() is used by tpm_buf_append_name() to find the name of
+a handle for HMAC session calculations. It treats NV indices as needing
+a lookup, but sends TPM2_ReadPublic, which only accepts objects, so the
+lookup fails for any NV index.
+
+Send TPM2_NV_ReadPublic for NV indices instead. Its response has the
+same layout of a public area followed by the name, so the existing
+parsing works unchanged.
+
+Signed-off-by: Matthew Garrett <matthewg@nvidia.com>
+
+Upstream: https://lore.kernel.org/all/20261008132532.1155166-7-matthewg@nvidia.com/
+Backport: Linux 7.2.9; TPM header contexts adapted where needed.
+
+---
+ drivers/char/tpm/tpm2-sessions.c | 11 +++++++++--
+ include/linux/tpm_command.h      |  1 +
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/char/tpm/tpm2-sessions.c b/drivers/char/tpm/tpm2-sessions.c
+index eb1f13aefb5a301f3212e7c37f94e1eb191cab11..395e488c1b2c96e8bfbddfa6f58f77da6e1485c5 100644
+--- a/drivers/char/tpm/tpm2-sessions.c
++++ b/drivers/char/tpm/tpm2-sessions.c
+@@ -225,15 +225,22 @@ static int tpm2_read_public(struct tpm_chip *chip, u32 handle, void *name)
+ 	if (!buf)
+ 		return -ENOMEM;
+ 
++	/*
++	 * NV indices have their own command, whose response has the same
++	 * layout: a public area followed by the name.
++	 */
+ 	tpm_buf_init(buf, TPM_BUFSIZE);
+-	tpm_buf_reset(buf, TPM2_ST_NO_SESSIONS, TPM2_CC_READ_PUBLIC);
++	if (mso == TPM2_MSO_NVRAM)
++		tpm_buf_reset(buf, TPM2_ST_NO_SESSIONS, TPM2_CC_NV_READ_PUBLIC);
++	else
++		tpm_buf_reset(buf, TPM2_ST_NO_SESSIONS, TPM2_CC_READ_PUBLIC);
+ 	tpm_buf_append_u32(buf, handle);
+ 
+ 	rc = tpm_transmit_cmd(chip, buf, 0, "TPM2_ReadPublic");
+ 	if (rc)
+ 		return tpm_ret_to_err(rc);
+ 
+-	/* Skip TPMT_PUBLIC: */
++	/* Skip TPMT_PUBLIC or TPMS_NV_PUBLIC: */
+ 	offset += tpm_buf_read_u16(buf, &offset);
+ 
+ 	/*
+diff --git a/include/linux/tpm_command.h b/include/linux/tpm_command.h
+index 640739e3eefacd65690800de5e03c0c2610dc586..a0d9ef33d540e1af80749ba4e55c91b22094f033 100644
+--- a/include/linux/tpm_command.h
++++ b/include/linux/tpm_command.h
+@@ -126,6 +126,7 @@ enum tpm2_command_codes {
+ 	TPM2_CC_CONTEXT_LOAD		= 0x0161,
+ 	TPM2_CC_CONTEXT_SAVE		= 0x0162,
+ 	TPM2_CC_FLUSH_CONTEXT		= 0x0165,
++	TPM2_CC_NV_READ_PUBLIC		= 0x0169,
+ 	TPM2_CC_READ_PUBLIC		= 0x0173,
+ 	TPM2_CC_START_AUTH_SESS		= 0x0176,
+ 	TPM2_CC_VERIFY_SIGNATURE	= 0x0177,

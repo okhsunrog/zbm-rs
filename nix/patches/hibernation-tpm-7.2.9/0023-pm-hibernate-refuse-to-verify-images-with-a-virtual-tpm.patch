@@ -1,0 +1,80 @@
+From: Matthew Garrett <matthewg@nvidia.com>
+Date: Thu,  8 Oct 2026 06:20:32 -0700
+Subject: [PATCH] PM: hibernate: Refuse to verify images with a virtual TPM
+
+Images are verified with whichever TPM tpm_default_chip() returns. We
+don't ensure integrity of initramfs, so an attacker can unbind the
+hardware TPM's driver and create a virtual TPM through /dev/vtpmx in its
+place. A virtual TPM can answer verification however it likes, including
+recreating an AK of its own choosing and reporting any PCR 5 value, so
+it can be made to accept a forged image.
+
+Refuse to verify images when the TPM is virtual. Add
+CONFIG_TPM_HIBERNATE_INSECURE to allow it anyway, for testing, but never
+while the kernel is locked down.
+
+Signed-off-by: Matthew Garrett <matthewg@nvidia.com>
+
+Upstream: https://lore.kernel.org/all/20261008132532.1155166-17-matthewg@nvidia.com/
+Backport: Linux 7.2.9; TPM header contexts adapted where needed.
+
+---
+ kernel/power/Kconfig         | 12 ++++++++++++
+ kernel/power/hibernate_tpm.c | 14 ++++++++++++++
+ 2 files changed, 26 insertions(+)
+
+diff --git a/kernel/power/Kconfig b/kernel/power/Kconfig
+index b677b0f50bd1a73a31e69036d23c0dcecc5eb802..e9123b9c40627b77d16db148be7f01d624f0b739 100644
+--- a/kernel/power/Kconfig
++++ b/kernel/power/Kconfig
+@@ -134,6 +134,18 @@ config HIBERNATION_TPM_SIGNATURE
+ 
+ 	  If unsure, say N.
+ 
++config TPM_HIBERNATE_INSECURE
++	bool "Allow resume using a virtual TPM (INSECURE)"
++	depends on HIBERNATION_TPM_SIGNATURE
++	help
++	  By default, hibernation images are not restored if the TPM used
++	  to verify them is a virtual TPM, such as one provided by
++	  userspace through /dev/vtpmx, since such a TPM can be made to
++	  accept a forged image. Say Y to allow it anyway, for example for
++	  testing. This has no effect while the kernel is locked down.
++
++	  If unsure, say N.
++
+ config PM_STD_PARTITION
+ 	string "Default resume partition"
+ 	depends on HIBERNATION
+diff --git a/kernel/power/hibernate_tpm.c b/kernel/power/hibernate_tpm.c
+index 96f01c80f3cbaeb469b97ca0e72b92eb01cc976d..43f8d7324360391f25776600e8ea812f46ec3dd5 100644
+--- a/kernel/power/hibernate_tpm.c
++++ b/kernel/power/hibernate_tpm.c
+@@ -19,6 +19,7 @@
+ 
+ #include <linux/efi.h>
+ #include <linux/init.h>
++#include <linux/security.h>
+ #include <linux/tpm.h>
+ 
+ #include "power.h"
+@@ -164,6 +165,19 @@ static int hib_tpm_check_header(const void *data, size_t size)
+ 		return -ENODEV;
+ 	}
+ 
++	/*
++	 * A virtual TPM, such as one provided by userspace through
++	 * /dev/vtpmx, can answer verification with anything it likes.  Only
++	 * allow one if explicitly configured to, and never under lockdown.
++	 */
++	if ((chip->flags & TPM_CHIP_FLAG_VIRTUAL) &&
++	    (!IS_ENABLED(CONFIG_TPM_HIBERNATE_INSECURE) ||
++	     security_locked_down(LOCKDOWN_HIBERNATION))) {
++		hib_tpm_put_chip(chip);
++		pr_err("Cannot verify image: TPM is virtual\n");
++		return -EKEYREJECTED;
++	}
++
+ 	rc = tpm2_kernel_key_verify(chip, prov, hib_tpm_x, hib_tpm_y);
+ 	hib_tpm_put_chip(chip);
+ 	if (rc) {

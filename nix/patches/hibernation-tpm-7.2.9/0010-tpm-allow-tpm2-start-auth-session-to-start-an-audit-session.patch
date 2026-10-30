@@ -1,0 +1,203 @@
+From: Matthew Garrett <matthewg@nvidia.com>
+Date: Thu,  8 Oct 2026 06:20:19 -0700
+Subject: [PATCH] tpm: Allow tpm2_start_auth_session() to start an audit session
+
+Add an audit argument to tpm2_start_auth_session(). When set, the
+session is flagged so that tpm_buf_append_hmac_session() sets
+TPM2_SA_AUDIT (TPMA_SESSION_AUDIT) on every command using it, causing
+the TPM to extend the session audit digest with each command and
+response.
+
+Since only a single session is held per chip, return -EBUSY if a
+session is already active with a different audit setting rather than
+silently reusing it.
+
+Signed-off-by: Matthew Garrett <matthewg@nvidia.com>
+
+Upstream: https://lore.kernel.org/all/20261008132532.1155166-4-matthewg@nvidia.com/
+Backport: Linux 7.2.9; TPM header contexts adapted where needed.
+
+---
+ drivers/char/tpm/tpm2-cmd.c               |  4 ++--
+ drivers/char/tpm/tpm2-sessions.c          | 30 ++++++++++++++++++++++++------
+ include/linux/tpm.h                       |  5 +++--
+ security/keys/trusted-keys/trusted_tpm2.c |  6 +++---
+ 4 files changed, 32 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/char/tpm/tpm2-cmd.c b/drivers/char/tpm/tpm2-cmd.c
+index 48cec39995fe22d9c57e1a58f73c76c058446033..90eaf628bbc7a9da5760266f433c28b03ff1d118 100644
+--- a/drivers/char/tpm/tpm2-cmd.c
++++ b/drivers/char/tpm/tpm2-cmd.c
+@@ -178,7 +178,7 @@ int tpm2_pcr_extend(struct tpm_chip *chip, u32 pcr_idx,
+ 	int i;
+ 
+ 	if (!disable_pcr_integrity) {
+-		rc = tpm2_start_auth_session(chip);
++		rc = tpm2_start_auth_session(chip, false);
+ 		if (rc)
+ 			return rc;
+ 	}
+@@ -254,7 +254,7 @@ int tpm2_get_random(struct tpm_chip *chip, u8 *dest, size_t max)
+ 	if (!num_bytes || max > TPM_MAX_RNG_DATA)
+ 		return -EINVAL;
+ 
+-	err = tpm2_start_auth_session(chip);
++	err = tpm2_start_auth_session(chip, false);
+ 	if (err)
+ 		return err;
+ 
+diff --git a/drivers/char/tpm/tpm2-sessions.c b/drivers/char/tpm/tpm2-sessions.c
+index cf8f1fd6790ba6765c2c8406623e0177c0bcb75a..44f4541335be9686714792babaae7c4e09e64964 100644
+--- a/drivers/char/tpm/tpm2-sessions.c
++++ b/drivers/char/tpm/tpm2-sessions.c
+@@ -129,6 +129,8 @@ struct tpm2_auth {
+ 	struct aes_enckey aes_key;
+ 	/* saved session attributes: */
+ 	u8 attrs;
++	/* set TPM2_SA_AUDIT on every command using this session */
++	bool audit;
+ 	__be32 ordinal;
+ 
+ 	/*
+@@ -376,6 +378,10 @@ void tpm_buf_append_hmac_session(struct tpm_chip *chip, struct tpm_buf *buf,
+ 	/* The first write to /dev/tpm{rm0} will flush the session. */
+ 	attributes |= TPM2_SA_CONTINUE_SESSION;
+ 
++	auth = chip->auth;
++	if (auth->audit)
++		attributes |= TPM2_SA_AUDIT;
++
+ 	/*
+ 	 * The Architecture Guide requires us to strip trailing zeros
+ 	 * before computing the HMAC
+@@ -383,7 +389,6 @@ void tpm_buf_append_hmac_session(struct tpm_chip *chip, struct tpm_buf *buf,
+ 	while (passphrase && passphrase_len > 0 && passphrase[passphrase_len - 1] == '\0')
+ 		passphrase_len--;
+ 
+-	auth = chip->auth;
+ 	auth->attrs = attributes;
+ 	auth->passphrase_len = passphrase_len;
+ 	if (passphrase_len)
+@@ -777,6 +782,7 @@ int tpm_buf_check_hmac_response(struct tpm_chip *chip, struct tpm_buf *buf,
+ 	off_t offset_s, offset_p;
+ 	u8 rphash[SHA256_DIGEST_SIZE];
+ 	u32 attrs, cc;
++	u8 rsp_attrs;
+ 	struct sha256_ctx sctx;
+ 	struct hmac_sha256_ctx hctx;
+ 	u16 tag = be16_to_cpu(head->tag);
+@@ -828,7 +834,7 @@ int tpm_buf_check_hmac_response(struct tpm_chip *chip, struct tpm_buf *buf,
+ 		goto out;
+ 	memcpy(auth->tpm_nonce, &buf->data[offset_s], len);
+ 	offset_s += len;
+-	attrs = tpm_buf_read_u8(buf, &offset_s);
++	rsp_attrs = tpm_buf_read_u8(buf, &offset_s);
+ 	len = tpm_buf_read_u16(buf, &offset_s);
+ 	if (offset_s + len != tpm_buf_length(buf))
+ 		goto out;
+@@ -854,7 +860,12 @@ int tpm_buf_check_hmac_response(struct tpm_chip *chip, struct tpm_buf *buf,
+ 	hmac_sha256_update(&hctx, rphash, sizeof(rphash));
+ 	hmac_sha256_update(&hctx, auth->tpm_nonce, sizeof(auth->tpm_nonce));
+ 	hmac_sha256_update(&hctx, auth->our_nonce, sizeof(auth->our_nonce));
+-	hmac_sha256_update(&hctx, &auth->attrs, 1);
++	/*
++	 * The response HMAC covers the response's session attributes, which
++	 * can differ from the command's - the TPM sets auditExclusive in the
++	 * response to an exclusive audit session.
++	 */
++	hmac_sha256_update(&hctx, &rsp_attrs, 1);
+ 	/* we're done with the rphash, so put our idea of the hmac there */
+ 	hmac_sha256_final(&hctx, rphash);
+ 	if (crypto_memneq(rphash, &buf->data[offset_s], SHA256_DIGEST_SIZE)) {
+@@ -987,13 +998,17 @@ err:
+ /**
+  * tpm2_start_auth_session() - Create an a HMAC authentication session
+  * @chip:	A TPM chip
++ * @audit:	Set TPM2_SA_AUDIT on every command using the session
+  *
+  * Loads the ephemeral key (null seed), and starts an HMAC authenticated
+- * session. The null seed is flushed before the return.
++ * session. The null seed is flushed before the return. If @audit is
++ * true, the session is used as an audit session and the TPM will
++ * extend the session digest with each command and response.
+  *
+- * Returns zero on success, or a POSIX error code.
++ * Returns zero on success, -EBUSY if a session with a different audit
++ * setting is already active, or a POSIX error code.
+  */
+-int tpm2_start_auth_session(struct tpm_chip *chip)
++int tpm2_start_auth_session(struct tpm_chip *chip, bool audit)
+ {
+ 	struct tpm_buf *buf __free(kfree) = NULL;
+ 	struct tpm2_auth *auth;
+@@ -1001,6 +1016,8 @@ int tpm2_start_auth_session(struct tpm_chip *chip)
+ 	int rc;
+ 
+ 	if (chip->auth) {
++		if (chip->auth->audit != audit)
++			return -EBUSY;
+ 		dev_dbg_once(&chip->dev, "auth session is active\n");
+ 		return 0;
+ 	}
+@@ -1008,6 +1025,7 @@ int tpm2_start_auth_session(struct tpm_chip *chip)
+ 	auth = kzalloc_obj(*auth);
+ 	if (!auth)
+ 		return -ENOMEM;
++	auth->audit = audit;
+ 
+ 	rc = tpm2_load_null(chip, &null_key);
+ 	if (rc) {
+diff --git a/include/linux/tpm.h b/include/linux/tpm.h
+index b6b862c3be3b2135981df41bdf14f2f49ded24c9..341fd5b46b2da856110ab2f9ab2a79b5c441a13c 100644
+--- a/include/linux/tpm.h
++++ b/include/linux/tpm.h
+@@ -321,7 +321,7 @@ void tpm_buf_append_auth(struct tpm_chip *chip, struct tpm_buf *buf,
+ 
+ #ifdef CONFIG_TCG_TPM2_HMAC
+ 
+-int tpm2_start_auth_session(struct tpm_chip *chip);
++int tpm2_start_auth_session(struct tpm_chip *chip, bool audit);
+ int tpm_buf_fill_hmac_session(struct tpm_chip *chip, struct tpm_buf *buf);
+ int tpm_buf_check_hmac_response(struct tpm_chip *chip, struct tpm_buf *buf,
+ 				int rc);
+@@ -329,7 +329,8 @@ void tpm2_end_auth_session(struct tpm_chip *chip);
+ #else
+ #include <linux/unaligned.h>
+ 
+-static inline int tpm2_start_auth_session(struct tpm_chip *chip)
++static inline int tpm2_start_auth_session(struct tpm_chip *chip,
++					  bool audit)
+ {
+ 	return 0;
+ }
+diff --git a/security/keys/trusted-keys/trusted_tpm2.c b/security/keys/trusted-keys/trusted_tpm2.c
+index 01f18bb370477e6aba2ea298754fbd5a5168a049..8a15bf542a9ea1b24f16844192f340c885cb38e3 100644
+--- a/security/keys/trusted-keys/trusted_tpm2.c
++++ b/security/keys/trusted-keys/trusted_tpm2.c
+@@ -252,7 +252,7 @@ int tpm2_seal_trusted(struct tpm_chip *chip,
+ 	if (rc)
+ 		return rc;
+ 
+-	rc = tpm2_start_auth_session(chip);
++	rc = tpm2_start_auth_session(chip, false);
+ 	if (rc)
+ 		goto out_put;
+ 
+@@ -428,7 +428,7 @@ static int tpm2_load_cmd(struct tpm_chip *chip,
+ 	if (blob_len > payload->blob_len)
+ 		return -E2BIG;
+ 
+-	rc = tpm2_start_auth_session(chip);
++	rc = tpm2_start_auth_session(chip, false);
+ 	if (rc)
+ 		return rc;
+ 
+@@ -492,7 +492,7 @@ static int tpm2_unseal_cmd(struct tpm_chip *chip,
+ 	u8 *data;
+ 	int rc;
+ 
+-	rc = tpm2_start_auth_session(chip);
++	rc = tpm2_start_auth_session(chip, false);
+ 	if (rc)
+ 		return rc;
+ 

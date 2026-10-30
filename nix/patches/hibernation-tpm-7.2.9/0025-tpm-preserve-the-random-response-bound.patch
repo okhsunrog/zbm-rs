@@ -1,0 +1,21 @@
+Subject: [PATCH] tpm: Preserve the random response bound on Linux 7.2.9
+
+The 7.2 private header defines TPM_MAX_RNG_DATA beside the property
+enumeration. Keep this existing 128-byte limit when the response structures
+move to a public command header, including users through linux/efi.h.
+
+---
+diff --git a/include/linux/tpm_command.h b/include/linux/tpm_command.h
+index f79c1177375b14eb92f06783dbc07144d70766e9..6bbc6e34f3d953546ea07412471a6efe653f7531 100644
+--- a/include/linux/tpm_command.h
++++ b/include/linux/tpm_command.h
+@@ -2,6 +2,9 @@
+ #ifndef __LINUX_TPM_COMMAND_H__
+ #define __LINUX_TPM_COMMAND_H__
+ 
++/* Limit shared by the TPM 1.x and TPM 2.0 random response structures. */
++#define TPM_MAX_RNG_DATA 128
++
+ #include <crypto/sha2.h>
+ 
+ /*
