@@ -1,6 +1,10 @@
-# Linux 7.2.9: seven TPM prerequisites, the 17-patch RFC, and one port fix.
+# Linux 7.2.9: seven TPM prerequisites, the RFC, and three compatibility fixes.
 # Experimental and opt-in; see patches/hibernation-tpm-7.2.9/README.md.
-[
+# Isolate each public patch from the surrounding flake path. A loader/UI/doc
+# update must not rebuild the unchanged kernel or invalidate signed modules.
+map (entry: entry // {
+  patch = builtins.path { path = entry.patch; name = entry.name + ".patch"; };
+}) [
   { name = "0001-tpm-initial-step-to-reorganize-tpm-public-headers"; patch = ./patches/hibernation-tpm-7.2.9/0001-tpm-initial-step-to-reorganize-tpm-public-headers.patch; }
   { name = "0002-tpm-move-tpm2-specific-definitions-to-the-command-header"; patch = ./patches/hibernation-tpm-7.2.9/0002-tpm-move-tpm2-specific-definitions-to-the-command-header.patch; }
   { name = "0003-tpm-move-tpm-common-base-definitions-to-the-command-header"; patch = ./patches/hibernation-tpm-7.2.9/0003-tpm-move-tpm-common-base-definitions-to-the-command-header.patch; }
@@ -26,4 +30,6 @@
   { name = "0023-pm-hibernate-refuse-to-verify-images-with-a-virtual-tpm"; patch = ./patches/hibernation-tpm-7.2.9/0023-pm-hibernate-refuse-to-verify-images-with-a-virtual-tpm.patch; }
   { name = "0024-pm-hibernate-allow-hibernation-under-lockdown-with-signed-images"; patch = ./patches/hibernation-tpm-7.2.9/0024-pm-hibernate-allow-hibernation-under-lockdown-with-signed-images.patch; }
   { name = "0025-tpm-preserve-7.2-header-definitions"; patch = ./patches/hibernation-tpm-7.2.9/0025-tpm-preserve-7.2-header-definitions.patch; }
+  { name = "0026-efi-preserve-initrd-table-across-kexec"; patch = ./patches/hibernation-tpm-7.2.9/0026-efi-preserve-initrd-table-across-kexec.patch; }
+  { name = "0027-efi-x86-preserve-hibernation-memory-topology"; patch = ./patches/hibernation-tpm-7.2.9/0027-efi-x86-preserve-hibernation-memory-topology.patch; }
 ]

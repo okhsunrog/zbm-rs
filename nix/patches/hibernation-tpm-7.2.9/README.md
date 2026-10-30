@@ -7,10 +7,33 @@ use Sean Rhodes's userspace encrypted-snapshot series.
 
 ## Status
 
-As of 30 October 2026, compilation and VM validation of this port are still in
-progress. This checkpoint is not a working-hibernation or security acceptance
-claim. The port is not installed on the physical host. No upstream merge or
-release date is established by the RFC.
+As of 30 October 2026, the full Linux 7.2.9 kernel and matching ZFS 2.4.4 build
+with patches 0001–0027 passed. The build uses a disposable public VM certificate and retains
+forced integrity Lockdown, kexec signatures and module signatures. VM runtime
+validation remains in progress; compilation is not a working-hibernation or
+security acceptance claim. The port is not installed on the physical host. No
+upstream merge or release date is established by the RFC.
+
+The CRB/SHA-256-only and TIS/SHA-1+SHA-256 EFI/kexec probes passed: the NV index
+remained protected, PCR5 survived handoff, and target kexec loads were prohibited.
+TIS and CRB previously exposed stale EFI INITRD-table writes corrupting the
+incoming initramfs. Patch 0026 adopts the allocation fix
+[proposed upstream](https://lore.kernel.org/linux-efi/20261012133712.618913-1-sebastien@wenske.fr/)
+and passed its full kernel/ZFS rebuild and both handoff probes.
+
+With patches 0001–0026, the full RAM test saved a signed image but rejected restore
+before authentication because the firmware E820 map changed across boots. A
+two-boot diagnostic located the moving three-page ACPI reclaim range exactly
+at the EFI memory-map address in `boot_params`. The TPM/PCR5/INITRD table pool
+remained at the same address. Patch 0027 avoids publishing the unused boot-memory
+configuration table on x86: the map is already passed and reserved through
+`boot_params`. It preserves configuration-table delivery on other architectures
+and does not relax the hibernation E820 check. All 27 patches apply cleanly and
+match the audited source tree; the dedicated compilation preflight passed.
+The complete 27-patch kernel/ZFS rebuild passed. The CRB/SHA-256-only probe then
+passed both exact firmware-E820 equality across two cold boots and the real kexec
+handoff with unchanged PCR5 and protected NV state. Authenticated RAM retesting
+is in progress.
 
 The existing, unpatched 7.2.9 kernel was tested in a disposable VM: forced
 integrity Lockdown prevents hibernation and the resume guard leaves the swap
@@ -19,7 +42,6 @@ ordinary kernel; it does not validate this new TPM signature implementation.
 
 Still required for this port:
 
-- A successful kernel and matching ZFS build.
 - EFI/TPM provisioning and an actual signed RAM-image save/restore in a VM.
 - Verification across the loader's kexec transition, including EFI TPM state.
 - Rejection of tampered images and unavailable/untrusted TPM provenance before
@@ -50,10 +72,23 @@ bound and the TPM 1.2 capability types (`cap_t` and their structures/enums) afte
 the TPM2 header split. The initial adaptation had removed these still-used
 definitions. Both fixes retain the original 7.2.9 types and limits.
 
+`0026` keeps the EFI initrd configuration table in ACPI reclaim memory rather
+than reclaimable loader data. Otherwise the incoming kexec kernel can zero an
+inherited table address already reused by the new initramfs. This is a boot
+compatibility fix; it does not weaken signature enforcement or Lockdown.
+
+`0027` is the x86 boot-memory-map fix described above. Unlike the small INITRD
+table allocation, the final memory-map buffer occupied a separate, moving ACPI
+range in the failing VM. No CRC bypass, fixed-address workaround or relaxed
+memory-map option is used.
+
 The corrected series passes the dedicated TPM/EFI/power compilation preflight,
 including the EFI stub, TPM kernel-key implementation and RAM-signature backend
-(124 objects with integrity Lockdown and forced signatures enabled). Full-kernel,
-matching ZFS and runtime validation remain separate gates.
+(124 objects with integrity Lockdown and forced signatures enabled). The full
+kernel/module build and matching ZFS build passed through patch 0026; the full
+0027 build is pending. Runtime validation is a separate gate. Patch inputs are
+individually content-addressed, so changes elsewhere in the flake do not rebuild
+an unchanged protected kernel or invalidate its signed modules.
 
 ## Opt-in build
 
@@ -87,6 +122,28 @@ then reject a second image with a deliberately corrupted ECDSA signature before
 ZFS import. It uses `hibernate=nocompress` so the negative case tests the signature
 rather than a decompression checksum. The ordinary encrypted-hibernation check
 retains its default configuration and compressed image path.
+Both factories accept `tpmDeviceModel = "tpm-tis"` or `"tpm-crb"`. The small
+EFI/kexec probe defaults to TIS; the full RAM-restore fixture defaults to CRB,
+matching the Framework's current TPM interface. Each interface needs its own
+runtime result; selecting it does not establish acceptance.
+`tpmBanks` selects `[ "sha1" "sha256" ]` by default or `[ "sha256" ]`, matching
+the Framework's read-only observed allocation. Provisioning explicitly disables
+other swtpm banks, because PCR_Allocate preserves banks omitted from the request;
+the tests assert the actual kernel-exposed allocation, not just the requested
+setting. Allocation was checked across a disposable TPM power cycle.
+
+The RAM fixture also accepts `negativeCase = "signature"` (default),
+`"tpm-reset"`, or `"tpm-unavailable"`. The reset case clears only the disposable
+guest TPM. The unavailable case uses a fixture-only appended cpio flag to unbind
+the guest TPM driver before resume; after rejection it restores the exact
+original initramfs and retries the still-intact image. This deliberately tests
+kernel mechanics without IMA, and is not an authorized enforced-loader handoff.
+Consumed-image failures must remain protected across the following power cycle
+through the boot-record v2 attempt flag. These new negative variants have not
+yet passed runtime acceptance.
+`negativeCase = "cold-unavailable"` separately checks a verified empty swap:
+repair cold-boot and paging must work with no TPM, while hibernation remains
+unavailable and integrity Lockdown remains active.
 
 ## Security assumptions
 

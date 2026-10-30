@@ -1,32 +1,41 @@
 # EFI/PCR5 inheritance and NV protection with forced integrity Lockdown.
 # Inputs are public, signed artifacts; keys never enter the derivation or VM.
 # This probe is not full RAM restore or firmware Secure Boot acceptance.
-{ pkgs, kernelPackages, signedKernel, signedModules }:
+{ pkgs, kernelPackages, signedKernel, signedModules, tpmDeviceModel ? "tpm-tis",
+  tpmBanks ? [ "sha1" "sha256" ], memoryMapProbe ? false }:
 let
   manifest = builtins.fromJSON (builtins.readFile "${signedModules}/zbm-module-manifest.json");
+  signedPackages = kernelPackages.extend (_: _: {
+    kernel = import ./signed-vm-kernel.nix {
+      inherit pkgs signedKernel;
+      kernel = kernelPackages.kernel;
+    };
+  });
 in
 assert manifest.kernel_store_path == toString kernelPackages.kernel;
 assert manifest.module_version == kernelPackages.kernel.modDirVersion;
+assert builtins.elem tpmDeviceModel [ "tpm-tis" "tpm-crb" ];
+assert tpmBanks != [] && pkgs.lib.unique tpmBanks == tpmBanks
+  && builtins.all (bank: builtins.elem bank [ "sha1" "sha256" ]) tpmBanks;
 pkgs.testers.runNixOSTest {
-  name = "tpm-hibernation-efi-kexec-probe";
+  name = "tpm-hibernation-efi-kexec-${tpmDeviceModel}-${pkgs.lib.concatStringsSep "-" tpmBanks}${pkgs.lib.optionalString memoryMapProbe "-firmware-map"}";
   globalTimeout = 600;
   nodes.machine = { lib, ... }: {
-    boot.kernelPackages = kernelPackages;
+    boot.kernelPackages = signedPackages;
     system.modulesTree = lib.mkForce [ signedModules ];
-    system.systemBuilderCommands = lib.mkAfter ''
-      rm "$out/kernel"
-      ln -s ${signedKernel} "$out/kernel"
-    '';
     boot.loader.grub.enable = lib.mkForce false;
     boot.loader.systemd-boot.enable = true;
     boot.loader.systemd-boot.consoleMode = "keep";
     boot.zfs.unsafeAllowHibernation = true;
+    boot.kernelParams = lib.optional memoryMapProbe "efi=debug";
     # This is the kernel mechanics probe. Full target IMA/BootAuthorization and
     # the enforced zbm-rs handoff have their own integration gate.
     security.lsm = lib.mkForce [ "landlock" "lockdown" "yama" "bpf" ];
     virtualisation.useBootLoader = true;
     virtualisation.useEFIBoot = true;
     virtualisation.tpm.enable = true;
+    virtualisation.tpm.deviceModel = tpmDeviceModel;
+    virtualisation.tpm.provisioning = import ./tpm-pcr-provision.nix { inherit pkgs; banks = tpmBanks; };
     virtualisation.memorySize = 1536;
     virtualisation.useNixStoreImage = true;
     virtualisation.writableStore = true;
@@ -39,6 +48,8 @@ pkgs.testers.runNixOSTest {
     machine.start()
     machine.wait_for_unit("multi-user.target")
     def evidence():
+        banks = machine.succeed("printf '%s\\n' /sys/class/tpm/tpm0/pcr-*").splitlines()
+        assert sorted(path.rsplit("pcr-", 1)[-1] for path in banks) == sorted(${builtins.toJSON tpmBanks}), banks
         machine.succeed("set -eu; test -d /sys/firmware/efi; test -c /dev/tpm0; grep -q '\\[integrity\\]' /sys/kernel/security/lockdown; grep -qw disk /sys/power/state; ! grep -qw nohibernate /proc/cmdline")
         machine.succeed("journalctl -k -b --no-pager | grep 'PCR5='")
         # Prove that a provisioned kernel index cannot be overwritten by
@@ -47,9 +58,23 @@ pkgs.testers.runNixOSTest {
         status, output = machine.execute("printf rejected > /run/nv-test; tpm2_nvwrite -C o -i /run/nv-test 0x014c4853 2>&1")
         assert status != 0 and "Operation not permitted" in output, (status, output)
     evidence()
+    ${pkgs.lib.optionalString memoryMapProbe ''
+    firmware_maps = []
+    for attempt in range(2):
+        print("FIRMWARE_BOOT", attempt)
+        print(machine.succeed("od -An -tx4 -j 448 -N 32 /sys/kernel/boot_params/data"))
+        print(machine.succeed("dmesg | grep -E 'BIOS-e820:|efi:.*(MEMMAP|memmap|PCR5=)'"))
+        firmware_maps.append(machine.succeed("dmesg | grep BIOS-e820:"))
+        if attempt == 0:
+            machine.shutdown()
+            machine.start()
+            machine.wait_for_unit("multi-user.target")
+            evidence()
+    assert firmware_maps[0] == firmware_maps[1], (firmware_maps, "Firmware E820 changed across boots")
+    ''}
     machine.succeed("test $(cat /proc/sys/kernel/kexec_load_disabled) = 0")
     # These are the two PCR banks included in the RFC's key provenance.
-    before = machine.succeed("tpm2_pcrread sha1:5+sha256:5").strip()
+    before = machine.succeed("tpm2_pcrread ${pkgs.lib.concatMapStringsSep "+" (bank: "${bank}:5") tpmBanks}").strip()
     boot_id = machine.succeed("cat /proc/sys/kernel/random/boot_id").strip()
     # One kernel build, two runtime roles. Only the incoming target disables
     # subsequent loads, through its signed-kernel handoff command line.
@@ -60,7 +85,7 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("multi-user.target")
     assert machine.succeed("cat /proc/sys/kernel/random/boot_id").strip() != boot_id
     evidence()
-    after = machine.succeed("tpm2_pcrread sha1:5+sha256:5").strip()
+    after = machine.succeed("tpm2_pcrread ${pkgs.lib.concatMapStringsSep "+" (bank: "${bank}:5") tpmBanks}").strip()
     assert before == after, (before, after)
     machine.succeed("test $(cat /proc/sys/kernel/kexec_load_disabled) = 1")
     machine.fail("sysctl -w kernel.kexec_load_disabled=0")

@@ -1,0 +1,34 @@
+From 26584b2a05c09fdfebee39b370c1125b0d7d1fdd Mon Sep 17 00:00:00 2001
+From: okhsunrog <me@okhsunrog.dev>
+Date: Fri, 30 Oct 2026 22:14:31 +0300
+Subject: [PATCH] efi/x86: Keep the boot memory map out of firmware E820
+
+x86 passes the EFI memory map in boot_params and reserves that buffer during efi_memblock_x86_reserve_range. It does not consume LINUX_EFI_BOOT_MEMMAP_GUID. Avoid installing that configuration table on x86, so its buffer uses loader data instead of introducing a boot-dependent ACPI reclaim range into the firmware E820 map.
+
+A two-firmware-boot OVMF/CRB probe located the moving three-page ACPI range exactly at the boot_params EFI memory map address. The resulting E820 mismatch rejected a real hibernation image before authentication. Keep the E820 integrity check intact and preserve configuration-table delivery on other architectures.
+---
+ drivers/firmware/efi/libstub/efi-stub-helper.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/firmware/efi/libstub/efi-stub-helper.c b/drivers/firmware/efi/libstub/efi-stub-helper.c
+index 1318f8c..fd21233 100644
+--- a/drivers/firmware/efi/libstub/efi-stub-helper.c
++++ b/drivers/firmware/efi/libstub/efi-stub-helper.c
+@@ -441,7 +441,13 @@ efi_status_t efi_exit_boot_services(void *handle, void *priv,
+ 	 */
+ 	efi_tpm_record_pcr5();
+ 
+-	status = efi_get_memory_map(&map, true);
++	/*
++	 * x86 passes and reserves this buffer through boot_params. Installing a
++	 * configuration table also allocates it as ACPI reclaim memory, whose
++	 * boot-dependent address then changes the firmware E820 map and prevents
++	 * hibernation. Other architectures consume the configuration table.
++	 */
++	status = efi_get_memory_map(&map, !IS_ENABLED(CONFIG_X86));
+ 	if (status != EFI_SUCCESS)
+ 		return status;
+ 
+-- 
+2.56.0
+
