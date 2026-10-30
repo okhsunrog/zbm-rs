@@ -311,6 +311,10 @@ pub fn screenshot(run: &Path, output: &Path) -> Result<()> {
     // Freeze guest updates for capture and restore only our own pause afterward.
     let running = qmp.request("query-status", json!({}))?["running"] == true;
     if running {
+        // Let queued guest console/GPU work finish before stopping its CPUs.
+        // Serial readiness alone can precede the framebuffer update; freezing
+        // first would make a partially redrawn screen appear falsely stable.
+        capture_screen(&mut qmp, &output)?;
         qmp.request("stop", json!({}))?;
     }
     let result = capture_screen(&mut qmp, &output);
