@@ -250,6 +250,13 @@ pub fn run(
         vm::key(run, "s")?;
         wait_for(10, Some(&mut owned.0), || {
             ensure!(vm::screen(run)?["event"] == "shell", "Waiting for shell");
+            // The event records the manager's request, before PID 1 restores
+            // the terminal and spawns the shell. Earlier keystrokes can be
+            // flushed by that restoration. Wait for the actual VT prompt.
+            ensure!(
+                vm::console(run)?.trim_end().ends_with("~ #"),
+                "Waiting for recovery shell prompt"
+            );
             Ok(())
         })?;
         // Type through the same QMP keyboard device as a person at the console.
