@@ -126,7 +126,10 @@ kernel messages, process exits, UI control/state transitions, full panic backtra
 when available, and periodic memory, temperature, battery and watchdog observations.
 No passphrase characters, lengths, backspaces, process memory or RPC payloads are recorded.
 Eight boot directories retain up to 4 MiB of trace data each, plus bounded metadata.
-The recorder syncs approximately every 250 ms and samples health every two seconds.
+The recorder syncs approximately every 250 ms, records a timestamp on each cycle,
+and samples health every two seconds. Metadata includes the active CPU microcode
+revision and pstore settings. Diagnostic images request task, memory and CPU
+backtrace information on kernel panic without enabling new panic triggers.
 Storage stalls and hardware caches can increase the unsaved tail; this cannot
 guarantee a final message when power disappears. Frequent writes can affect timing.
 
@@ -137,6 +140,12 @@ data, not trusted boot inputs. Normal images keep continuous recording disabled.
 Inspect/copy the ESP after boot without deleting earlier boot directories.
 The VM lifecycle smoke checks persisted logs and password exclusion; add
 `--power-cut` to terminate QEMU without a guest shutdown and verify surviving logs.
+
+For early CPU microcode updates, pass an uncompressed microcode cpio through
+`mkImage { microcodeInitrd = "${microcodePackage}/intel-ucode.img"; }` or
+`programs.zbm-rs.image.microcodeInitrd`. It is embedded in the UKI `.ucode`
+section and preserved by the signing publisher. Use the same microcode package
+as the installed OS; verify the active revision in the next physical boot log.
 
 ## Documentation
 

@@ -228,6 +228,11 @@ fn collect(channel: &UnixDatagram) -> io::Result<()> {
         "/sys/class/dmi/id/product_name",
         "/sys/class/dmi/id/bios_version",
         "/sys/class/dmi/id/bios_date",
+        "/sys/devices/system/cpu/cpu0/microcode/version",
+        "/sys/devices/system/cpu/cpu0/microcode/processor_flags",
+        "/sys/module/efi_pstore/parameters/pstore_disable",
+        "/sys/module/pstore/parameters/backend",
+        "/proc/sys/kernel/panic_print",
     ] {
         metadata.push_str(&format!(
             "\n{path}\n{}\n",
@@ -278,6 +283,9 @@ fn collect(channel: &UnixDatagram) -> io::Result<()> {
             log.record("health", health().as_bytes())?;
             health_at = Instant::now();
         }
+        // Record every flush cycle, even while the UI is idle. A health sample
+        // alone only bounds the last durable observation to two seconds.
+        log.record("recorder-tick", b"")?;
         log.sync()?;
         if let Some(command) = receive(channel)? {
             // Collect again so a shutdown marker preceding the request is durable.

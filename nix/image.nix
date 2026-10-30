@@ -6,7 +6,7 @@
 , kernelPolicy ? "validate", kernelTrustedCertificates ? []
 , targetAuthorities ? [], imaCertificate ? null
 , tpmProvider ? pkgs.systemd
-, initramfsCompression ? "zstd", rustProfile ? {}
+, initramfsCompression ? "zstd", rustProfile ? {}, microcodeInitrd ? null
 , udevPackage ? (import ./lean-userspace.nix { pkgs = runtimePkgs; }).udev }:
 let
   lib = pkgs.lib;
@@ -169,6 +169,7 @@ let
       cp ${pkgs.writeText "zbm-build-info.json" (builtins.toJSON {
         source = toString source; binary = toString binary;
         kernel = kernel.modDirVersion; profile = profile;
+        microcode_initrd = if microcodeInitrd == null then null else toString microcodeInitrd;
       })} root/etc/zbm-rs/build-info.json
     ''}
     ${lib.optionalString (hostId != null) ''
@@ -246,7 +247,7 @@ let
   cmdline = lib.optionalString testProfile "console=ttyS0,115200 "
     + "console=tty0 loglevel=3 panic=${if enforced then "0" else "-1"}"
     + lib.optionalString (rawConfig.diagnostics.continuous or false)
-      " log_buf_len=4M printk.time=1 efi_pstore.pstore_disable=0"
+      " log_buf_len=4M printk.time=1 efi_pstore.pstore_disable=0 panic_print=67"
     + lib.optionalString (hostId != null) " spl.spl_hostid=0x${hostId}";
   image = pkgs.runCommand "zbm-rs-efi-${profile}${lib.optionalString testProfile "-test"}" {
     nativeBuildInputs = [ pkgs.systemdUkify pkgs.python3 pkgs.uv ];
@@ -256,6 +257,9 @@ let
     mkdir -p $out/esp/EFI/BOOT
     cp ${kernel}/bzImage $out/vmlinuz
     cp ${initramfs}/initramfs.img $out/initramfs.img
+    ${lib.optionalString (microcodeInitrd != null) ''
+      cp ${microcodeInitrd} $out/microcode.cpio
+    ''}
     cp ${runtime}/runtime-audit.json $out/runtime-audit.json
     ${lib.optionalString enforced ''
       cp ${runtime}/root.cpio $out/root.cpio
@@ -267,6 +271,7 @@ let
     ''}
     echo ${lib.escapeShellArg cmdline} > $out/cmdline
     ukify build --linux $out/vmlinuz --initrd $out/initramfs.img \
+      ${lib.optionalString (microcodeInitrd != null) "--microcode $out/microcode.cpio"} \
       --uname ${lib.escapeShellArg kernel.modDirVersion} --cmdline @${pkgs.writeText "cmdline" cmdline} \
       --os-release @${osRelease} --stub ${pkgs.systemd}/lib/systemd/boot/efi/linuxx64.efi.stub \
       --output $out/esp/EFI/BOOT/BOOTX64.EFI

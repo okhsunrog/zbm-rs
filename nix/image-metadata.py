@@ -7,6 +7,10 @@ kernel, zfs, test, profile = sys.argv[2:6]
 policy = json.loads(Path(sys.argv[6]).read_text())
 sizes = {name: (out / path).stat().st_size for name, path in
          [("efi", "esp/EFI/BOOT/BOOTX64.EFI"), ("initramfs", "initramfs.img"), ("kernel", "vmlinuz")]}
+microcode = out / "microcode.cpio"
+if microcode.exists():
+    assert microcode.read_bytes()[:6] == b"070701", "Microcode requires an uncompressed newc archive"
+    sizes["microcode"] = microcode.stat().st_size
 budget = policy["test" if test == "yes" else profile]
 assert sizes["efi"] <= budget["maxEfiBytes"], f"EFI size budget exceeded: {sizes}"
 if budget["baselineEfiBytes"] is not None:
@@ -17,5 +21,6 @@ if budget["baselineEfiBytes"] is not None:
     "kernel": kernel, "zfs": zfs, "test_ssh": test == "yes", "profile": profile,
     "builder": "nix", "libc": json.loads((out / "runtime-audit.json").read_text())["libc"], "compression": sys.argv[7], "sizes": sizes,
     "kernel_sha256": hashlib.sha256((out / "vmlinuz").read_bytes()).hexdigest(),
-    "initramfs_sha256": hashlib.sha256((out / "initramfs.img").read_bytes()).hexdigest()
+    "initramfs_sha256": hashlib.sha256((out / "initramfs.img").read_bytes()).hexdigest(),
+    "microcode_sha256": hashlib.sha256(microcode.read_bytes()).hexdigest() if microcode.exists() else None
 }, indent=2) + "\n")

@@ -38,6 +38,7 @@ let
     extraModulePackages = cfg.image.extraModulePackages;
     moduleOptions = cfg.image.moduleOptions;
     hostId = cfg.image.hostId;
+    microcodeInitrd = cfg.image.microcodeInitrd;
   };
 in {
   imports = [ ./snapshot-boot.nix (import ./nixos-boot.nix { inherit self; }) ] ++ map (pair: lib.mkRenamedOptionModule
@@ -72,6 +73,7 @@ in {
     enable = lib.mkEnableOption "build a standalone zbm-rs EFI boot manager";
     image.profile = lib.mkOption { type = lib.types.enum [ "portable" "host-only" ]; default = "portable"; };
     image.hardwareManifest = lib.mkOption { type = lib.types.nullOr lib.types.path; default = null; };
+    image.microcodeInitrd = lib.mkOption { type = lib.types.nullOr lib.types.path; default = null; description = "Uncompressed early microcode cpio embedded in the signed UKI .ucode section; for Intel use hardware.cpu.intel.microcodePackage + /intel-ucode.img."; };
     image.hostId = lib.mkOption { type = lib.types.nullOr lib.types.str; default = config.networking.hostId; description = "Explicit eight-digit ZFS host ID; embedded in the loader without copying host files."; };
     image.kernelPackages = lib.mkOption { type = lib.types.raw; default = config.boot.kernelPackages; description = "Separate loader kernel/ZFS package set; does not change the installed OS kernel."; };
     image.extraModulePackages = lib.mkOption { type = lib.types.raw; default = _: []; description = "Function from final loader kernelPackages to matching out-of-tree module packages."; };

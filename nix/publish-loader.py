@@ -223,6 +223,8 @@ def main():
         build = [args.ukify, "build", "--linux", output / "vmlinuz", "--initrd", output / "initramfs.img",
                  "--uname", manifest["kernel"], "--cmdline", f"@{output / 'cmdline'}",
                  "--os-release", f"@{output / 'os-release'}", "--stub", output / "stub.efi"]
+        if (output / "microcode.cpio").is_file():
+            build += ["--microcode", output / "microcode.cpio"]
         command([*build, "--output", unsigned])
         efi = output / "esp/EFI/BOOT/BOOTX64.EFI"
         command(["sbsign", "--key", args.efi_key.resolve(), "--cert", args.efi_cert.resolve(), "--output", efi, unsigned])
@@ -236,6 +238,8 @@ def main():
             manifest[f"{name}_sha256"] = hashlib.sha256(file.read_bytes()).hexdigest()
         manifest["sizes"] = {"efi": efi.stat().st_size, "kernel": (output / "vmlinuz").stat().st_size,
                              "initramfs": (output / "initramfs.img").stat().st_size}
+        if (output / "microcode.cpio").is_file():
+            manifest["sizes"]["microcode"] = (output / "microcode.cpio").stat().st_size
         if manifest["sizes"]["efi"] > (80 if manifest["test_ssh"] else 64) * 1024 * 1024:
             raise ValueError("Signed EFI exceeds deployment size budget")
         (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
