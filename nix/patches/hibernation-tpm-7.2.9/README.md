@@ -73,3 +73,25 @@ boot path. Kernel initialization can provision the RFC's reserved TPM NV index
 Image authentication does not establish that a ZFS pool has remained unchanged
 while the system was asleep. The existing resume-before-import ordering and
 explicit saved-session cancellation remain necessary.
+
+### kexec is an unresolved acceptance condition
+
+The target EFI stub does not execute during `kexec_file_load`. On x86, the
+kexec boot parameters can carry the first kernel's EFI configuration tables;
+the RFC's PCR5 table is allocated in ACPI-reclaim memory. This makes inheritance
+from a patched loader kernel plausible, but does not establish that the table
+survives our exact boot path or that the trust argument remains valid.
+
+Both the loader and hibernating target need the kernel-owned NV-index
+protection. A kernel signature alone does not establish that capability.
+In particular, booting a patched first kernel and then kexecing an older signed
+kernel raises a separate security question: the earlier PCR5 measurement must
+not be accepted as evidence that the older kernel filters userspace TPM
+commands. The RFC's published series does not contain a kexec-specific
+transition mechanism. This is an unverified attack scenario, not a demonstrated
+exploit or a completed mitigation.
+
+Acceptance must cover both patched-to-patched operation and rejection or
+invalidation of unsupported transitions. A successful RAM restore between two
+patched kernels alone would not settle this question. Do not bypass the PCR5
+check or remove enforced-mode resume rejection to make a VM test pass.
