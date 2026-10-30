@@ -60,6 +60,7 @@
         zbm-rs-efi-test-host-only-scsi = mkImage { testProfile = true; profile = "host-only"; hardwareManifest = ./nix/scsi-hardware-example.json; };
       };
       checks.${system} = {
+        signed-module-tree = import ./nix/check-signed-module-tree.nix { inherit self pkgs; };
         encrypted-hibernation = import ./nix/check-encrypted-hibernation.nix { inherit self pkgs nixpkgs system; };
         luks2-resume-device = import ./nix/check-luks2-resume.nix { inherit self pkgs; };
         prune-nixos = import ./nix/check-prune-nixos.nix { inherit pkgs; };

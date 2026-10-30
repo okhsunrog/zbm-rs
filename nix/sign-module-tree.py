@@ -32,6 +32,9 @@ def main():
         tree = temporary / "tree"
         # aggregateModules has owned metadata and store symlinks, not build trees.
         shutil.copytree(source, tree, symlinks=False)
+        # copytree preserves the store root's read-only mode too. The manifest
+        # is published at this root after all module signatures are verified.
+        tree.chmod(0o755)
         for directory in tree.rglob("*"):
             if directory.is_dir():
                 directory.chmod(0o755)
