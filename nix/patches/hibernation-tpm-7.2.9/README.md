@@ -90,6 +90,9 @@ target kernel build without kexec is not required. Intentional transitions
 through old kernels and investigation of their possible TPM-provenance bypass
 are outside this deployment's acceptance scope. This does not establish that
 arbitrary privileged kexec chains preserve the RFC's trust assumptions.
+The target command line additionally uses
+`sysctl.kernel.kexec_load_disabled=1`, applied before initramfs userspace. Loader
+and rescue omit it, retaining the ability to hand off to the target.
 
 Acceptance covers the actual EFI-to-patched-loader-to-patched-target path,
 TPM evidence/NV protection across that handoff, authenticated RAM restoration,

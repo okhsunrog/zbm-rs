@@ -226,15 +226,22 @@ before the working replacement has been verified. Deliberately chaining an old
 kernel or researching its possible TPM-provenance bypass is outside this
 deployment's implementation and acceptance scope.
 
-Disabling target `CONFIG_KEXEC` and `CONFIG_KEXEC_FILE` remains optional stronger
-hardening, particularly if signing keys move out of reach of the running OS or
-keyless privileged attackers enter the threat model. It disables outgoing kexec,
-not receipt of the loader handoff. An early target-only
-`kernel.kexec_load_disabled=1` policy can instead share kernel builds, but must
-precede untrusted userspace; it cannot prevent execution of an already loaded
-image. Neither policy is currently enabled. The early sysctl is an optional
-target-userspace policy under consideration, not a reason to split kernel builds;
-it must remain unset in the loader and rescue, which need outgoing kexec.
+The agreed target-only hardening is the kernel command-line parameter
+`sysctl.kernel.kexec_load_disabled=1`. Linux applies it before executing
+initramfs `/init`, which starts with further loads already prohibited, without
+a custom initramfs service. The Framework NixOS configuration adds it to
+target Bootspec arguments; the separately constructed loader and rescue command
+lines omit it and retain outgoing kexec. The kernel builds remain shared. This
+policy does not interfere with receiving the loader handoff or restoring RAM;
+the restored target must retain the prohibition too. The parameter belongs in
+the exact signed target arguments.
+
+The sysctl rejects further `kexec_load`/`kexec_file_load` calls, including crash
+image loads, and cannot be reset through sysctl during that kernel boot. It does
+not unload an already loaded image, which is why setting it before `/init`
+matters. Compile-time exclusion of target kexec is not required; reconsider it
+only if the threat model or key isolation changes. A full root compromise with
+usable signing keys remains outside this boundary.
 
 Matthew Garrett's TPM-signature design is the selected experimental backend.
 Both protected kernels must preserve kernel ownership of its reserved TPM NV
@@ -320,6 +327,10 @@ It also verifies both explicit F2 actions, stale-consent rejection without boot,
 standalone cancellation staying in the same kernel/menu, and a real cold kexec
 into the loader fixture with the pinned saved generation's arguments. The latter
 is a handoff check, not a complete NixOS boot or RAM restoration.
+The encrypted-hibernation VM additionally checks the target-only early kexec
+prohibition, rejection of both load interfaces and attempts to reset the sysctl,
+and preservation of the prohibition across actual RAM restoration. Bootstrap
+still performs the incoming kexec with its own prohibition unset.
 `nix build .#checks.x86_64-linux.encrypted-hibernation` instead installs a disposable
 encrypted ZFS-root NixOS, rejects an intentionally early read-only pool import,
 and exercises real RAM restoration through the target initramfs. It verifies the

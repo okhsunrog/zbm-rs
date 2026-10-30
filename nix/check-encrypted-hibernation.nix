@@ -47,8 +47,35 @@ let
             ExecStart = "${pkgs.zfs}/bin/zpool import -N -o readonly=on -o cachefile=none testpool";
           };
         };
-        boot.initrd.systemd.services.zbm-resume.serviceConfig.StandardError = "journal+console";
-        boot.kernelParams = [ "console=ttyS0" "zfs.zfs_arc_max=134217728" ];
+        # The target has the same kexec-capable kernel as the bootstrap. Only
+        # its command line disables further loads, before any userspace runs.
+        boot.kernelParams = [
+          "console=ttyS0" "zfs.zfs_arc_max=134217728"
+          "sysctl.kernel.kexec_load_disabled=1"
+        ];
+        boot.initrd.systemd.services.test-kexec-disabled-early = {
+          wantedBy = [ "initrd.target" ];
+          before = [ "systemd-udevd.service" "zbm-resume.service" ];
+          unitConfig.DefaultDependencies = false;
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            StandardOutput = "journal+console";
+          };
+          script = ''
+            set -eu
+            test "$(< /proc/sys/kernel/kexec_load_disabled)" = 1
+            test "$(< /sys/kernel/kexec_loaded)" = 0
+            test "$(< /sys/kernel/kexec_crash_loaded)" = 0
+            printf 'verified-before-udev-and-resume\n' > /run/kexec-disabled-early
+            echo ZBM_TARGET_KEXEC_DISABLED_EARLY
+          '';
+        };
+        boot.initrd.systemd.services.zbm-resume = {
+          requires = [ "test-kexec-disabled-early.service" ];
+          after = [ "test-kexec-disabled-early.service" ];
+          serviceConfig.StandardError = "journal+console";
+        };
         fileSystems."/" = { device = "testpool/root"; fsType = "zfs"; options = [ "zfsutil" ]; };
         swapDevices = [{ device = "/dev/mapper/resume-swap"; }];
         environment.systemPackages = [ pkgs.kexec-tools pkgs.cryptsetup pkgs.lvm2 loader ];
@@ -79,6 +106,7 @@ in pkgs.testers.runNixOSTest {
     import json, shlex, datetime
     machine.start()
     machine.wait_for_unit("multi-user.target")
+    machine.succeed("test $(cat /proc/sys/kernel/kexec_load_disabled) = 0")
     machine.succeed("mkdir -p /etc/zfs; printf disposable-vm-passphrase > /etc/zfs/test.key; chmod 600 /etc/zfs/test.key")
     machine.succeed("sgdisk --zap-all --new=1:2048:0 --partition-guid=1:${partuuid} /dev/vdd; udevadm settle")
     machine.succeed("cryptsetup luksFormat --batch-mode --type luks2 --pbkdf pbkdf2 --pbkdf-force-iterations 1000 --uuid ${luksUuid} --key-file /etc/zfs/test.key /dev/vdd1; cryptsetup open --key-file /etc/zfs/test.key /dev/vdd1 resume-swap; mkswap /dev/mapper/resume-swap; cryptsetup close resume-swap")
@@ -99,11 +127,20 @@ in pkgs.testers.runNixOSTest {
     machine.start()
     machine.wait_for_unit("multi-user.target")
     machine.succeed("test ! -e /dev/mapper/resume-swap; ! zpool list -H -o name | grep -qx testpool")
+    machine.succeed("test $(cat /proc/sys/kernel/kexec_load_disabled) = 0")
     machine.succeed(load)
     machine.execute("systemctl --no-block kexec", check_return=False)
     machine.connected = False
     machine.connect()
     machine.wait_for_unit("multi-user.target")
+    def check_target_kexec_disabled():
+        machine.succeed("set -eu; test $(cat /proc/sys/kernel/kexec_load_disabled) = 1; test $(cat /sys/kernel/kexec_loaded) = 0; test $(cat /run/kexec-disabled-early) = verified-before-udev-and-resume")
+        machine.fail("sysctl -w kernel.kexec_load_disabled=0")
+        for mode in ["-c", "-s"]:
+            status, output = machine.execute("kexec " + mode + " -l /run/current-system/kernel --initrd=/run/current-system/initrd --reuse-cmdline 2>&1")
+            assert status != 0 and "Operation not permitted" in output, (mode, status, output)
+        machine.succeed("set -eu; test $(cat /proc/sys/kernel/kexec_load_disabled) = 1; test $(cat /sys/kernel/kexec_loaded) = 0")
+    check_target_kexec_disabled()
     machine.succeed("test $(findmnt -n -o SOURCE /) = testpool/root; test -b /dev/mapper/resume-swap; grep -q /dev/dm- /proc/swaps")
     machine.succeed("test $(cat /sys/power/resume) = $(lsblk -dn -o MAJ:MIN /dev/mapper/resume-swap); grep -qw disk /sys/power/state")
     before = machine.succeed("cat /proc/sys/kernel/random/boot_id").strip()
@@ -113,6 +150,7 @@ in pkgs.testers.runNixOSTest {
     machine.start()
     machine.wait_for_unit("multi-user.target")
     machine.succeed("test $(hostname) != resume-target; test ! -e /dev/mapper/resume-swap; ! zpool list -H -o name | grep -qx testpool")
+    machine.succeed("test $(cat /proc/sys/kernel/kexec_load_disabled) = 0")
     machine.succeed(load)
     machine.execute("systemctl --no-block kexec", check_return=False)
     # The target's shell resumes too; it does not emit a new boot handshake.
@@ -120,6 +158,7 @@ in pkgs.testers.runNixOSTest {
     machine.wait_for_unit("multi-user.target")
     after = machine.succeed("cat /proc/sys/kernel/random/boot_id").strip()
     assert before == after, (before, after, "cold boot occurred instead of RAM restore")
+    check_target_kexec_disabled()
     machine.succeed("test $(cat /run/resume-proof) = preserved-in-ram; test $(findmnt -n -o SOURCE /) = testpool/root; zpool status -x | grep -q 'all pools are healthy'")
     machine.succeed("journalctl -b --no-pager | grep -E 'hibernation (entry|exit)' ")
   '';
