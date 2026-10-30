@@ -45,8 +45,18 @@ let
     kernelPatches = (kernelPackages.kernel.kernelPatches or [])
       ++ import ./hibernation-tpm-patches.nix;
   });
+  protectedKernel = kernel.overrideAttrs (old: {
+    passthru = (old.passthru or {}) // lib.optionalAttrs hibernationTpmSignature {
+      zbmProtectedHibernation = {
+        backend = "linux-tpm-signature-v1";
+        recordProtocol = 2;
+        kernel = "${kernel}/bzImage";
+        kernelConfig = kernel.configfile;
+      };
+    };
+  });
 in
 assert lib.assertMsg (trustedCertificates != []) "Enforced loader kernel needs public trust certificates";
 assert lib.assertMsg (!hibernationTpmSignature || kernelPackages.kernel.version == "7.2.9")
   "The experimental TPM hibernation backport is pinned to Linux 7.2.9.";
-pkgs.linuxPackagesFor kernel
+pkgs.linuxPackagesFor protectedKernel

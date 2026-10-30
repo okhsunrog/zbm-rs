@@ -117,8 +117,8 @@ another partition or path is an error. No fallback EFI file is overwritten.
 
 An independent rescue image should use `security.mode = "off"`, an ordinary
 kernel without forced signature/lockdown enforcement, and a separately pinned
-source/package set. Install it explicitly through `nix/install-efi.py` with
-`certificate: null`, its own label and path. That mode rejects signed files:
+source/package set. Publish it explicitly through `nix/rescue-efi.py` with
+`certificate: null`, its own label and path. This rejects signed files:
 the recovery bypass must require the owner to disable firmware Secure Boot.
 Normal generation publication never installs or updates rescue. This mechanism
 does not promise that TPM-dependent OS services work in recovery; the loader's
@@ -127,18 +127,30 @@ shell and manual pool unlock remain available.
 Separate pins prevent ordinary updates from replacing rescue, but do not certify
 that a pinned revision can boot the current machine or read its pool. The current
 installer checks PE/signature policy and stages/syncs a single file; it does not
-boot-test the image, retain a preceding rescue slot, or provide crash-atomic FAT
-filesystem updates. It also cannot recover an unreadable ESP or a failed disk.
+boot-test the image or provide crash-atomic FAT filesystem updates. It also
+cannot recover an unreadable ESP or a failed disk.
 
-The intended recovery lifecycle is an explicit candidate and a retained
-known-good rescue, independent of normal loader updates. Pin the complete image
+The rescue publisher stages an explicit candidate and retains the known-good
+rescue, independent of normal loader updates. Pin the complete image
 inputs, retain the exact artifact/manifest with a GC root, and test the final
 unsigned EFI bytes in OVMF before installing a candidate at a distinct path.
 Keep the preceding rescue reachable while the candidate is tested on hardware;
-promote only after an explicit successful physical test. A one-commit lag is not
+promote only after an explicit successful physical test. `rescue-efi.py PLAN`
+stages only the candidate. `rescue-efi.py PLAN --promote TESTED_SHA256` requires
+the exact immutable plan, candidate bytes and synced receipt to agree before
+replacing the known-good slot. Its separate entry is appended without moving
+existing boot choices. A missing/stale receipt after interrupted staging cannot
+be promoted. Publication requires a non-test unsigned cancellation-only image,
+record protocol v2 and the declared swap/credential policy. Image metadata contains
+the exact EFI hash and capabilities reported by its compiled userspace.
+
+The disposable FAT/OVMF installer test checks staging, explicit promotion,
+interrupted receipts, changed candidates, wrong policy/protocol, rejection of
+signed/test images, and preservation of the main loader and foreign files.
+This is publication acceptance, not a boot test of a production rescue image or
+an automatic claim that a candidate worked on hardware. A one-commit lag is not
 a validation policy. Keep a tested copy on a separate bootable device for shared
-ESP/disk failures. These slots, validation gates and promotion are not implemented
-by `install-efi.py` today.
+ESP/disk failures.
 
 An unsigned rescue remains a manual break-glass path, requiring firmware Secure
 Boot to be disabled. Do not count on BootOrder automatically recovering a kernel

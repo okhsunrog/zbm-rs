@@ -20,6 +20,7 @@ let
   persistentDiagnostics = (rawConfig.diagnostics.esp_partuuid or null) != null;
   resumeDevice = rawConfig.resume.device or null;
   luksResume = resumeDevice != null && (resumeDevice.type or null) == "luks2";
+  protectedResume = enforced && (resumeDevice != null || (rawConfig.resume.swap_partuuid or null) != null);
   publicInput = path:
     let content = builtins.readFile path;
     in assert lib.assertMsg (builtins.stringLength content <= 65536 && !(lib.hasInfix "PRIVATE KEY" content))
@@ -28,7 +29,8 @@ let
   publicImaCertificate = if imaCertificate == null then null else publicInput imaCertificate;
   selectedKernelPackages = if enforced && kernelPolicy == "configure" then
     import ./security-kernel.nix { inherit pkgs kernelPackages;
-      trustedCertificates = map publicInput kernelTrustedCertificates; }
+      trustedCertificates = map publicInput kernelTrustedCertificates;
+      hibernationTpmSignature = protectedResume; }
     else kernelPackages;
   authorities = lib.imap0 (index: certificate: {
     name = "authority-${toString index}.pem"; certificate = publicInput certificate;
@@ -45,7 +47,9 @@ let
   roots = lib.unique ([ "zfs" ] ++ (if profile == "portable" then portable else hardware.modules or [])
     ++ extraModules ++ forcedModules ++ lib.optionals testProfile [ "e1000" ]
     ++ lib.optionals tpmEnabled [ "tpm_crb" "tpm_tis" ]
-    ++ lib.optionals luksResume [ "dm_mod" "dm_crypt" "cbc" "xts" "aes_generic" "aesni_intel" ]
+    # Resolve the kernel's crypto API alias: 7.2 renamed aes_generic to aes.
+    # This retains software AES and the available accelerated implementations.
+    ++ lib.optionals luksResume [ "dm_mod" "dm_crypt" "cbc" "xts" "crypto-aes" ]
     ++ lib.optionals persistentDiagnostics [ "vfat" "nls_cp437" "nls_iso8859_1" ]);
   kernel = selectedKernelPackages.kernel;
   zfsModule = builtins.getAttr zfsUserspace.kernelModuleAttribute selectedKernelPackages;
@@ -54,7 +58,8 @@ let
   } ''
     export UV_CACHE_DIR="$TMPDIR/uv-cache"
     uv run --offline --no-project --python ${pkgs.python3}/bin/python \
-      ${source}/nix/check-security-kernel.py ${kernel.configfile} > $out
+      ${source}/nix/check-security-kernel.py ${kernel.configfile} \
+      ${lib.optionalString protectedResume "--protected-hibernation"} > $out
   '';
   imaPolicy = pkgs.writeText "zbm-ima-policy" ''
     appraise func=KEXEC_INITRAMFS_CHECK appraise_type=imasig
@@ -262,6 +267,8 @@ let
       cp ${microcodeInitrd} $out/microcode.cpio
     ''}
     cp ${runtime}/runtime-audit.json $out/runtime-audit.json
+    cp ${configJson} $out/loader-config.json
+    ${binary}/bin/zbm-rs --resume-capabilities > $out/resume-capabilities.json
     ${lib.optionalString enforced ''
       cp ${runtime}/root.cpio $out/root.cpio
       cp ${kernel.configfile} $out/kernel.config
@@ -291,6 +298,8 @@ assert lib.assertMsg (builtins.elem profile [ "portable" "host-only" ]) "Unknown
 assert lib.assertMsg (hostId == null || (builtins.isString hostId && builtins.match "[0-9a-fA-F]{8}" hostId != null && hostId != "00000000"))
   "hostId must be null or eight hexadecimal digits identifying this ZFS host";
 assert lib.assertMsg (builtins.elem kernelPolicy [ "validate" "configure" ]) "Unknown loader kernel policy";
+assert lib.assertMsg (!protectedResume || (kernel.zbmProtectedHibernation.recordProtocol or null) == 2)
+  "Enforced native resume requires the approved TPM-protected kernel build.";
 assert lib.assertMsg (!enforced || (targetAuthorities != [] && imaCertificate != null)) "Enforced image needs public authorization and IMA certificates";
 assert lib.assertMsg (!tpmEnabled || runtimeLibc == "glibc") "Current TPM provider requires the glibc userspace profile";
 assert lib.assertMsg (profile != "host-only" || hardwareManifest != null || extraModules != [] || forcedModules != []) "Host-only requires an explicit manifest or NixOS module lists";

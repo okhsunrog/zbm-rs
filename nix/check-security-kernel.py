@@ -12,7 +12,7 @@ IMA_APPRAISE IMA_READ_POLICY IMA_KEYRINGS_PERMIT_SIGNED_BY_BUILTIN_OR_SECONDARY
 TMPFS_XATTR CRYPTO_SHA256""".split()
 
 
-def validate(text):
+def validate(text, *, protected_hibernation=False):
     values = {}
     for line in text.splitlines():
         if line.startswith("CONFIG_") and "=" in line:
@@ -22,6 +22,12 @@ def validate(text):
             values[name] = value
     failures = [f"CONFIG_{name}=y required" for name in REQUIRED
                 if values.get(f"CONFIG_{name}") != "y"]
+    if protected_hibernation:
+        for name in "HIBERNATION HIBERNATION_TPM_SIGNATURE TCG_TPM TCG_TPM2_HMAC TCG_TPM_KERNEL_NVINDEX TCG_TPM2_KERNEL_KEY KERNEL_TPM_SECURITY".split():
+            if values.get(f"CONFIG_{name}") != "y":
+                failures.append(f"CONFIG_{name}=y required for protected hibernation")
+        if values.get("CONFIG_TPM_HIBERNATE_INSECURE", "n") != "n":
+            failures.append("Insecure TPM hibernation is forbidden")
     if values.get("CONFIG_IMA_APPRAISE_BOOTPARAM") == "y":
         failures.append("IMA appraisal must not be weakened by boot parameters")
     if values.get("CONFIG_IMA_WRITE_POLICY") == "y" and values.get(
@@ -42,5 +48,6 @@ def validate(text):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path)
+    parser.add_argument("--protected-hibernation", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(validate(args.config.read_text()), indent=2))
+    print(json.dumps(validate(args.config.read_text(), protected_hibernation=args.protected_hibernation), indent=2))

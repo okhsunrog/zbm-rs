@@ -180,6 +180,11 @@ impl Action {
                     &plan,
                     &config.security.target_authorities,
                 )?;
+                if config.resume.enabled() {
+                    authorization
+                        .policy()
+                        .require_protected_hibernation(&config.resume)?;
+                }
                 authorization.policy().matches_selection(&plan)
             })
             .await??;

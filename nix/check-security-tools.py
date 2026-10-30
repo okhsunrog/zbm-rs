@@ -20,6 +20,7 @@ def load(name):
 kernel = load("check-security-kernel")
 publisher = load("publish-loader")
 authorizer = load("authorize-boot")
+hibernation = load("protected-hibernation")
 linux_publisher = load("authorize-linux")
 spec = importlib.util.spec_from_file_location("nixos", Path(__file__).parents[1] / "xtask/fixtures/authorize_nixos.py")
 nixos = importlib.util.module_from_spec(spec)
@@ -38,6 +39,52 @@ def record(name, mode, body=b"", links=1):
 
 
 class Boundaries(unittest.TestCase):
+    def test_protected_resume_policy_normalizes_only_equivalent_identities(self):
+        policy = {"device": {"type": "luks2", "partuuid": "12345678-1234-1234-1234-123456789abc",
+                            "luks_uuid": "ca55a30a-636e-4e69-9e68-bb36bf380408", "mapping": "resume-swap"},
+                  "credential": {"type": "zfs-unlock", "pool_guid": "42", "encryption_root": "tank/root"}}
+        original = hibernation.policy_id(policy)
+        self.assertEqual(original, "8047e9f30e938fcbb5a69322090d54090c66b5fd092f0b4c802babfb7b4111e4")
+        policy["device"]["partuuid"] = policy["device"]["partuuid"].upper()
+        policy["credential"]["pool_guid"] = "00042"
+        self.assertEqual(hibernation.policy_id(policy), original)
+        policy["credential"]["encryption_root"] = "tank/other"
+        self.assertNotEqual(hibernation.policy_id(policy), original)
+        policy["role"] = "cancel-only"
+        with self.assertRaisesRegex(ValueError, "Rescue"):
+            hibernation.policy_id(policy)
+
+    def test_secret_appender_cannot_replace_guard_or_hide_another_archive(self):
+        import gzip
+        secret = record("./.initrd-secrets", 0o040700) + record(".initrd-secrets/etc", 0o040700)
+        secret += record(".initrd-secrets/etc/key", 0o100600, b"disposable-secret")
+        trailer = record("TRAILER!!!", 0)
+        hibernation.validate_secret_archive(gzip.compress(secret + trailer), ["/etc/key"])
+        for malicious in (
+            secret + record("etc/systemd/system/zbm-resume.service", 0o100644, b"bypass") + trailer,
+            secret + record(".initrd-secrets/etc/key", 0o100600, b"duplicate") + trailer,
+            secret + trailer + record("etc/bypass", 0o100644) + trailer,
+            record(".initrd-secrets/etc/key", 0o120777, b"/other/key") + trailer,
+            secret[:-1],
+        ):
+            with self.assertRaises(ValueError):
+                hibernation.validate_secret_archive(malicious, ["/etc/key"])
+        with self.assertRaisesRegex(ValueError, "missing declared secrets"):
+            hibernation.validate_secret_archive(secret + trailer, ["/etc/key", "/etc/other"])
+
+    def test_native_resume_unit_cannot_be_skipped_or_imported_after_failure(self):
+        gate = "[Unit]\nDefaultDependencies=false\nBefore=initrd-root-fs.target\n[Service]\nType=oneshot\nRemainAfterExit=true\nExecStart=/approved/guard --resume-restore-config /approved/config\n"
+        imports = "[Unit]\nRequires=zbm-resume.service\nAfter=zbm-resume.service\n"
+        contract = {"gate_unit": gate, "loader": "/approved/guard", "resume_config": "/approved/config", "import_units": [imports]}
+        hibernation.validate_units(contract)
+        for changed in (gate + "ExecStart=\nExecStart=-/ignored/failure\n", gate + "ExecCondition=/skip\n", gate.replace("Before=", "ConditionPathExists=/optional\nBefore=")):
+            with self.assertRaises(ValueError):
+                hibernation.validate_units(contract | {"gate_unit": changed})
+        with self.assertRaisesRegex(ValueError, "bypass"):
+            hibernation.validate_units(contract | {"import_units": [imports + "Requires=\n"]})
+        with self.assertRaisesRegex(ValueError, "replaced"):
+            hibernation.validate_units(contract | {"resume_config": "/unrelated/policy"})
+
     def test_linux_publication_is_idempotent_and_rejects_corrupt_existing_signatures(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -141,6 +188,12 @@ class Boundaries(unittest.TestCase):
     def test_kernel_requires_actual_enforcement_and_correct_lsm(self):
         config = "\n".join(f"CONFIG_{name}=y" for name in kernel.REQUIRED) + '\nCONFIG_LSM="ima,lockdown"\n'
         kernel.validate(config)
+        protected = config + "\n" + "\n".join(f"CONFIG_{name}=y" for name in
+            "HIBERNATION HIBERNATION_TPM_SIGNATURE TCG_TPM TCG_TPM2_HMAC TCG_TPM_KERNEL_NVINDEX TCG_TPM2_KERNEL_KEY KERNEL_TPM_SECURITY".split())
+        kernel.validate(protected, protected_hibernation=True)
+        for unsupported in (config, protected + "\nCONFIG_TPM_HIBERNATE_INSECURE=y\n"):
+            with self.assertRaises(ValueError):
+                kernel.validate(unsupported, protected_hibernation=True)
         for change in [config.replace("CONFIG_KEXEC_SIG_FORCE=y", "CONFIG_KEXEC_SIG_FORCE=n"),
                        config.replace('"ima,lockdown"', '"lockdown"'),
                        config + "CONFIG_IMA_APPRAISE_BOOTPARAM=y\n",

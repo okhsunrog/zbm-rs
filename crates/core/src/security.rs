@@ -97,6 +97,66 @@ pub struct BootAuthorization {
     pub root: RootRule,
     /// Detached Linux security.ima signature; signed together with the inputs.
     pub initramfs_ima_signature: Vec<u8>,
+    /// Explicit owner approval of the protected native-resume contract. Old
+    /// authorizations remain readable but never gain this capability implicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_hibernation: Option<ProtectedHibernation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProtectedHibernation {
+    pub version: u32,
+    pub backend: String,
+    pub record_protocol: u32,
+    pub resume_policy_sha256: String,
+}
+
+/// Stable, domain-separated policy identity shared with the owner publisher.
+/// Legacy partition syntax, UUID case and decimal GUID spelling normalize to
+/// the same device; mapping names and dataset names remain case sensitive.
+pub fn resume_policy_id(config: &crate::resume::Config) -> io::Result<String> {
+    use crate::resume::{CredentialSource, Role, device::Device};
+    config.validate()?;
+    if config.role != Role::Resume {
+        return Err(invalid("Rescue cannot authorize protected hibernation"));
+    }
+    let mut fields = match config.device() {
+        Some(Device::Partition { partuuid }) => {
+            vec!["partition".into(), partuuid.to_ascii_lowercase()]
+        }
+        Some(Device::Luks2 {
+            partuuid,
+            luks_uuid,
+            mapping,
+        }) => vec![
+            "luks2".into(),
+            partuuid.to_ascii_lowercase(),
+            luks_uuid.to_ascii_lowercase(),
+            mapping,
+        ],
+        None => return Err(invalid("Protected hibernation requires a resume device")),
+    };
+    match &config.credential {
+        Some(CredentialSource::ZfsUnlock {
+            pool_guid,
+            encryption_root,
+        }) => {
+            fields.extend([
+                "zfs-unlock".into(),
+                pool_guid.parse::<u64>().map_err(invalid)?.to_string(),
+                encryption_root.clone(),
+            ]);
+        }
+        None => fields.push("none".into()),
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"zbm-rs:resume-policy:v1\0");
+    for field in fields {
+        digest.update((field.len() as u32).to_be_bytes());
+        digest.update(field.as_bytes());
+    }
+    Ok(hex(&digest.finalize()))
 }
 
 /// Lookup separates generations sharing the same images. Only the typed root
@@ -132,8 +192,25 @@ pub fn argument_id(arguments: &[String]) -> io::Result<String> {
 
 impl BootAuthorization {
     pub fn validate(&self) -> io::Result<()> {
-        if self.version != 1 || self.architecture != std::env::consts::ARCH {
+        if !matches!(self.version, 1 | 2) || self.architecture != std::env::consts::ARCH {
             return Err(invalid("Unsupported authorization version or architecture"));
+        }
+        match (&self.protected_hibernation, self.version) {
+            (None, 1) => (),
+            (Some(profile), 2)
+                if profile.version == 1
+                    && profile.backend == "linux-tpm-signature-v1"
+                    && profile.record_protocol == 2
+                    && profile.resume_policy_sha256.len() == 64
+                    && profile
+                        .resume_policy_sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => {}
+            _ => {
+                return Err(invalid(
+                    "Unsupported protected-hibernation authorization profile",
+                ));
+            }
         }
         self.kernel.validate()?;
         self.initramfs.validate()?;
@@ -157,6 +234,33 @@ impl BootAuthorization {
             || !(9..=8192).contains(&self.initramfs_ima_signature.len())
         {
             return Err(invalid("Invalid signed argument/root/IMA signature policy"));
+        }
+        Ok(())
+    }
+    /// Required for every outgoing boot of a capable enforced loader, including
+    /// an empty swap/cold boot. Call before clone creation and again at handoff.
+    pub fn require_protected_hibernation(&self, config: &crate::resume::Config) -> io::Result<()> {
+        self.validate()?;
+        let profile = self
+            .protected_hibernation
+            .as_ref()
+            .ok_or_else(|| invalid("Target lacks owner-authorized protected hibernation"))?;
+        if profile.resume_policy_sha256 != resume_policy_id(config)? {
+            return Err(invalid(
+                "Target resume device or credential policy differs from the loader",
+            ));
+        }
+        if self
+            .fixed_arguments
+            .iter()
+            .filter(|arg| arg.starts_with("sysctl.kernel.kexec_load_disabled="))
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            != ["sysctl.kernel.kexec_load_disabled=1"]
+        {
+            return Err(invalid(
+                "Protected target must disable outgoing kexec before initramfs",
+            ));
         }
         Ok(())
     }
@@ -493,7 +597,92 @@ mod tests {
                 allow_snapshot_clones: true,
             },
             initramfs_ima_signature: vec![3; 64],
+            protected_hibernation: None,
         }
+    }
+    #[test]
+    fn protected_resume_requires_new_authorization_and_exact_policy_on_cold_boots() {
+        let config: crate::resume::Config = serde_json::from_value(serde_json::json!({
+            "device": {"type":"luks2", "partuuid":"12345678-1234-1234-1234-123456789abc", "luks_uuid":"ca55a30a-636e-4e69-9e68-bb36bf380408", "mapping":"resume-swap"},
+            "credential": {"type":"zfs-unlock", "pool_guid":"42", "encryption_root":"tank/root"}
+        })).unwrap();
+        assert_eq!(
+            resume_policy_id(&config).unwrap(),
+            "8047e9f30e938fcbb5a69322090d54090c66b5fd092f0b4c802babfb7b4111e4"
+        );
+        let mut authorization = policy();
+        assert!(
+            authorization
+                .require_protected_hibernation(&config)
+                .is_err()
+        );
+        authorization.protected_hibernation = Some(ProtectedHibernation {
+            version: 1,
+            backend: "linux-tpm-signature-v1".into(),
+            record_protocol: 2,
+            resume_policy_sha256: resume_policy_id(&config).unwrap(),
+        });
+        assert!(authorization.validate().is_err()); // v1 cannot acquire a capability.
+        authorization.version = 2;
+        assert!(
+            authorization
+                .require_protected_hibernation(&config)
+                .is_err()
+        );
+        authorization
+            .fixed_arguments
+            .push("sysctl.kernel.kexec_load_disabled=1".into());
+        assert!(authorization.require_protected_hibernation(&config).is_ok());
+        let mut equivalent = config.clone();
+        if let Some(crate::resume::CredentialSource::ZfsUnlock { pool_guid, .. }) =
+            &mut equivalent.credential
+        {
+            *pool_guid = "00042".into();
+        }
+        if let Some(crate::resume::device::Device::Luks2 {
+            partuuid,
+            luks_uuid,
+            ..
+        }) = &mut equivalent.device
+        {
+            *partuuid = partuuid.to_ascii_uppercase();
+            *luks_uuid = luks_uuid.to_ascii_uppercase();
+        }
+        assert!(
+            authorization
+                .require_protected_hibernation(&equivalent)
+                .is_ok()
+        );
+        if let Some(crate::resume::device::Device::Luks2 { mapping, .. }) = &mut equivalent.device {
+            *mapping = "other-swap".into();
+        }
+        assert!(
+            authorization
+                .require_protected_hibernation(&equivalent)
+                .is_err()
+        );
+        equivalent = config.clone();
+        equivalent.role = crate::resume::Role::CancelOnly;
+        assert!(
+            authorization
+                .require_protected_hibernation(&equivalent)
+                .is_err()
+        );
+        authorization
+            .fixed_arguments
+            .push("sysctl.kernel.kexec_load_disabled=0".into());
+        assert!(
+            authorization
+                .require_protected_hibernation(&config)
+                .is_err()
+        );
+        authorization.fixed_arguments.pop();
+        authorization
+            .protected_hibernation
+            .as_mut()
+            .unwrap()
+            .record_protocol = 1;
+        assert!(authorization.validate().is_err());
     }
     #[test]
     fn argument_index_separates_generations_but_preserves_typed_clone_root() {

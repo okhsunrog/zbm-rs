@@ -57,11 +57,16 @@ impl LoadedKernel {
         if config.security.mode != crate::config::SecurityMode::Enforce {
             return Err(io::Error::other("Verified broker requires enforced image"));
         }
-        let verified = zbm_core::security::Authorization::load_for_plan(
+        let authorization = zbm_core::security::Authorization::load_for_plan(
             plan,
             &config.security.target_authorities,
-        )?
-        .prepare(plan, owned_clone)?;
+        )?;
+        if config.resume.enabled() {
+            authorization
+                .policy()
+                .require_protected_hibernation(&config.resume)?;
+        }
+        let verified = authorization.prepare(plan, owned_clone)?;
         let command = CString::new(zbm_core::linux::command_line(verified.arguments())?)?;
         std::fs::write("/run/zbm-rs/kexec-owned", b"verified-broker\n")?;
         let result = unsafe {

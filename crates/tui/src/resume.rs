@@ -145,6 +145,41 @@ pub async fn unlock(
 
 /// Native early-boot and pre-hibernation roles of the same executable.
 pub fn utility(args: &[std::ffi::OsString]) -> Result<bool> {
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--resume-capabilities")
+    {
+        anyhow::ensure!(args.len() == 1, "usage: zbm-rs --resume-capabilities");
+        println!(
+            "{}",
+            serde_json::json!({
+                "version": 1,
+                "record_protocol": zbm_core::resume::linux::RECORD_PROTOCOL,
+                "durable_attempt_tracking": true,
+                "cancel_only": true,
+            })
+        );
+        return Ok(true);
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--resume-status-config")
+    {
+        anyhow::ensure!(
+            unsafe { libc::geteuid() } == 0 && args.len() == 2,
+            "usage (root): zbm-rs --resume-status-config IMAGE_CONFIG"
+        );
+        let config = crate::config::parse(&std::fs::read_to_string(&args[1])?)?;
+        let device = config
+            .resume
+            .device()
+            .ok_or_else(|| anyhow::anyhow!("Resume is not configured"))?;
+        let status = config
+            .resume
+            .apply_role(Swap::open_device(&device, false)?.status()?);
+        println!("{}", serde_json::to_string(&status)?);
+        return Ok(true);
+    }
     if args.first().is_some_and(|arg| {
         arg == "--resume-record-current" || arg == "--resume-record-current-config"
     }) {
@@ -226,6 +261,7 @@ pub fn utility(args: &[std::ffi::OsString]) -> Result<bool> {
             || arg == "--resume-record-config"
             || arg == "--resume-restore"
             || arg == "--resume-restore-config"
+            || arg == "--resume-finish-config"
     }) {
         anyhow::ensure!(
             unsafe { libc::geteuid() } == 0,
@@ -236,7 +272,10 @@ pub fn utility(args: &[std::ffi::OsString]) -> Result<bool> {
             args.len() == if recording { 4 } else { 2 },
             "usage: zbm-rs --resume-record PARTUUID POOL_GUID PLAN_JSON | --resume-restore PARTUUID"
         );
-        let device = if args[0] == "--resume-restore-config" || args[0] == "--resume-record-config"
+        let finishing = args[0] == "--resume-finish-config";
+        let device = if args[0] == "--resume-restore-config"
+            || args[0] == "--resume-record-config"
+            || finishing
         {
             let config = crate::config::parse(&std::fs::read_to_string(&args[1])?)?;
             anyhow::ensure!(
@@ -255,8 +294,10 @@ pub fn utility(args: &[std::ffi::OsString]) -> Result<bool> {
                     .into(),
             }
         };
-        let swap = zbm_core::resume::linux::Swap::open_device(&device, recording)?;
-        if recording {
+        let swap = zbm_core::resume::linux::Swap::open_device(&device, recording || finishing)?;
+        if finishing {
+            swap.finish_attempt()?;
+        } else if recording {
             use std::io::Read;
             let guid: u64 = args[2]
                 .to_str()
@@ -270,6 +311,18 @@ pub fn utility(args: &[std::ffi::OsString]) -> Result<bool> {
             let plan = serde_json::from_slice(&bytes)?;
             swap.record(guid, &plan)?;
         } else {
+            if let Status::Pending { session } = swap.status()? {
+                let id = session.id;
+                drop(swap);
+                let writer = Swap::open_device(&device, true)?;
+                writer.arm_attempt(&id)?;
+                drop(writer);
+                // The kernel needs to open this device itself. No exclusive
+                // userspace writer may survive across the resume syscall.
+                let swap = Swap::open_device(&device, false)?;
+                swap.restore()?;
+                return Ok(true);
+            }
             swap.restore()?;
         }
         return Ok(true);

@@ -15,7 +15,9 @@ use std::{
 
 const PAGE: usize = 4096;
 const BOOTBITS: usize = 1024;
-const MAGIC: &[u8; 16] = b"ZBM-RESUME-v1\0\0\0";
+pub const RECORD_PROTOCOL: u32 = 2;
+const MAGIC: &[u8; 16] = b"ZBM-RESUME-v2\0\0\0";
+const LEGACY_MAGIC: &[u8; 16] = b"ZBM-RESUME-v1\0\0\0";
 const SWAP: &[u8; 10] = b"SWAPSPACE2";
 const IMAGE: &[u8; 10] = b"S1SUSPEND\0";
 
@@ -26,6 +28,17 @@ struct Record {
     kernel: String,
     initrd: Option<String>,
     cmdline: Vec<String>,
+    #[serde(default)]
+    boot_id: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    attempting: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+fn owned_record(h: &[u8; PAGE]) -> bool {
+    &h[..16] == MAGIC || &h[..16] == LEGACY_MAGIC
 }
 
 fn error(message: impl Into<String>) -> io::Error {
@@ -120,12 +133,12 @@ impl Swap {
             return Err(error("Invalid pool GUID"));
         }
         let h = self.header()?;
-        if &h[PAGE - 10..] != SWAP {
+        if &h[PAGE - 10..] != SWAP || !matches!(status(&h)?, Status::Inactive) {
             return Err(error(
                 "Resume recording requires inactive, formatted swap without an image",
             ));
         }
-        if h[..BOOTBITS].iter().any(|b| *b != 0) && &h[..16] != MAGIC {
+        if h[..BOOTBITS].iter().any(|b| *b != 0) && !owned_record(&h) {
             return Err(error(
                 "Swap bootbits are occupied; refusing to overwrite them",
             ));
@@ -144,8 +157,16 @@ impl Swap {
             kernel: hash_file(&plan.kernel)?,
             initrd: plan.initrd.as_deref().map(hash_file).transpose()?,
             cmdline: plan.cmdline.clone(),
+            boot_id: fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+                .trim()
+                .into(),
+            attempting: false,
         };
-        let bytes = serde_json::to_vec(&record).map_err(|e| error(e.to_string()))?;
+        self.write_record(&record, &h)
+    }
+
+    fn write_record(&self, record: &Record, before: &[u8; PAGE]) -> io::Result<()> {
+        let bytes = serde_json::to_vec(record).map_err(|e| error(e.to_string()))?;
         let packed = zstd::stream::encode_all(bytes.as_slice(), 3)?;
         if packed.len() > BOOTBITS - 20 {
             return Err(error("Boot identity exceeds swap bootbits capacity"));
@@ -156,20 +177,76 @@ impl Swap {
         bits[20..20 + packed.len()].copy_from_slice(&packed);
         self.file.write_all_at(&bits, 0)?;
         self.file.sync_all()?;
-        if self.header()?[..BOOTBITS] != bits {
+        let after = self.header()?;
+        if after[..BOOTBITS] != bits || after[BOOTBITS..] != before[BOOTBITS..] {
             return Err(error("Resume record verification failed"));
         }
         Ok(())
     }
 
+    /// Persist before the kernel consumes S1SUSPEND. A failed or interrupted
+    /// verifier must not turn the following boot into an apparently cold boot.
+    /// Drop this exclusive writer before invoking the kernel resume interface.
+    pub fn arm_attempt(&self, expected: &str) -> io::Result<()> {
+        let h = self.header()?;
+        if digest(&h) != expected || &h[PAGE - 10..] != IMAGE {
+            return Err(error("Saved image changed before arming resume"));
+        }
+        let mut record = record(&h)?;
+        if !valid_partuuid(&record.boot_id) {
+            return Err(error(
+                "Image predates durable resume tracking; discard the saved session",
+            ));
+        }
+        record.attempting = true;
+        self.write_record(&record, &h)
+    }
+
+    /// Only the restored kernel has the boot ID saved before hibernation.
+    /// Run after systemd-hibernate returns, with swap temporarily deactivated.
+    pub fn finish_attempt(&self) -> io::Result<()> {
+        let h = self.header()?;
+        if &h[PAGE - 10..] != SWAP {
+            return Err(error("Cannot finish a resume while an image remains"));
+        }
+        if !owned_record(&h) {
+            return Ok(());
+        }
+        let mut record = record(&h)?;
+        if !record.attempting {
+            return Ok(());
+        }
+        if record.boot_id != fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim() {
+            return Err(error(
+                "Only the restored kernel may finish the resume attempt",
+            ));
+        }
+        record.attempting = false;
+        self.write_record(&record, &h)
+    }
+
     /// Restore only Linux's original swap signature. Payload is not erased.
     pub fn cancel(&self, expected: &str) -> io::Result<()> {
-        let h = self.header()?;
-        if &h[PAGE - 10..] != IMAGE || digest(&h) != expected {
+        let mut h = self.header()?;
+        let record = record(&h).ok();
+        let attempted = record.as_ref().is_some_and(|record| record.attempting);
+        if digest(&h) != expected
+            || (&h[PAGE - 10..] != IMAGE
+                && !(&h[PAGE - 10..] == SWAP
+                    && owned_record(&h)
+                    && (attempted || record.is_none())))
+        {
             return Err(error("Saved image changed; cancellation consent expired"));
         }
-        if &h[PAGE - 20..PAGE - 10] != SWAP {
+        if &h[PAGE - 10..] == IMAGE && &h[PAGE - 20..PAGE - 10] != SWAP {
             return Err(error("Unrecognized original swap signature"));
+        }
+        if owned_record(&h) && (attempted || record.is_none()) {
+            // Consent also discards an interrupted attempt's routing metadata.
+            // Clear it before the Linux signature: interruption stays blocked.
+            h[..BOOTBITS].fill(0);
+            self.file.write_all_at(&h[..BOOTBITS], 0)?;
+            self.file.sync_all()?;
         }
         self.file.write_all_at(SWAP, (PAGE - 10) as u64)?;
         self.file.sync_all()?;
@@ -216,6 +293,11 @@ impl Swap {
         if pending {
             let saved = record(&h)?;
             verify_running_cmdline(&saved.cmdline)?;
+            if &h[PAGE - 10..] != IMAGE || !saved.attempting {
+                return Err(error(
+                    "Previous resume did not complete; explicit image cancellation is required",
+                ));
+            }
         }
         for line in fs::read_to_string("/proc/self/mountinfo")?.lines() {
             let kind = line
@@ -261,6 +343,17 @@ impl Swap {
             Err(e) if e.kind() == io::ErrorKind::NotFound => (),
             Err(e) => return Err(e),
         }
+        if !pending
+            && !fs::read_to_string("/sys/power/state")?
+                .split_whitespace()
+                .any(|state| state == "disk")
+        {
+            // A rescue handoff may lack TPM provenance or explicitly disable
+            // hibernation. Verified empty swap may cold-boot in that case;
+            // pending images and incomplete attempts never take this branch.
+            eprintln!("Hibernation unavailable; verified empty swap permits cold boot");
+            return Ok(());
+        }
         let dev = self.file.metadata()?.rdev();
         fs::write("/sys/power/resume_offset", b"0")?;
         fs::write(
@@ -284,7 +377,7 @@ impl Swap {
 }
 
 fn record(h: &[u8; PAGE]) -> io::Result<Record> {
-    if &h[..16] != MAGIC {
+    if !owned_record(h) {
         return Err(error("Image has no zbm-rs boot identity"));
     }
     let len = u32::from_le_bytes(h[16..20].try_into().unwrap()) as usize;
@@ -301,6 +394,15 @@ fn record(h: &[u8; PAGE]) -> io::Result<Record> {
 }
 fn status(h: &[u8; PAGE]) -> io::Result<Status> {
     if &h[PAGE - 10..] == SWAP {
+        if owned_record(h) {
+            match record(h) {
+                Ok(record) if !record.attempting => (),
+                _ => return Ok(Status::Unavailable {
+                    session_id: digest(h),
+                    reason: "Previous resume attempt did not finish or its record is damaged; discard the saved session before booting or modifying pools".into(),
+                }),
+            }
+        }
         return Ok(Status::Inactive);
     }
     if &h[PAGE - 10..] != IMAGE {
@@ -314,6 +416,13 @@ fn status(h: &[u8; PAGE]) -> io::Result<Status> {
     let id = digest(h);
     match record(h) {
         Ok(mut record) => {
+            if !valid_partuuid(&record.boot_id) {
+                return Ok(Status::Unavailable {
+                    session_id: id,
+                    reason: "Image predates durable resume tracking; discard the saved session"
+                        .into(),
+                });
+            }
             record.session.id = id;
             let status = Status::Pending {
                 session: Box::new(record.session),
@@ -373,6 +482,22 @@ mod tests {
                 .file
                 .write_all_at(IMAGE, (PAGE - 10) as u64)
                 .unwrap();
+        }
+        fn recorded_image(&self) {
+            let kernel = self.directory.join("kernel");
+            fs::write(&kernel, b"kernel").unwrap();
+            self.swap
+                .record(
+                    42,
+                    &BootPlan {
+                        target: crate::resume::tests::fixture().target,
+                        kernel,
+                        initrd: None,
+                        cmdline: vec!["root=ZFS=tank/root".into()],
+                    },
+                )
+                .unwrap();
+            self.mark_image();
         }
     }
     impl Drop for Fixture {
@@ -446,8 +571,102 @@ mod tests {
         h[20..24].copy_from_slice(b"oops");
         assert!(matches!(status(&h).unwrap(), Status::Unavailable { .. }));
         h[PAGE - 10..].copy_from_slice(SWAP);
-        assert!(matches!(status(&h).unwrap(), Status::Inactive));
+        assert!(matches!(status(&h).unwrap(), Status::Unavailable { .. }));
         h[PAGE - 1] = 0;
         assert!(status(&h).is_err());
+    }
+
+    #[test]
+    fn consumed_image_stays_protected_until_confirmed_discard() {
+        let fixture = Fixture::new();
+        fixture.recorded_image();
+        fixture
+            .swap
+            .file
+            .write_all_at(b"payload", PAGE as u64)
+            .unwrap();
+        let before = fixture.swap.header().unwrap();
+        fixture.swap.arm_attempt(&digest(&before)).unwrap();
+        assert!(record(&fixture.swap.header().unwrap()).unwrap().attempting);
+        assert!(fixture.swap.arm_attempt(&digest(&before)).is_err());
+        // The kernel clears the Linux signature before authenticating RAM.
+        fixture
+            .swap
+            .file
+            .write_all_at(SWAP, (PAGE - 10) as u64)
+            .unwrap();
+        fixture.swap.file.sync_all().unwrap();
+        let status = fixture.swap.status().unwrap();
+        assert!(matches!(status, Status::Unavailable { .. }));
+        fixture.swap.cancel(status.session_id().unwrap()).unwrap();
+        assert!(matches!(fixture.swap.status().unwrap(), Status::Inactive));
+        let mut payload = [0; 7];
+        fixture
+            .swap
+            .file
+            .read_exact_at(&mut payload, PAGE as u64)
+            .unwrap();
+        assert_eq!(&payload, b"payload");
+    }
+
+    #[test]
+    fn only_original_boot_can_finish_and_torn_attempt_is_cancellable() {
+        let fixture = Fixture::new();
+        fixture.recorded_image();
+        fixture
+            .swap
+            .arm_attempt(&digest(&fixture.swap.header().unwrap()))
+            .unwrap();
+        fixture
+            .swap
+            .file
+            .write_all_at(SWAP, (PAGE - 10) as u64)
+            .unwrap();
+        let h = fixture.swap.header().unwrap();
+        let mut record = record(&h).unwrap();
+        let original_id = record.boot_id.clone();
+        record.boot_id = "12345678-1234-1234-1234-123456789abc".into();
+        fixture.swap.write_record(&record, &h).unwrap();
+        assert!(fixture.swap.finish_attempt().is_err());
+        assert!(fixture.swap.status().unwrap().protected());
+        record.boot_id = original_id;
+        fixture
+            .swap
+            .write_record(&record, &fixture.swap.header().unwrap())
+            .unwrap();
+        fixture.swap.finish_attempt().unwrap();
+        assert!(matches!(fixture.swap.status().unwrap(), Status::Inactive));
+        // A partially persisted record must not look like an empty session.
+        fixture.swap.file.write_all_at(b"oops", 20).unwrap();
+        let status = fixture.swap.status().unwrap();
+        assert!(status.protected());
+        fixture.swap.cancel(status.session_id().unwrap()).unwrap();
+        assert!(matches!(fixture.swap.status().unwrap(), Status::Inactive));
+    }
+
+    #[test]
+    fn legacy_image_needs_discard_and_next_record_upgrades_the_protocol() {
+        let fixture = Fixture::new();
+        fixture.recorded_image();
+        let h = fixture.swap.header().unwrap();
+        let mut old = record(&h).unwrap();
+        old.boot_id.clear();
+        fixture.swap.write_record(&old, &h).unwrap();
+        fixture.swap.file.write_all_at(LEGACY_MAGIC, 0).unwrap();
+        let status = fixture.swap.status().unwrap();
+        assert!(matches!(status, Status::Unavailable { .. }));
+        assert!(
+            fixture
+                .swap
+                .arm_attempt(status.session_id().unwrap())
+                .is_err()
+        );
+        fixture.swap.cancel(status.session_id().unwrap()).unwrap();
+        fixture.recorded_image();
+        assert_eq!(&fixture.swap.header().unwrap()[..16], MAGIC);
+        assert!(matches!(
+            fixture.swap.status().unwrap(),
+            Status::Pending { .. }
+        ));
     }
 }

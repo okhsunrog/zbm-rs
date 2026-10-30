@@ -1,24 +1,31 @@
 { self, pkgs, nixpkgs, system,
-  kernelPackages ? null, signedKernel ? null, signedModules ? null }:
+  kernelPackages ? null, signedKernel ? null, signedModules ? null,
+  tpmDeviceModel ? "tpm-crb", negativeCase ? "signature",
+  tpmBanks ? [ "sha1" "sha256" ], credentialPoolGuid ? "42",
+  targetSigning ? null, enforcedTarget ? false, secretSource ? null }:
 let
   authenticated = kernelPackages != null;
+  coldOnly = builtins.elem negativeCase [ "cold-unavailable" "cold-disabled" ];
   manifest = if authenticated then builtins.fromJSON
     (builtins.readFile "${signedModules}/zbm-module-manifest.json") else null;
+  signedPackages = if authenticated then kernelPackages.extend (_: _: {
+    kernel = import ./signed-vm-kernel.nix {
+      inherit pkgs signedKernel;
+      kernel = kernelPackages.kernel;
+    };
+  }) else null;
   protectedProfile = { lib, ... }: lib.mkIf authenticated {
-    boot.kernelPackages = kernelPackages;
+    boot.kernelPackages = signedPackages;
     system.modulesTree = lib.mkForce [ signedModules ];
-    system.systemBuilderCommands = lib.mkAfter ''
-      rm "$out/kernel"
-      ln -s ${signedKernel} "$out/kernel"
-    '';
     # Kernel/TPM mechanics only; enforced BootAuthorization/IMA and firmware
     # Secure Boot are separate acceptance gates.
-    security.lsm = lib.mkForce [ "landlock" "lockdown" "yama" "bpf" ];
+    security.lsm = lib.mkForce ([ "landlock" "lockdown" "yama" "bpf" ]
+      ++ lib.optional enforcedTarget "ima");
   };
   loader = self.packages.${system}.zbm-rs;
   partuuid = "12345678-1234-1234-1234-123456789abc";
   luksUuid = "ca55a30a-636e-4e69-9e68-bb36bf380408";
-  target = (nixpkgs.lib.nixosSystem {
+  targetConfig = (nixpkgs.lib.nixosSystem {
     inherit system;
     modules = [
       protectedProfile
@@ -30,17 +37,19 @@ let
         networking.hostId = "00bab10c";
         boot.loader.zbm-rs = {
           enable = true;
+          signing = pkgs.lib.optionalAttrs (targetSigning != null)
+            (targetSigning // { enable = true; });
           hibernation = {
             enable = true;
             swap = { type = "luks2"; inherit partuuid; luksDevice = "resume-swap"; };
             # Loader credential resolution is tested separately through the UI.
-            credential = { type = "zfs-unlock"; poolGuid = "42"; encryptionRoot = "testpool"; };
+            credential = { type = "zfs-unlock"; poolGuid = credentialPoolGuid; encryptionRoot = "testpool"; };
           };
         };
         boot.zfs.unsafeAllowHibernation = true;
         boot.zfs.devNodes = "/dev/disk/by-path";
         boot.zfs.requestEncryptionCredentials = [ "testpool" ];
-        boot.initrd.secrets."/etc/zfs/test.key" = "/etc/zfs/test.key";
+        boot.initrd.secrets."/etc/zfs/test.key" = if secretSource == null then "/etc/zfs/test.key" else secretSource;
         boot.initrd.luks.devices.resume-swap = {
           device = "/dev/disk/by-uuid/${luksUuid}";
           keyFile = "/etc/zfs/test.key";
@@ -90,9 +99,25 @@ let
           '';
         };
         boot.initrd.systemd.services.zbm-resume = {
-          requires = [ "test-kexec-disabled-early.service" ];
-          after = [ "test-kexec-disabled-early.service" ];
+          requires = [ "test-kexec-disabled-early.service" ]
+            ++ pkgs.lib.optional authenticated "test-remove-tpm.service";
+          after = [ "test-kexec-disabled-early.service" ]
+            ++ pkgs.lib.optional authenticated "test-remove-tpm.service";
           serviceConfig.StandardError = "journal+console";
+        };
+        boot.initrd.systemd.services.test-remove-tpm = pkgs.lib.mkIf authenticated {
+          unitConfig = {
+            DefaultDependencies = false;
+            ConditionPathExists = "/etc/zbm-rs/test-without-tpm";
+          };
+          serviceConfig = { Type = "oneshot"; StandardOutput = "journal+console"; };
+          script = ''
+            set -eu
+            device=$(basename "$(readlink -f /sys/class/tpm/tpm0/device)")
+            echo "$device" > /sys/class/tpm/tpm0/device/driver/unbind
+            test ! -e /sys/class/tpm/tpm0
+            echo ZBM_TEST_TPM_REMOVED
+          '';
         };
         boot.initrd.systemd.services.test-before-pool-import = pkgs.lib.mkIf authenticated {
           requires = [ "zbm-resume.service" ];
@@ -107,25 +132,40 @@ let
         swapDevices = [{ device = "/dev/mapper/resume-swap"; }];
         environment.systemPackages = [ pkgs.kexec-tools pkgs.cryptsetup pkgs.lvm2 loader ]
           ++ pkgs.lib.optional authenticated pkgs.tpm2-tools;
+        environment.etc."zbm-rs/test-resume-policy.json".source = resumeConfig;
         system.stateVersion = "26.05";
       }
     ];
-  }).config.system.build.toplevel;
+  }).config;
+  target = targetConfig.system.build.toplevel;
+  resumeConfig = pkgs.writeText "test-resume-policy.json" (builtins.toJSON {
+    resume = targetConfig.boot.loader.zbm-rs.hibernation.resumeConfig;
+  });
   planConfig = pkgs.writeText "resume-plan-config.json" "{}";
 in
 assert (signedKernel != null) == authenticated && (signedModules != null) == authenticated;
+assert !enforcedTarget || (authenticated && targetSigning != null);
 assert !authenticated || manifest.kernel_store_path == toString kernelPackages.kernel;
 assert !authenticated || manifest.module_version == kernelPackages.kernel.modDirVersion;
-pkgs.testers.runNixOSTest {
-  name = if authenticated then "zbm-tpm-authenticated-hibernation" else "zbm-encrypted-hibernation";
+assert builtins.elem tpmDeviceModel [ "tpm-tis" "tpm-crb" ];
+assert builtins.elem negativeCase [ "signature" "tpm-reset" "tpm-unavailable" "cold-unavailable" "cold-disabled" ];
+assert negativeCase != "cold-unavailable" || authenticated;
+assert tpmBanks != [] && pkgs.lib.unique tpmBanks == tpmBanks
+  && builtins.all (bank: builtins.elem bank [ "sha1" "sha256" ]) tpmBanks;
+(pkgs.testers.runNixOSTest {
+  name = if authenticated then "zbm-authenticated-hibernation-${tpmDeviceModel}-${pkgs.lib.concatStringsSep "-" tpmBanks}-${negativeCase}"
+    else if coldOnly then "zbm-encrypted-cold-disabled" else "zbm-encrypted-hibernation";
   globalTimeout = 900;
-  nodes.machine = { lib, ... }: {
+  nodes.machine = { lib, config, ... }: {
     imports = [ protectedProfile ];
     boot.loader.grub.enable = lib.mkIf authenticated (lib.mkForce false);
     boot.loader.systemd-boot.enable = authenticated;
     virtualisation.useBootLoader = authenticated;
     virtualisation.useEFIBoot = authenticated;
     virtualisation.tpm.enable = authenticated;
+    virtualisation.tpm.deviceModel = lib.mkIf authenticated tpmDeviceModel;
+    virtualisation.tpm.provisioning = lib.mkIf authenticated
+      (import ./tpm-pcr-provision.nix { inherit pkgs; banks = tpmBanks; });
     # virtio-fs cannot freeze for hibernation. Use an isolated block store and
     # no shared devices; the installed target never mounts the bootstrap disks.
     virtualisation.useNixStoreImage = true;
@@ -135,11 +175,18 @@ pkgs.testers.runNixOSTest {
     virtualisation.qemu.enableSharedMemory = false;
     networking.hostId = "00bab10c";
     boot.supportedFilesystems = [ "zfs" ];
+    # Bootstrap owns separate disks and must never act on the target's
+    # HibernateLocation EFI variable. Only the selected native gate may resume.
+    boot.kernelParams = [ "hibernate=noresume" ];
+    boot.initrd.systemd.suppressedUnits = [ "systemd-hibernate-resume.service" "systemd-hibernate-resume@.service" ];
+    boot.initrd.systemd.suppressedStorePaths = [
+      "${config.boot.initrd.systemd.package}/lib/systemd/system-generators/systemd-hibernate-resume-generator"
+    ];
     virtualisation.memorySize = 2048;
     virtualisation.emptyDiskImages = [ 12000 2048 ];
-    virtualisation.additionalPaths = [ target ];
+    virtualisation.additionalPaths = [ target resumeConfig ];
     environment.systemPackages = [ pkgs.zfs pkgs.kexec-tools pkgs.nixos-install-tools pkgs.cryptsetup pkgs.lvm2 pkgs.gptfdisk loader ]
-      ++ lib.optionals authenticated [ pkgs.tpm2-tools pkgs.uv pkgs.python3 ];
+      ++ lib.optionals authenticated [ pkgs.tpm2-tools pkgs.uv pkgs.python3 pkgs.cpio ];
   };
   testScript = ''
     import json, shlex, datetime
@@ -156,7 +203,13 @@ pkgs.testers.runNixOSTest {
     # That filesystem is never mounted by the hibernating target. After sleep,
     # bootstrap must not import testpool or activate its swap before kexec.
     machine.succeed("cp " + shlex.quote(plan["kernel"]) + " /root/resume-kernel; cp " + shlex.quote(plan["initrd"]) + " /root/resume-initrd")
+    ${pkgs.lib.optionalString authenticated ''
+    machine.succeed("cmp /root/resume-kernel ${signedKernel}")
+    ''}
     cmdline = " ".join('"' + a + '"' if any(c.isspace() for c in a) else a for a in plan["cmdline"])
+    ${pkgs.lib.optionalString (negativeCase == "cold-disabled") ''
+    cmdline += " nohibernate"
+    ''}
     load_prefix = "kexec ${pkgs.lib.optionalString authenticated "--kexec-file-syscall "}-l /root/resume-kernel --initrd=/root/resume-initrd --command-line="
     load = load_prefix + shlex.quote(cmdline)
     machine.succeed("umount /mnt; zpool export testpool")
@@ -168,6 +221,9 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("multi-user.target")
     machine.succeed("test ! -e /dev/mapper/resume-swap; ! zpool list -H -o name | grep -qx testpool")
     machine.succeed("test $(cat /proc/sys/kernel/kexec_load_disabled) = 0")
+    ${pkgs.lib.optionalString (negativeCase == "cold-unavailable") ''
+    machine.succeed("mkdir -p /root/without-tpm/etc/zbm-rs; touch /root/without-tpm/etc/zbm-rs/test-without-tpm; cd /root/without-tpm; find . | cpio -o -H newc >> /root/resume-initrd")
+    ''}
     machine.succeed(load)
     machine.execute("systemctl --no-block kexec", check_return=False)
     machine.connected = False
@@ -181,11 +237,23 @@ pkgs.testers.runNixOSTest {
             assert status != 0 and "Operation not permitted" in output, (mode, status, output)
         machine.succeed("set -eu; test $(cat /proc/sys/kernel/kexec_load_disabled) = 1; test $(cat /sys/kernel/kexec_loaded) = 0")
     check_target_kexec_disabled()
-    ${pkgs.lib.optionalString authenticated ''
+    ${pkgs.lib.optionalString (authenticated && !coldOnly) ''
     machine.succeed("set -eu; grep -q '\\[integrity\\]' /sys/kernel/security/lockdown; test -c /dev/tpm0; tpm2_nvreadpublic 0x014c4853")
+    banks = machine.succeed("printf '%s\\n' /sys/class/tpm/tpm0/pcr-*").splitlines()
+    assert sorted(path.rsplit("pcr-", 1)[-1] for path in banks) == sorted(${builtins.toJSON tpmBanks}), banks
     machine.wait_for_console_text("ZBM_TEST_BEFORE_POOL_IMPORT", timeout=10)
     ''}
     machine.succeed("test $(findmnt -n -o SOURCE /) = testpool/root; test -b /dev/mapper/resume-swap; grep -q /dev/dm- /proc/swaps")
+    ${pkgs.lib.optionalString coldOnly ''
+    machine.succeed("set -eu; ! grep -qw disk /sys/power/state; zpool status -x | grep -q 'all pools are healthy'")
+    assert json.loads(machine.succeed("${loader}/bin/zbm-rs --resume-status-config ${resumeConfig}"))["state"] == "inactive"
+    machine.wait_for_console_text("Hibernation unavailable; verified empty swap permits cold boot", timeout=10)
+    ${pkgs.lib.optionalString authenticated ''
+    machine.succeed("test ! -e /sys/class/tpm/tpm0; grep -q '\\[integrity\\]' /sys/kernel/security/lockdown")
+    machine.wait_for_console_text("ZBM_TEST_BEFORE_POOL_IMPORT", timeout=10)
+    ''}
+    ''}
+    ${pkgs.lib.optionalString (!coldOnly) ''
     machine.succeed("test $(cat /sys/power/resume) = $(lsblk -dn -o MAJ:MIN /dev/mapper/resume-swap); grep -qw disk /sys/power/state")
     before = machine.succeed("cat /proc/sys/kernel/random/boot_id").strip()
     machine.succeed("printf preserved-in-ram > /run/resume-proof; echo 67108864 > /sys/power/image_size")
@@ -202,6 +270,12 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("multi-user.target")
     after = machine.succeed("cat /proc/sys/kernel/random/boot_id").strip()
     assert before == after, (before, after, "cold boot occurred instead of RAM restore")
+    machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value systemd-hibernate.service) = inactive", timeout=30)
+    machine.succeed("test $(systemctl show -p Result --value systemd-hibernate.service) = success")
+    assert json.loads(machine.succeed("${loader}/bin/zbm-rs --resume-status-config ${resumeConfig}"))["state"] == "inactive"
+    # The restored kernel may have older block-cache pages. Confirm the cleared
+    # attempt is actually on disk, rather than accepting a cached header alone.
+    machine.succeed("dd if=/dev/mapper/resume-swap of=/run/resume-header-direct bs=4096 count=1 iflag=direct status=none; dd if=/dev/mapper/resume-swap of=/run/resume-header-cached bs=4096 count=1 status=none; cmp /run/resume-header-direct /run/resume-header-cached")
     check_target_kexec_disabled()
     machine.succeed("test $(cat /run/resume-proof) = preserved-in-ram; test $(findmnt -n -o SOURCE /) = testpool/root; zpool status -x | grep -q 'all pools are healthy'")
     machine.succeed("journalctl -b --no-pager | grep -E 'hibernation (entry|exit)' ")
@@ -213,17 +287,66 @@ pkgs.testers.runNixOSTest {
     machine.start()
     machine.wait_for_unit("multi-user.target")
     machine.succeed("set -eu; test $(hostname) != resume-target; test ! -e /dev/mapper/resume-swap; ! zpool list -H -o name | grep -qx testpool")
+    ${pkgs.lib.optionalString (negativeCase == "signature") ''
     machine.succeed("cryptsetup open --key-file /etc/zfs/test.key /dev/vdd1 resume-swap")
     machine.succeed("uv run --offline --no-project --python ${pkgs.python3}/bin/python ${./tamper-hibernation-signature.py} /dev/mapper/resume-swap")
+    machine.succeed("cryptsetup close resume-swap")
+    ''}
+    ${pkgs.lib.optionalString (negativeCase == "tpm-reset") ''
+    machine.succeed("tpm2_clear -c p")
+    ''}
+    ${pkgs.lib.optionalString (negativeCase == "tpm-unavailable") ''
+    # A fixture-only appended cpio enables the pre-resume driver removal. The
+    # mechanics fixture deliberately omits IMA; this is not an authorized loader
+    # handoff or a production mechanism for changing signed inputs.
+    machine.succeed("cp /root/resume-initrd /root/resume-initrd.clean; mkdir -p /root/without-tpm/etc/zbm-rs; touch /root/without-tpm/etc/zbm-rs/test-without-tpm; cd /root/without-tpm; find . | cpio -o -H newc >> /root/resume-initrd")
+    ''}
+    machine.succeed(load)
+    console_start = len(machine.get_console_log())
+    machine.execute("systemctl --no-block kexec", check_return=False)
+    machine.wait_for_console_text("${if negativeCase == "signature" then "Image signature verification failed" else if negativeCase == "tpm-reset" then "Image signing key was not created by the kernel" else "ZBM_TEST_TPM_REMOVED"}", timeout=90)
+    ${pkgs.lib.optionalString (negativeCase != "tpm-unavailable") ''
+    machine.wait_for_console_text("Kernel resume returned without restoring the saved session", timeout=30)
+    ''}
+    machine.wait_for_shutdown(timeout=datetime.timedelta(seconds=45))
+    # This marker is a required predecessor of the real ZFS import service.
+    assert "ZBM_TEST_BEFORE_POOL_IMPORT" not in machine.get_console_log()[console_start:]
+    # Linux consumed its image signature before verification failed. The durable
+    # attempt must still block a second boot, including after a full power cycle.
+    machine.start()
+    machine.wait_for_unit("multi-user.target")
+    machine.succeed("test ! -e /dev/mapper/resume-swap; ! zpool list -H -o name | grep -qx testpool")
+    machine.succeed("cryptsetup open --key-file /etc/zfs/test.key /dev/vdd1 resume-swap")
+    failed = json.loads(machine.succeed("${loader}/bin/zbm-rs --resume-status-config ${resumeConfig}"))
+    ${pkgs.lib.optionalString (negativeCase != "tpm-unavailable") ''
+    assert failed["state"] == "unavailable" and "Previous resume attempt" in failed["reason"], failed
+    ''}
+    ${pkgs.lib.optionalString (negativeCase == "tpm-unavailable") ''
+    assert failed["state"] == "pending", failed
+    machine.succeed("cp /root/resume-initrd.clean /root/resume-initrd")
+    ''}
     machine.succeed("cryptsetup close resume-swap")
     machine.succeed(load)
     console_start = len(machine.get_console_log())
     machine.execute("systemctl --no-block kexec", check_return=False)
-    machine.wait_for_console_text("Image signature verification failed", timeout=90)
-    machine.wait_for_console_text("Kernel resume returned without restoring the saved session", timeout=30)
+    ${pkgs.lib.optionalString (negativeCase != "tpm-unavailable") ''
+    machine.wait_for_console_text("Previous resume did not complete", timeout=90)
     machine.wait_for_shutdown(timeout=datetime.timedelta(seconds=45))
-    # This marker is a required predecessor of the real ZFS import service.
     assert "ZBM_TEST_BEFORE_POOL_IMPORT" not in machine.get_console_log()[console_start:]
     ''}
+    ${pkgs.lib.optionalString (negativeCase == "tpm-unavailable") ''
+    machine.wait_for_console_text("PM: hibernation: hibernation exit", timeout=90)
+    machine.wait_for_unit("multi-user.target")
+    assert machine.succeed("cat /proc/sys/kernel/random/boot_id").strip() == before
+    machine.succeed("test $(cat /run/resume-proof) = preserved-in-ram; zpool status -x | grep -q 'all pools are healthy'")
+    ''}
+    ''}
+    ''}
   '';
+}) // {
+  # The runtime-only protected-chain test prepares the same native target and
+  # signs its final inputs outside Nix after learning the disposable pool GUID.
+  nativeTarget = target;
+  nativeTargetConfig = targetConfig;
+  nativeResumeConfig = resumeConfig;
 }

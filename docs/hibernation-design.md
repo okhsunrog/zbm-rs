@@ -90,7 +90,9 @@ Image detection uses the actual kernel signature. A missing/invalid boot record
 leaves a cancellable image with Resume unavailable; it never guesses a target.
 Consent is bound to a hash of the current header. Cancellation reopens the block
 device exclusively (rejecting active swap), rechecks the header, restores only
-the original SWAPSPACE2 signature, syncs, and reads back the result. It preserves
+the original SWAPSPACE2 signature, syncs, and reads back the result. Interrupted
+attempt metadata, including damaged owned records, is cleared under the same
+explicit cancellation consent. It preserves
 the payload; this is invalidation, not secure erasure. Unknown signatures and
 changed images are refused.
 
@@ -100,6 +102,38 @@ Power off remains available. A subsequent boot inspects the on-disk signature
 again; ambiguous/partial headers remain blocked. Successful cancellation removes
 the marker only after flush and verification. The marker itself never authorizes
 resume or replaces image invalidation.
+
+Boot-record protocol v2 tracks consumed images; legacy v1 images without a boot
+ID are cancellable but cannot resume. A normal inactive v1 record can be replaced
+when preparing the next hibernation.
+
+Linux consumes S1SUSPEND before completing RAM-image verification. The target
+therefore first persists an `attempting` flag in the existing swap boot record,
+with flush and readback, then drops its exclusive writer before invoking the
+kernel resume interface. If Linux consumes the image and verification fails or
+power is lost, SWAPSPACE2 plus this flag remains a protected, cancellable session.
+A damaged owned record also requires explicit cancellation. Neither is treated
+as an empty swap on the following boot. A valid image not yet consumed can still
+be retried. Images predating this protocol remain cancellable but cannot resume.
+
+The post-hibernation hook temporarily deactivates swap and calls
+`--resume-finish-config`. Only the original kernel boot ID saved before sleep
+can clear the flag after a successful RAM restore; a fresh kernel cannot do so.
+Failure to finish keeps the next boot conservative. The hook reactivates swap
+even on failure. This is recovery bookkeeping, not cryptographic evidence or a
+pool consistency seal. `--resume-status-config` inspects this state without
+modifying the device. Unit tests cover consumed images, stale consent, a wrong
+boot ID and torn records. The ordinary Linux 6.18.55 encrypted-root VM restored
+RAM, retained its boot ID, completed the finish hook, and matched direct and
+buffered header reads. TPM-authenticated failure cases remain pending.
+
+If the kernel cannot hibernate, a verified empty swap may still cold-boot after
+the same filesystem/pool preflight. This supports repair through rescue without
+TPM provenance. No image or incomplete attempt can use that branch, and it does
+not initialize a hibernation device. The encrypted-root VM passed this path with
+`nohibernate`, including rejection of an early read-only pool import, healthy
+ZFS and ordinary paging after cold boot. The separate TPM-unavailable variant
+is prepared; its runtime result is pending.
 
 ## Encrypted swap and credential ownership
 
@@ -195,12 +229,12 @@ resume device for the next systemd hibernation. Recording verifies the currently
 mounted root dataset and actual running arguments against the published plan.
 
 The operator must explicitly opt into NixOS's unsafeAllowHibernation policy.
-The loader rejects this feature with enforced security because image
-authentication/lockdown integration is not implemented. ESP diagnostics must be
+The loader still rejects enforced resume while authenticated RAM restoration
+and the complete protected handoff are awaiting acceptance. ESP diagnostics must be
 disabled until their writes can be coordinated with saved filesystem state.
 These restrictions are not waived by the UI.
 
-## Agreed protected-boot architecture (not yet implemented)
+## Agreed protected-boot architecture (partial implementation, not accepted)
 
 The existing guard above is implemented in ordinary mode. The experimental
 Linux 7.2.9 TPM-signature patch set is a build checkpoint, not a validated
@@ -265,15 +299,33 @@ end-to-end enforced chain against arbitrary privileged kexec transitions.
 
 ### Owner authorization and compatibility
 
-Extend the signed BootAuthorization with a versioned protected-hibernation
-profile covering the exact kernel, initramfs, arguments and root selection.
-The publisher must validate the required build artifacts/configuration before
-signing this profile. A kernel version string, unsigned `prepared.json`, manual
-allowlist or possession of an ordinary PE signature is insufficient. Existing
-authorizations do not acquire the capability implicitly.
+BootAuthorization version 2 adds a `protected_hibernation` profile. Its version
+is 1, backend is `linux-tpm-signature-v1`, and `record_protocol` is 2. The signed
+`resume_policy_sha256` binds the dedicated partition/LUKS UUIDs, mapping name and
+credential source (pool GUID and encryption root). UUID case, decimal GUID
+spelling and legacy plain-partition syntax normalize; mapping/dataset names
+remain case sensitive. Shared Rust/Python vectors check the policy identity.
+The surrounding authorization still binds exact kernel/initramfs bytes,
+ordered arguments and the typed root selection. Version 1 authorizations remain
+readable and never gain this capability implicitly.
 
-The capable loader checks this profile for every outgoing boot, including cold
-boots, and rejects missing or unsupported profiles. After successful migration,
+The NixOS installation hook supplies an immutable build contract from its own
+configuration, never a discovered `prepared.json`. The contract checks the
+effective protected-kernel configuration and rendered resume/import units. The
+publisher compares actual kernel payload bytes with the approved shared build
+(allowing only PE signing metadata), checks that the final initrd retains the
+approved base byte-for-byte, and permits only declared regular secrets in an
+appended archive. It rejects code/policy replacements and verifies the final
+PE/IMA/CMS signatures. A kernel version string, ordinary PE signature, runtime
+marker or manual allowlist cannot substitute for these checks. This trusts the
+owner's Nix build/install hook; it is not remote build attestation.
+
+The broker checks this profile before clone creation and again before every
+verified handoff when resume is configured, including cold boots. Missing,
+unsupported or mismatched profiles fail, as does a missing/conflicting early
+target kexec prohibition. The publisher and broker checks are implemented;
+enforced configuration remains blocked until the native TPM and complete
+protected-chain VM tests pass. After successful migration,
 old generations are removed rather than retained as a required recovery path;
 independent rescue remains available to repair the system. The exact schema and
 artifact validator follow the supported-path provenance tests rather than
@@ -304,11 +356,13 @@ The cancellation-only role passed the disposable UI scenario: direct configured
 restore is refused, Enter requires cancellation confirmation, Esc preserves the
 image, and standalone discard stays in the menu. The ordinary flow and F10's
 whole-disk preservation check also passed. Integration into the independent
-candidate/known-good deployment remains pending. An older pinned
+candidate/known-good deployment is implemented and passed the disposable FAT
+publication test; host pin integration and exact-artifact boot acceptance remain
+pending. An older pinned
 image without the guard must not be presented as satisfying this contract.
 
 See [independent rescue publication](nixos-deployment.md#optional-efi-publication-and-independent-rescue)
-for the existing installer and the planned candidate/known-good lifecycle.
+for the independent installer and candidate/known-good lifecycle.
 
 ## Remaining safety boundary and validation
 

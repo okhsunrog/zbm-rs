@@ -4,7 +4,7 @@ Native hibernation state, cancellation and the planned protected-loader/target/
 rescue roles are specified in [the hibernation design](hibernation-design.md).
 The current ordinary-mode guard and experimental TPM backport are distinct from
 the unimplemented enforced-resume policy. Independent rescue publication and its
-planned candidate/known-good lifecycle are described in
+candidate/known-good lifecycle are described in
 [NixOS deployment](nixos-deployment.md#optional-efi-publication-and-independent-rescue).
 
 Pool discovery is non-mutating. The startup workflow separately imports eligible

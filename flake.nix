@@ -60,12 +60,16 @@
         zbm-rs-efi-test-host-only-scsi = mkImage { testProfile = true; profile = "host-only"; hardwareManifest = ./nix/scsi-hardware-example.json; };
       };
       checks.${system} = {
+        kernel-patch-isolation = import ./nix/check-kernel-patch-isolation.nix { inherit pkgs; };
         signed-module-tree = import ./nix/check-signed-module-tree.nix { inherit self pkgs; };
         encrypted-hibernation = import ./nix/check-encrypted-hibernation.nix { inherit self pkgs nixpkgs system; };
+        cold-resume-disabled = import ./nix/check-encrypted-hibernation.nix {
+          inherit self pkgs nixpkgs system; negativeCase = "cold-disabled";
+        };
         luks2-resume-device = import ./nix/check-luks2-resume.nix { inherit self pkgs; };
         prune-nixos = import ./nix/check-prune-nixos.nix { inherit pkgs; };
         resume-config = import ./nix/check-resume-config.nix { inherit self nixpkgs pkgs system; };
-        efi-install = import ./nix/check-efi-install.nix { inherit pkgs; };
+        efi-install = import ./nix/check-efi-install.nix { inherit pkgs self; };
         config-binary-reuse = import ./nix/check-config-reuse.nix { inherit pkgs mkImage; };
         native-nixos = import ./nix/check-native-nixos.nix { inherit self pkgs nixpkgs system; };
         module-options = let appliance = mkImage {

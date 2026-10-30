@@ -219,12 +219,18 @@ def install(config, system, spec, document_bytes, dataset, base):
             if len(roots) != 1 or not roots[0].endswith(dataset):
                 raise ValueError("Expected exactly one explicit selected root")
             staged_authorizations = stage / "authorizations"
-            command(["uv", "run", "--offline", "--no-project", "python", HERE / "authorize-boot.py",
+            authorize = ["uv", "run", "--offline", "--no-project", "python", HERE / "authorize-boot.py",
                 "--kernel", stage / "kernel", "--initramfs", stage / "initrd",
                 "--ima-signature", stage / "initrd.sig", "--arguments", arguments,
                 "--dataset", dataset, "--root-prefix", roots[0][:-len(dataset)],
                 "--allow-snapshot-clones", "--authority-key", signing["authorityKey"],
-                "--authority-cert", signing["authorityCertificate"], "--output", staged_authorizations])
+                "--authority-cert", signing["authorityCertificate"], "--output", staged_authorizations]
+            if contract := config.get("protectedHibernation"):
+                contract = Path(contract).resolve(strict=True)
+                if not contract.is_relative_to("/nix/store"):
+                    raise ValueError("Protected contract must come from the trusted Nix installation hook")
+                authorize.extend(["--protected-contract", contract])
+            command(authorize)
             authorizer.publish(staged_authorizations, base / "authorizations", Path(signing["authorityCertificate"]))
         gcroots = Path("/nix/var/nix/gcroots/zbm-rs")
         gcroots.mkdir(parents=True, exist_ok=True)

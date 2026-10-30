@@ -18,7 +18,7 @@ let
   }).config;
   off = evaluate false {};
   on = evaluate true {};
-  encrypted = evaluate true {
+  encryptedSettings = {
     boot.loader.zbm-rs.hibernation = {
       swapPartuuid = nixpkgs.lib.mkForce "";
       swap = { type = "luks2"; partuuid = "12345678-1234-1234-1234-123456789abc"; luksDevice = "resume-swap"; };
@@ -30,17 +30,21 @@ let
     };
     boot.initrd.secrets."/etc/zfs/test.key" = "/etc/zfs/test.key";
   };
+  encrypted = evaluate true encryptedSettings;
+  encryptedOff = evaluate false encryptedSettings;
   gate = on.boot.initrd.systemd.services.zbm-resume;
   rescue = self.lib.mkImage {
-    loaderConfig.resume = {
-      role = "cancel-only";
-      swap_partuuid = "12345678-1234-1234-1234-123456789abc";
-    };
+    loaderConfig.resume = encryptedOff.boot.loader.zbm-rs.hibernation.cancellationConfig;
   };
 in
 assert builtins.elem "nohibernate" (nixpkgs.lib.splitString " " rescue.cmdline);
 assert !(builtins.elem "sysctl.kernel.kexec_load_disabled=1" (nixpkgs.lib.splitString " " rescue.cmdline));
 assert !(off.boot.initrd.systemd.services ? zbm-resume);
+assert off.boot.loader.zbm-rs.hibernation.resumeConfig == {};
+assert encryptedOff.boot.loader.zbm-rs.hibernation.resumeConfig == {};
+assert encryptedOff.boot.loader.zbm-rs.hibernation.cancellationConfig.role == "cancel-only";
+assert encryptedOff.boot.loader.zbm-rs.hibernation.cancellationConfig.device.luks_uuid == "ca55a30a-636e-4e69-9e68-bb36bf380408";
+assert encryptedOff.boot.loader.zbm-rs.hibernation.cancellationConfig.credential.pool_guid == "18446744073709551615";
 assert !(builtins.elem "hibernate=noresume" off.boot.kernelParams);
 assert builtins.elem "hibernate=noresume" on.boot.kernelParams;
 assert !(builtins.elem "noresume" on.boot.kernelParams);

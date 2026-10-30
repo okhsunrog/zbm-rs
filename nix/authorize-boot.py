@@ -7,6 +7,10 @@ import os
 import re
 import subprocess
 import tempfile
+import importlib.util
+import sys
+
+sys.dont_write_bytecode = True
 
 def argument_id(arguments):
     if len(arguments) > 65:
@@ -49,6 +53,8 @@ def main():
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--root-prefix", choices=("root=ZFS=", "root=zfs:", "root=", "zfs="), default="root=ZFS=")
     parser.add_argument("--allow-snapshot-clones", action="store_true")
+    parser.add_argument("--protected-contract", type=Path,
+                        help="Trusted Nix installation contract for protected native hibernation")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]*(/[A-Za-z0-9_.:-]+)*", args.dataset):
         raise ValueError("Expected explicit valid ZFS source dataset")
@@ -71,6 +77,17 @@ def main():
                      "fixed_arguments": fixed, "root": {"source_dataset": args.dataset, "argument_index": root_index,
                      "prefix": args.root_prefix, "allow_snapshot_clones": args.allow_snapshot_clones},
                      "initramfs_ima_signature": list(signature)}
+    if args.protected_contract is not None:
+        if args.protected_contract.stat().st_size > 1024 * 1024:
+            raise ValueError("Oversized protected-hibernation contract")
+        contract = json.loads(args.protected_contract.read_text())
+        spec = importlib.util.spec_from_file_location("protected_hibernation", Path(__file__).with_name("protected-hibernation.py"))
+        validator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(validator)
+        authorization["protected_hibernation"] = validator.validate(contract, args.kernel, args.initramfs, arguments)
+        subprocess.run(["sbverify", "--cert", contract["kernel_certificate"], str(args.kernel)],
+                       check=True, stdout=subprocess.DEVNULL)
+        authorization["version"] = 2
     name = hashlib.sha256(f'{kernel["sha256"]}:{initramfs["sha256"]}'.encode()).hexdigest()
     args.output.mkdir(parents=True, exist_ok=True)
     index = argument_id(arguments)

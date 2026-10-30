@@ -133,7 +133,9 @@ def mounted(config, state):
                 command(["umount", directory])
 
 
-def deploy(config):
+@contextmanager
+def locked_esp(config):
+    """Share the publication lock and selected ESP across related EFI updates."""
     if os.geteuid() != 0:
         raise ValueError("EFI installation requires root")
     if not re.fullmatch(r"[0-9a-fA-F-]{36}", config["partuuid"]):
@@ -145,7 +147,12 @@ def deploy(config):
     with (state / "install.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         with mounted(config, state) as esp:
-            install(config, esp)
+            yield esp
+
+
+def deploy(config):
+    with locked_esp(config) as esp:
+        install(config, esp)
 
 
 if __name__ == "__main__":

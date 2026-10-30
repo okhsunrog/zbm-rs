@@ -10,14 +10,15 @@
 let
   cfg = config.boot.loader.zbm-rs;
   h = cfg.hibernation;
-  encryptedResume = h.enable && h.swap != null && h.swap.type == "luks2";
-  cryptName = if encryptedResume && h.swap.luksDevice != null then h.swap.luksDevice else "";
+  luksSwap = h.swap != null && h.swap.type == "luks2";
+  encryptedResume = h.enable && luksSwap;
+  cryptName = if luksSwap && h.swap.luksDevice != null then h.swap.luksDevice else "";
   crypt = config.boot.initrd.luks.devices.${cryptName} or null;
   luksUuid = if crypt == null then "" else lib.removePrefix "/dev/disk/by-uuid/" crypt.device;
-  resumePolicy = if !h.enable then { } else if h.swap == null then {
+  resumePolicy = if h.swap == null && h.swapPartuuid == "" then { } else if h.swap == null then {
     swap_partuuid = h.swapPartuuid;
   } else {
-    device = { inherit (h.swap) type partuuid; } // lib.optionalAttrs encryptedResume {
+    device = { inherit (h.swap) type partuuid; } // lib.optionalAttrs luksSwap {
       luks_uuid = luksUuid;
       mapping = cryptName;
     };
@@ -51,6 +52,8 @@ let
           "publish-loader.py"
           "authorize-linux.py"
           "authorize-boot.py"
+          "protected-hibernation.py"
+          "check-security-kernel.py"
           "install-efi.py"
         ]
   );
@@ -60,12 +63,48 @@ let
   loaderConfig = if h.enable then pkgs.runCommand "zbm-rs-target-config.json" { } ''
     ${loader}/bin/zbm-rs --validate-config ${rawLoaderConfig} > $out
   '' else rawLoaderConfig;
+  protectedContractInput = pkgs.writeText "zbm-protected-hibernation-input.json" (builtins.toJSON {
+    version = 1;
+    record_protocol = 2;
+    inherit (config.boot.kernelPackages.kernel.zbmProtectedHibernation) kernel;
+    kernel_config = config.boot.kernelPackages.kernel.zbmProtectedHibernation.kernelConfig;
+    kernel_certificate = cfg.signing.kernelCertificate;
+    initramfs = "${config.system.build.initialRamdisk}/initrd";
+    resume_config = loaderConfig;
+    secret_paths = builtins.attrNames config.boot.initrd.secrets;
+    loader = "${loader}/bin/zbm-rs";
+    gate_unit = config.boot.initrd.systemd.units."zbm-resume.service".text;
+    import_units = map (name: config.boot.initrd.systemd.units."zfs-import-${name}.service".text) resumePools;
+  });
+  protectedContract = pkgs.runCommand "zbm-protected-hibernation-contract.json" {
+    nativeBuildInputs = [ pkgs.uv pkgs.python3 ];
+  } ''
+    export PYTHONDONTWRITEBYTECODE=1 UV_NO_CACHE=1
+    ${loader}/bin/zbm-rs --resume-capabilities > capabilities.json
+    uv run --offline --no-project --python ${pkgs.python3}/bin/python - ${protectedContractInput} ${support} capabilities.json <<'PY'
+    import importlib.util, json, sys
+    from pathlib import Path
+    contract = json.loads(Path(sys.argv[1]).read_text())
+    capabilities = json.loads(Path(sys.argv[3]).read_text())
+    assert capabilities["version"] == 1 and capabilities["record_protocol"] == contract["record_protocol"] == 2
+    assert capabilities["durable_attempt_tracking"] is True and capabilities["cancel_only"] is True
+    def load(name):
+        spec = importlib.util.spec_from_file_location(name, Path(sys.argv[2]) / (name + ".py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    load("check-security-kernel").validate(Path(contract["kernel_config"]).read_text(), protected_hibernation=True)
+    load("protected-hibernation").validate_units(contract)
+    PY
+    cp ${protectedContractInput} $out
+  '';
   installerConfig = pkgs.writeText "zbm-rs-install-config.json" (
     builtins.toJSON {
       inherit pool loaderConfig;
       loader = "${loader}/bin/zbm-rs";
       signing =
         if cfg.signing.enable then lib.filterAttrs (name: _: name != "enable") cfg.signing else null;
+      protectedHibernation = if h.enable && cfg.signing.enable then protectedContract else null;
       efi = if cfg.efi.enable then {
         inherit (cfg.efi) image certificate partuuid path label;
       } else null;
@@ -82,6 +121,7 @@ let
         pkgs.python3
         pkgs.efibootmgr
         pkgs.dosfstools
+        pkgs.zstd
       ]
     }:$PATH
     export UV_PYTHON=${pkgs.python3}/bin/python
@@ -149,6 +189,15 @@ let
     swapon ${lib.escapeShellArg resumeDevice}
     trap - EXIT
   '';
+  finishResume = pkgs.writeShellScript "zbm-finish-resume" ''
+    set -eu
+    export PATH=${lib.makeBinPath [ pkgs.util-linux pkgs.cryptsetup pkgs.lvm2 ]}
+    swapoff ${lib.escapeShellArg resumeDevice}
+    trap 'swapon ${lib.escapeShellArg resumeDevice}' EXIT
+    ${loader}/bin/zbm-rs --resume-finish-config ${loaderConfig}
+    swapon ${lib.escapeShellArg resumeDevice}
+    trap - EXIT
+  '';
   runtimePath =
     description:
     lib.mkOption {
@@ -190,8 +239,13 @@ in
         });
       };
       resumeConfig = lib.mkOption {
-        type = lib.types.attrs; readOnly = true; default = resumePolicy;
+        type = lib.types.attrs; readOnly = true; default = if h.enable then resumePolicy else {};
         description = "Resolved non-secret policy to pass to mkImage loaderConfig.resume.";
+      };
+      cancellationConfig = lib.mkOption {
+        type = lib.types.attrs; readOnly = true;
+        default = resumePolicy // { role = "cancel-only"; };
+        description = "Same storage/credential identity for an independent rescue image, including while target hibernation is disabled.";
       };
     };
     kernelArgs = lib.mkOption {
@@ -222,9 +276,15 @@ in
     };
   };
   config = lib.mkIf cfg.enable {
+    system.build.zbmProtectedHibernationContract = lib.mkIf (h.enable && cfg.signing.enable) protectedContract;
     environment.systemPackages = [ prune ];
     systemd.services.nix-gc.serviceConfig.ExecStartPost = lib.mkIf config.nix.gc.automatic [ pruneAfterGc ];
     assertions = [
+      {
+        assertion = !(h.enable && cfg.signing.enable) ||
+          (config.boot.kernelPackages.kernel.zbmProtectedHibernation.recordProtocol or null) == 2;
+        message = "Signed native hibernation requires the approved shared TPM-protected kernel build.";
+      }
       {
         assertion = !cfg.hibernation.enable || builtins.all
           (fs: !(utils.fsNeededForBoot fs) || builtins.elem fs.fsType [ "zfs" "tmpfs" "ramfs" ])
@@ -313,6 +373,7 @@ in
     );
     systemd.services.systemd-hibernate = lib.mkIf cfg.hibernation.enable {
       preStart = "${recordResume}";
+      postStop = "${finishResume}";
     };
     systemd.sleep.settings.Sleep = lib.mkIf cfg.hibernation.enable {
       AllowHybridSleep = false;

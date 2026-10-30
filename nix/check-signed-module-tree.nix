@@ -10,7 +10,7 @@ let
   '';
 in pkgs.runCommand "signed-module-tree-check" {
   nativeBuildInputs = [ pkgs.uv pkgs.python3 pkgs.openssl pkgs.xz pkgs.zstd
-    pkgs.stdenv.cc pkgs.pkg-config ];
+    pkgs.stdenv.cc pkgs.pkg-config pkgs.sbsigntool ];
   buildInputs = [ pkgs.openssl ];
 } ''
   export UV_CACHE_DIR="$TMPDIR/uv-cache"
@@ -48,6 +48,34 @@ in pkgs.runCommand "signed-module-tree-check" {
     exit 1
   fi
   grep -q 'fresh output outside the store' reject.log
+  # Publicly pre-signed kernels are signed again by the installation hook.
+  # Both certificate tables must normalize to the exact approved kernel bytes.
+  sbsign --key "$TMPDIR/key.pem" --cert "$TMPDIR/cert.pem" \
+    --output "$TMPDIR/kernel-once" ${kernel}/bzImage
+  sbsign --key "$TMPDIR/key.pem" --cert "$TMPDIR/cert.pem" \
+    --output "$TMPDIR/kernel-twice" "$TMPDIR/kernel-once"
+  sbverify --cert "$TMPDIR/cert.pem" "$TMPDIR/kernel-twice"
+  export PYTHONDONTWRITEBYTECODE=1
+  uv run --offline --no-project --python ${pkgs.python3}/bin/python - <<'PY'
+  import importlib.util, os
+  from pathlib import Path
+  spec = importlib.util.spec_from_file_location("protected", "${self}/nix/protected-hibernation.py")
+  validator = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(validator)
+  temporary = Path(os.environ["TMPDIR"])
+  approved = Path("${kernel}/bzImage")
+  for name in ("kernel-once", "kernel-twice"):
+      validator.validate_kernel(temporary / name, approved)
+  changed = bytearray((temporary / "kernel-twice").read_bytes())
+  changed[4096] ^= 1
+  (temporary / "kernel-changed").write_bytes(changed)
+  try:
+      validator.validate_kernel(temporary / "kernel-changed", approved)
+  except ValueError:
+      pass
+  else:
+      raise AssertionError("A changed signed kernel payload was approved")
+  PY
   rm "$TMPDIR/key.pem"
   touch "$out"
 ''

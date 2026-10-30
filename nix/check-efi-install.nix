@@ -1,4 +1,4 @@
-{ pkgs }:
+{ pkgs, self }:
 pkgs.testers.runNixOSTest {
   name = "zbm-efi-install";
   globalTimeout = 300;
@@ -10,7 +10,7 @@ pkgs.testers.runNixOSTest {
       useEFIBoot = true;
       emptyDiskImages = [ 256 ];
       memorySize = 1536;
-      additionalPaths = [ ./install-efi.py pkgs.systemd ];
+      additionalPaths = [ ./install-efi.py self pkgs.systemd ];
     };
     environment.systemPackages = [
       pkgs.uv pkgs.python3 pkgs.efibootmgr pkgs.gptfdisk
@@ -50,6 +50,9 @@ pkgs.testers.runNixOSTest {
     machine.fail(install("zbm-rs", "EFI/zbm-rs/zbm-rs.EFI", "rescue.efi", "/root/efi-test/cert.pem"))
     machine.fail(install("zbm-rs", "EFI/foreign/other.EFI", "main.efi", "/root/efi-test/cert.pem"))
     machine.succeed("sha256sum -c /root/efi-test/main.sha; cmp /root/efi-test/rescue.efi /mnt/esp/EFI/zbm-rs/rescue.EFI")
+    # Candidate publication cannot overwrite the known-good image. Promotion
+    # binds the explicitly tested hash, durable receipt and physical swap policy.
+    machine.succeed("uv run --offline --no-project python ${self}/nix/check-rescue-efi.py")
     # Also exercise the installer's own mount/unmount path.
     machine.succeed("umount /mnt/esp")
     machine.succeed(install("zbm-rs (rescue)", "EFI/zbm-rs/rescue.EFI", "rescue.efi", None))
