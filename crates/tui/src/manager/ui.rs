@@ -367,6 +367,28 @@ impl Ui {
             _ => None,
         }
     }
+    /// Resolve the cached boot selection before invalidating its saved session.
+    pub fn boot_target<'a>(&self, state: &'a State) -> Option<&'a BootTarget> {
+        match self.selected(state)?.kind {
+            Kind::Generation(i) => state.targets.get(i),
+            Kind::Environment(i) => {
+                let environment = state.environments.get(i)?;
+                if environment.properties.locked() || environment.unavailable.is_some() {
+                    return None;
+                }
+                environment
+                    .targets
+                    .iter()
+                    .find(|target| state.resume.matches(environment.pool_guid, target))
+                    .or_else(|| {
+                        environment
+                            .default_target
+                            .and_then(|index| environment.targets.get(index))
+                    })
+            }
+            _ => None,
+        }
+    }
     pub fn resume_selected(&self, state: &State) -> bool {
         match self.selected(state).map(|r| r.kind) {
             Some(Kind::Environment(i)) => {
@@ -399,6 +421,8 @@ impl Ui {
                 _ => false,
             },
             Command::Prepare
+            | Command::CancelResume
+            | Command::ColdBoot
             | Command::Discard
             | Command::Clone
             | Command::ClonePromote
@@ -511,7 +535,7 @@ impl Ui {
         }
     }
     pub fn telemetry(&self, state: &State) -> serde_json::Value {
-        serde_json::json!({"view":View::of(state),"filter":self.screens.get(&self.key).map(|s|s.query.as_str()).unwrap_or(""),"searching":self.searching,"panel":self.panel,"selected_row":self.selected(state).map(|r|r.id)})
+        serde_json::json!({"view":View::of(state),"filter":self.screens.get(&self.key).map(|s|s.query.as_str()).unwrap_or(""),"searching":self.searching,"panel":self.panel,"selected_row":self.selected(state).map(|r|r.id),"selected_action":if self.panel == Panel::Actions { self.menu.selected().and_then(|i| self.menu_commands.get(i)) } else { None }})
     }
     pub fn reason(&self, command: Command, state: &State, options: &Options) -> Option<String> {
         if options.config.security.mode == crate::config::SecurityMode::Enforce
@@ -579,6 +603,19 @@ impl Ui {
         }
         if !options.supervised || options.preview {
             return Some("Boot actions are unavailable in local preview".into());
+        }
+        if command.needs_saved_session() {
+            if state.resume.session_id().is_none() {
+                return Some("No saved session to discard".into());
+            }
+            if command == Command::CancelResume {
+                return None;
+            }
+            return self.reason(Command::Open, state, options).or_else(|| {
+                self.boot_target(state)
+                    .is_none()
+                    .then(|| "Select a usable system, kernel or generation first".into())
+            });
         }
         if command == Command::Kernels {
             return state
@@ -1213,6 +1250,129 @@ mod tests {
         assert!(ui.resume_confirmation.is_none());
     }
     #[test]
+    fn explicit_session_actions_confirm_and_standalone_discard_has_no_continuation() {
+        let mut state = resume_state();
+        let mut ui = Ui::default();
+        ui.sync(&mut state);
+        for command in [Command::CancelResume, Command::ColdBoot] {
+            assert!(ui.reason(command, &state, &options()).is_none());
+            assert!(ui.cancels_resume(command, &state));
+            ui.confirm_resume(command, &state);
+            assert_eq!(ui.panel, Panel::ConfirmResume);
+            assert!(matches!(
+                ui.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut state),
+                Input::Command(actual, true) if actual == command
+            ));
+        }
+        assert!(
+            super::super::resume_continuation(Command::CancelResume, &ui, &state, &options())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(state.resume.session_id(), Some("session-one"));
+    }
+    #[test]
+    fn cold_boot_pins_the_saved_generation_before_the_environment_default_changes() {
+        let mut state = resume_state();
+        let saved = state.targets[0].clone();
+        let current = state.targets[1].clone();
+        state.environments = vec![
+            serde_json::from_value(serde_json::json!({
+                "pool_guid":42,"dataset":"tank/root","is_default":true,
+                "targets":[saved,current],"default_target":1,"default_error":null,
+                "rejected_generations":[],"unavailable":null,"root":"/guest",
+                "properties":{"mountpoint":"/","canmount":"noauto","encryption":"off",
+                    "encryptionroot":null,"keystatus":"-","keyformat":"none","active":"on",
+                    "commandline":null,"kernel":null,"rootprefix":null}
+            }))
+            .unwrap(),
+        ];
+        state.targets.clear();
+        let mut ui = Ui::default();
+        ui.sync(&mut state);
+        let next = super::super::resume_continuation(Command::ColdBoot, &ui, &state, &options())
+            .unwrap()
+            .unwrap();
+        state.resume = zbm_core::resume::Status::Inactive;
+        assert_eq!(ui.boot_target(&state).unwrap().generation(), Some(6));
+        let super::super::ResumeContinuation::Action(next) = next else {
+            panic!("Cold boot must keep a concrete target");
+        };
+        let super::super::Action::ColdBoot { target, .. } = *next else {
+            panic!("Expected explicit cold-boot operation");
+        };
+        assert_eq!(target.generation(), Some(7));
+    }
+    #[test]
+    fn session_actions_are_hidden_without_an_image_and_fail_closed_when_unknown() {
+        let mut state = resume_state();
+        let mut ui = Ui::default();
+        ui.sync(&mut state);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 25)).unwrap();
+        for present in [true, false] {
+            if !present {
+                state.resume = zbm_core::resume::Status::Inactive;
+            }
+            ui.open_panel(Panel::Actions);
+            terminal.draw(|f| ui.draw(f, &state, &options())).unwrap();
+            for command in [Command::CancelResume, Command::ColdBoot] {
+                assert_eq!(ui.menu_commands.contains(&command), present);
+                assert_eq!(ui.reason(command, &state, &options()).is_none(), present);
+            }
+        }
+        for status in [
+            zbm_core::resume::Status::Locked {
+                pool_guid: 42,
+                encryption_root: "tank/root".into(),
+            },
+            zbm_core::resume::Status::Blocked {
+                reason: "cannot inspect swap".into(),
+            },
+        ] {
+            state.resume = status;
+            for command in [Command::CancelResume, Command::ColdBoot] {
+                assert!(ui.reason(command, &state, &options()).is_some());
+            }
+        }
+        state.resume = zbm_core::resume::Status::Unavailable {
+            session_id: "valid-header".into(),
+            reason: "missing boot record".into(),
+        };
+        state.pool_view = true;
+        ui.sync(&mut state);
+        assert!(
+            ui.reason(Command::CancelResume, &state, &options())
+                .is_none()
+        );
+        assert!(ui.reason(Command::ColdBoot, &state, &options()).is_some());
+    }
+    #[test]
+    fn explicit_discard_dialog_explains_that_it_stays_in_the_menu_at_compact_sizes() {
+        for (width, height) in [(80, 25), (60, 20)] {
+            let mut state = resume_state();
+            let mut ui = Ui::default();
+            ui.sync(&mut state);
+            ui.confirm_resume(Command::CancelResume, &state);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| ui.draw(f, &state, &options())).unwrap();
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>();
+            assert!(
+                rendered.contains("No system will boot"),
+                "{width}x{height}: {rendered}"
+            );
+            ui.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+            assert_eq!(state.resume.session_id(), Some("session-one"));
+        }
+    }
+    #[test]
     fn f10_never_confirms_cancellation_and_rollback_keeps_typed_confirmation() {
         let mut state = resume_state();
         let mut ui = Ui::default();
@@ -1482,7 +1642,7 @@ mod tests {
                 .draw(|frame| ui.draw(frame, &state, &options()))
                 .unwrap();
             // The menu may scroll, but every command and its reason must remain reachable.
-            for command in ALL.into_iter().filter(|c| *c != Command::Actions) {
+            for command in ui.menu_commands.clone() {
                 ui.menu
                     .select(ui.menu_commands.iter().position(|c| *c == command));
                 terminal

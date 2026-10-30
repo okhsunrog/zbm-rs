@@ -124,6 +124,30 @@ Normal generation publication never installs or updates rescue. This mechanism
 does not promise that TPM-dependent OS services work in recovery; the loader's
 shell and manual pool unlock remain available.
 
+Separate pins prevent ordinary updates from replacing rescue, but do not certify
+that a pinned revision can boot the current machine or read its pool. The current
+installer checks PE/signature policy and stages/syncs a single file; it does not
+boot-test the image, retain a preceding rescue slot, or provide crash-atomic FAT
+filesystem updates. It also cannot recover an unreadable ESP or a failed disk.
+
+The intended recovery lifecycle is an explicit candidate and a retained
+known-good rescue, independent of normal loader updates. Pin the complete image
+inputs, retain the exact artifact/manifest with a GC root, and test the final
+unsigned EFI bytes in OVMF before installing a candidate at a distinct path.
+Keep the preceding rescue reachable while the candidate is tested on hardware;
+promote only after an explicit successful physical test. A one-commit lag is not
+a validation policy. Keep a tested copy on a separate bootable device for shared
+ESP/disk failures. These slots, validation gates and promotion are not implemented
+by `install-efi.py` today.
+
+An unsigned rescue remains a manual break-glass path, requiring firmware Secure
+Boot to be disabled. Do not count on BootOrder automatically recovering a kernel
+hang or duplicate the main image at the removable-media path and call that an
+independent recovery version. VM acceptance covers the tested firmware/devices,
+not physical boot or every future pool feature. Before enabling hibernation,
+rescue must also implement the cancellation-only contract in the
+[protected-boot architecture](hibernation-design.md#agreed-protected-boot-architecture-not-yet-implemented).
+
 TPM SRK/NvPCR setup remains owned by the selected OS. Package the actual loader's
 signed PCR policy and public key in that OS's initrd as appropriate; don't reset
 the TPM or treat an EFI signature as a substitute for OS policy.

@@ -26,6 +26,35 @@ struct Options {
     config: crate::config::Config,
 }
 
+enum ResumeContinuation {
+    Command(UiCommand),
+    Action(Box<Action>),
+}
+
+fn resume_continuation(
+    command: UiCommand,
+    ui: &Ui,
+    state: &State,
+    options: &Options,
+) -> Result<Option<ResumeContinuation>> {
+    Ok(match command {
+        UiCommand::CancelResume => None,
+        UiCommand::ColdBoot => Some(ResumeContinuation::Action(Box::new(Action::ColdBoot {
+            pool: state
+                .pools
+                .get(state.selected)
+                .ok_or_else(|| anyhow::anyhow!("No selected pool"))?
+                .clone(),
+            target: ui
+                .boot_target(state)
+                .ok_or_else(|| anyhow::anyhow!("No usable cold-boot target"))?
+                .clone(),
+            args: options.config.kernel_args.clone(),
+        }))),
+        other => Some(ResumeContinuation::Command(other)),
+    })
+}
+
 fn emit(options: &Options, event: &str, state: &State, ui: &Ui) -> Result<()> {
     let value = serde_json::json!({"event": event, "uptime": crate::diagnostics::timestamp(), "state": state, "pid": std::process::id(), "terminal_size": crossterm::terminal::size().ok(), "config": options.config, "ui": ui.telemetry(state)});
     // The leading separator also recovers from another writer's partial line.
@@ -73,8 +102,8 @@ async fn tui(
     let mut resume_unlock = false;
     let mut auto_cancelled = false;
     let mut auto_deadline: Option<Instant> = None;
-    let mut after_cancellation: Option<UiCommand> = None;
-    let mut continuation: Option<UiCommand> = None;
+    let mut after_cancellation: Option<ResumeContinuation> = None;
+    let mut continuation: Option<ResumeContinuation> = None;
     loop {
         #[cfg(feature = "vm-test")]
         if let Some(control) = control
@@ -403,9 +432,14 @@ async fn tui(
                 let mut action = None;
                 let mut observed = cancelled_timer.then_some("autoboot-cancelled");
                 let input_panel = ui.panel;
-                let input = continued
-                    .map(|command| Input::Command(command, true))
-                    .unwrap_or_else(|| ui.input(key, &mut state));
+                let input = match continued {
+                    Some(ResumeContinuation::Command(command)) => Input::Command(command, true),
+                    Some(ResumeContinuation::Action(next)) => {
+                        action = Some(*next);
+                        Input::Ignored
+                    }
+                    None => ui.input(key, &mut state),
+                };
                 match input {
                     Input::Unlock(passphrase) => {
                         if let Some(selection) = &unlocking
@@ -443,10 +477,15 @@ async fn tui(
                                 if *expected_command == command
                                     && state.resume.session_id() == Some(id.as_str())
                                 {
-                                    after_cancellation = Some(command);
-                                    action = Some(Action::CancelResume {
-                                        session_id: id.clone(),
-                                    });
+                                    match resume_continuation(command, &ui, &state, options) {
+                                        Ok(next) => {
+                                            after_cancellation = next;
+                                            action = Some(Action::CancelResume {
+                                                session_id: id.clone(),
+                                            });
+                                        }
+                                        Err(error) => state.error = Some(error.to_string()),
+                                    }
                                 } else {
                                     state.error = Some(
                                         "Saved session changed; select the action again".into(),
@@ -459,6 +498,10 @@ async fn tui(
                             }
                         } else {
                             match command {
+                                UiCommand::CancelResume | UiCommand::ColdBoot => {
+                                    state.error =
+                                        Some("Saved session is no longer available".into());
+                                }
                                 UiCommand::Exit => {
                                     emit(options, "exit", &state, &ui)?;
                                     break;

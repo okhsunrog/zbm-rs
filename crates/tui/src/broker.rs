@@ -262,6 +262,7 @@ async fn target(zfs: &Zfs, pool: &Pool, wanted: &BootTarget, limit: u32) -> Resu
 }
 
 async fn normalize(action: Action, config: &Config) -> Result<Action> {
+    let cold_boot = matches!(action, Action::ColdBoot { .. });
     let resume = crate::resume::status(config)?;
     action.guard_resume(&resume)?;
     let zfs = Zfs::new();
@@ -318,13 +319,26 @@ async fn normalize(action: Action, config: &Config) -> Result<Action> {
             pool: p,
             target: wanted,
             ..
+        }
+        | Action::ColdBoot {
+            pool: p,
+            target: wanted,
+            ..
         } => {
             let p = pool(&zfs, p.guid).await?;
             let t = target(&zfs, &p, &wanted, limit).await?;
-            Action::Boot {
-                pool: p,
-                target: t,
-                args: config.kernel_args.clone(),
+            if cold_boot {
+                Action::ColdBoot {
+                    pool: p,
+                    target: t,
+                    args: config.kernel_args.clone(),
+                }
+            } else {
+                Action::Boot {
+                    pool: p,
+                    target: t,
+                    args: config.kernel_args.clone(),
+                }
             }
         }
         Action::Discard { pool: p, source } => Action::Discard {

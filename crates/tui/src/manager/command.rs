@@ -1,9 +1,11 @@
 //! One command inventory for dispatch, help, action menus and availability.
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Command {
     Open,
+    CancelResume,
+    ColdBoot,
     Kernels,
     Pools,
     Back,
@@ -24,8 +26,10 @@ pub enum Command {
     Actions,
 }
 
-pub const ALL: [Command; 19] = [
+pub const ALL: [Command; 21] = [
     Command::Open,
+    Command::CancelResume,
+    Command::ColdBoot,
     Command::Kernels,
     Command::Pools,
     Command::Back,
@@ -65,6 +69,8 @@ impl Command {
     pub fn label(self) -> &'static str {
         match self {
             Self::Open => "Boot selected system / target",
+            Self::CancelResume => "Discard saved session (stay in menu)",
+            Self::ColdBoot => "Cold boot selected system (discard saved session)",
             Self::Kernels => "Kernels / NixOS generations",
             Self::Pools => "Pool status / manual import",
             Self::Back => "Back",
@@ -89,6 +95,7 @@ impl Command {
     pub fn keys(self) -> &'static str {
         match self {
             Self::Open => "Enter",
+            Self::CancelResume | Self::ColdBoot => "F2 menu",
             Self::Kernels => "K",
             Self::Pools => "F8",
             Self::Back => "B / Esc",
@@ -108,6 +115,10 @@ impl Command {
             Self::Help => "? / F1",
             Self::Actions => "F2",
         }
+    }
+
+    pub fn needs_saved_session(self) -> bool {
+        matches!(self, Self::CancelResume | Self::ColdBoot)
     }
 
     pub fn recovery(self) -> bool {

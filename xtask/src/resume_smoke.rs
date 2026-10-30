@@ -12,6 +12,10 @@ use std::{
     process::{Command, Stdio},
 };
 
+fn guest(run: &Path, command: &str) -> Result<String> {
+    vm::ssh(run, &format!("set -eu\n{command}"))
+}
+
 fn state(run: &Path, wanted: &str) -> Result<Value> {
     let screen = vm::screen(run)?;
     ensure!(
@@ -38,6 +42,70 @@ fn prompt(run: &Path) -> Result<()> {
     );
     Ok(())
 }
+fn action(run: &Path, wanted: &str) -> Result<()> {
+    vm::key(run, "f2")?;
+    wait_for(10, None, || {
+        ensure!(
+            vm::screen(run)?["ui"]["panel"] == "Actions",
+            "Waiting for action menu"
+        );
+        Ok(())
+    })?;
+    for _ in 0..24 {
+        let selected = vm::screen(run)?["ui"]["selected_action"].clone();
+        if selected == wanted {
+            vm::key(run, "ret")?;
+            return wait_for(10, None, || {
+                ensure!(
+                    vm::screen(run)?["ui"]["panel"] == "ConfirmResume",
+                    "Waiting for {wanted} confirmation"
+                );
+                Ok(())
+            });
+        }
+        vm::key(run, "down")?;
+        wait_for(5, None, || {
+            ensure!(
+                vm::screen(run)?["ui"]["selected_action"] != selected,
+                "Waiting for next action after {selected}"
+            );
+            Ok(())
+        })?;
+    }
+    anyhow::bail!("Action menu did not contain {wanted}")
+}
+
+fn pending(run: &Path) -> Result<Value> {
+    wait_for(25, None, || {
+        let s = state(run, "pending")?;
+        ensure!(s["event"] == "catalog-ready", "Waiting for pending catalog");
+        Ok(s)
+    })
+}
+
+fn target(screen: &Value) -> Value {
+    screen["state"]["environments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["dataset"] == "zbm_resume/root")
+        .unwrap()["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["generation"] == 1)
+        .unwrap()
+        .clone()
+}
+
+fn cancelled_header(run: &Path) -> Result<()> {
+    guest(
+        run,
+        "test $(dd if=/dev/mapper/resume-swap bs=1 skip=4086 count=10 2>/dev/null) = SWAPSPACE2; test $(dd if=/dev/mapper/resume-swap bs=1 skip=4096 count=17 2>/dev/null) = preserved-payload",
+    )?;
+    Ok(())
+}
+
 fn seed_image(run: &Path, target: &Value, guid: &str) -> Result<()> {
     let kernel = format!(
         "{}{}",
@@ -46,7 +114,7 @@ fn seed_image(run: &Path, target: &Value, guid: &str) -> Result<()> {
     );
     let plan = json!({"target":target, "kernel":kernel, "initrd":null, "cmdline":["root=ZFS=zbm_resume/root"]});
     vm::write_file(run, "/run/resume-plan.json", &serde_json::to_vec(&plan)?)?;
-    vm::ssh(
+    guest(
         run,
         &format!(
             "zbm-rs --resume-record-config /etc/zbm-rs/config.json {guid} /run/resume-plan.json; printf preserved-payload | dd of=/dev/mapper/resume-swap bs=1 seek=4096 conv=notrunc 2>/dev/null; printf 'SWAPSPACE2S1SUSPEND\\000' | dd of=/dev/mapper/resume-swap bs=1 seek=4076 conv=notrunc 2>/dev/null; sync"
@@ -70,10 +138,10 @@ pub fn run(run: &Path, image: &Path, port: u16, tcg: bool) -> Result<()> {
     let result = (|| {
         wait_for(90, Some(&mut owned.0), || {
             state(run, "blocked")?;
-            vm::ssh(run, "test -b /dev/vda")?;
+            guest(run, "test -b /dev/vda")?;
             Ok(())
         })?;
-        vm::ssh(
+        guest(
             run,
             r#"set -eu
 sgdisk --zap-all --new=1:2048:+512M --partition-guid=1:12345678-1234-1234-1234-123456789abc --new=2:0:0 /dev/vda
@@ -90,36 +158,48 @@ zfs create -o mountpoint=legacy -o canmount=noauto -o org.zfsbootmenu:active=on 
 zpool set bootfs=zbm_resume/root zbm_resume
 mkdir /fixture
 mount -t zfs zbm_resume/root /fixture
-mkdir -p /fixture/nix/var/nix/profiles /fixture/nix/store/shared /fixture/nix/store/system1 /fixture/nix/store/system2
-printf kernel-fixture > /fixture/nix/store/shared/kernel
-touch /fixture/nix/store/shared/initrd /fixture/nix/store/system1/init /fixture/nix/store/system2/init
+mkdir -p /fixture/nix/var/nix/profiles /fixture/nix/store/shared /fixture/nix/store/system1/etc /fixture/nix/store/system2/etc
+touch /fixture/nix/store/system1/init /fixture/nix/store/system2/init
 "#,
         )?;
+        // A real kernel/initramfs permits a cold kexec into the loader again.
+        // This is a handoff fixture, not a full NixOS or restored RAM session.
+        for (source, destination) in [("vmlinuz", "kernel"), ("initramfs.img", "initrd")] {
+            vm::write_file(
+                run,
+                &format!("/fixture/nix/store/shared/{destination}"),
+                &fs::read(image.join(source))?,
+            )?;
+        }
         for generation in [1, 2] {
-            let spec = json!({"org.nixos.bootspec.v1": {"system":"x86_64-linux", "kernel":"/nix/store/shared/kernel", "initrd":"/nix/store/shared/initrd", "init":format!("/nix/store/system{generation}/init"), "toplevel":format!("/nix/store/system{generation}"), "kernelParams":[], "label":format!("resume generation {generation}")}});
+            let spec = json!({"org.nixos.bootspec.v1": {"system":"x86_64-linux", "kernel":"/nix/store/shared/kernel", "initrd":"/nix/store/shared/initrd", "init":format!("/nix/store/system{generation}/init"), "toplevel":format!("/nix/store/system{generation}"), "kernelParams":["console=ttyS0,115200","console=tty0","loglevel=3","panic=-1"], "label":format!("resume generation {generation}")}});
             vm::write_file(
                 run,
                 &format!("/fixture/nix/store/system{generation}/boot.json"),
                 &serde_json::to_vec(&spec)?,
             )?;
-            vm::ssh(
+            vm::write_file(
+                run,
+                &format!("/fixture/nix/store/system{generation}/etc/fstab"),
+                b"zbm_resume/root / zfs defaults 0 0\n",
+            )?;
+            guest(
                 run,
                 &format!(
                     "ln -s /nix/store/system{generation} /fixture/nix/var/nix/profiles/system-{generation}-link"
                 ),
             )?;
         }
-        vm::ssh(
+        guest(
             run,
             "ln -s system-2-link /fixture/nix/var/nix/profiles/system; umount /fixture; zpool export zbm_resume",
         )?;
-        let guid = vm::ssh(run, "zpool import | awk '/id:/ { print $2 }'")?
+        let guid = guest(run, "zpool import | awk '/id:/ { print $2 }'")?
             .trim()
             .to_owned();
-        let mut config: Value =
-            serde_json::from_str(&vm::ssh(run, "cat /etc/zbm-rs/config.json")?)?;
+        let mut config: Value = serde_json::from_str(&guest(run, "cat /etc/zbm-rs/config.json")?)?;
         config["resume"]["credential"]["pool_guid"] = guid.clone().into();
-        vm::ssh(
+        guest(
             run,
             "rm /etc/zbm-rs/config.json; cryptsetup open --key-file /run/swap-key /dev/vda1 resume-swap",
         )?;
@@ -139,13 +219,13 @@ touch /fixture/nix/store/shared/initrd /fixture/nix/store/system1/init /fixture/
             );
             Ok(())
         })?;
-        vm::ssh(run, "cryptsetup close resume-swap")?;
+        guest(run, "cryptsetup close resume-swap")?;
         vm::key(run, "f6")?;
         wait_for(25, None, || {
             state(run, "locked")?;
             prompt(run)
         })?;
-        vm::ssh(
+        guest(
             run,
             "test $(zpool get -H -o value readonly zbm_resume) = on; ! grep -q ' - zfs ' /proc/self/mountinfo",
         )?;
@@ -170,7 +250,7 @@ touch /fixture/nix/store/shared/initrd /fixture/nix/store/system1/init /fixture/
             );
             prompt(run)
         })?;
-        vm::ssh(
+        guest(
             run,
             "test $(zfs get -H -o value keystatus zbm_resume) = available; test ! -e /dev/mapper/resume-swap; ! grep -q ' - zfs ' /proc/self/mountinfo; cryptsetup luksAddKey --pbkdf pbkdf2 --pbkdf-force-iterations 1000 --key-file /run/swap-key /dev/vda1 /run/source-key",
         )?;
@@ -183,34 +263,92 @@ touch /fixture/nix/store/shared/initrd /fixture/nix/store/system1/init /fixture/
             );
             Ok(s)
         })?;
-        let target = cold["state"]["environments"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|e| e["dataset"] == "zbm_resume/root")
-            .unwrap()["targets"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|t| t["generation"] == 1)
-            .unwrap()
-            .clone();
-        seed_image(run, &target, &guid)?;
+        let saved_target = target(&cold);
+        let boot_id = guest(run, "cat /proc/sys/kernel/random/boot_id")?;
+        seed_image(run, &saved_target, &guid)?;
         vm::key(run, "f6")?;
-        let pending = wait_for(25, None, || {
-            let s = state(run, "pending")?;
-            ensure!(s["event"] == "catalog-ready", "Waiting for pending catalog");
-            Ok(s)
-        })?;
+        let pending_screen = pending(run)?;
         ensure!(
-            pending["state"]["resume"]["session"]["target"]["generation"] == 1,
+            pending_screen["state"]["resume"]["session"]["target"]["generation"] == 1,
             "Wrong default generation"
         );
-        vm::ssh(
+        guest(
             run,
             "test $(zpool get -H -o value readonly zbm_resume) = on",
         )?;
         vm::screenshot(run, &run.join("resume-pending.png"))?;
+        let header = guest(
+            run,
+            "dd if=/dev/mapper/resume-swap bs=4096 count=1 2>/dev/null | sha256sum",
+        )?;
+        action(run, "CancelResume")?;
+        vm::screenshot(run, &run.join("discard-stay-confirmation.png"))?;
+        vm::key(run, "esc")?;
+        ensure!(
+            guest(
+                run,
+                "dd if=/dev/mapper/resume-swap bs=4096 count=1 2>/dev/null | sha256sum"
+            )? == header,
+            "Esc changed the saved image"
+        );
+
+        // Expire consent after the dialog opens. A failed cancellation must
+        // preserve the image and must never run the queued cold boot.
+        action(run, "ColdBoot")?;
+        vm::screenshot(run, &run.join("cold-boot-confirmation.png"))?;
+        guest(
+            run,
+            "dd if=/dev/mapper/resume-swap of=/run/header-byte bs=1 skip=2048 count=1 2>/dev/null; printf x | dd of=/dev/mapper/resume-swap bs=1 seek=2048 conv=notrunc 2>/dev/null; sync",
+        )?;
+        vm::key(run, "ret")?;
+        wait_for(15, None, || {
+            let s = state(run, "pending")?;
+            ensure!(
+                s["event"] == "resume-cancel-error",
+                "Waiting for expired-consent error"
+            );
+            Ok(())
+        })?;
+        ensure!(
+            guest(run, "cat /proc/sys/kernel/random/boot_id")? == boot_id,
+            "Failed cancellation booted a kernel"
+        );
+        guest(
+            run,
+            "test ! -e /run/zbm-rs/boot-plan.json; test $(dd if=/dev/mapper/resume-swap bs=1 skip=4086 count=9 2>/dev/null) = S1SUSPEND; test $(zpool get -H -o value readonly zbm_resume) = on; dd if=/run/header-byte of=/dev/mapper/resume-swap bs=1 seek=2048 conv=notrunc 2>/dev/null; sync",
+        )?;
+        vm::screenshot(run, &run.join("expired-consent.png"))?;
+        vm::key(run, "f6")?;
+        pending(run)?;
+        action(run, "CancelResume")?;
+        vm::key(run, "ret")?;
+        wait_for(15, None, || {
+            let s = state(run, "inactive")?;
+            ensure!(
+                s["event"] == "resume-cancelled"
+                    && s["ui"]["panel"] == "None"
+                    && s["state"]["error"].is_null(),
+                "Standalone discard did not return to the menu"
+            );
+            Ok(())
+        })?;
+        cancelled_header(run)?;
+        ensure!(
+            guest(run, "cat /proc/sys/kernel/random/boot_id")? == boot_id,
+            "Standalone discard booted a kernel"
+        );
+        guest(
+            run,
+            "test ! -e /run/zbm-rs/boot-plan.json; test $(zpool get -H -o value readonly zbm_resume) = on",
+        )?;
+        ensure!(
+            vm::console(run)?.contains("Generation 2"),
+            "Discard left the saved generation as the displayed default"
+        );
+        vm::screenshot(run, &run.join("discarded-stay-menu.png"))?;
+        seed_image(run, &saved_target, &guid)?;
+        vm::key(run, "f6")?;
+        pending(run)?;
         vm::key(run, "k")?;
         wait_for(15, None, || {
             ensure!(
@@ -247,10 +385,7 @@ touch /fixture/nix/store/shared/initrd /fixture/nix/store/system1/init /fixture/
             );
             Ok(())
         })?;
-        vm::ssh(
-            run,
-            "test $(dd if=/dev/mapper/resume-swap bs=1 skip=4086 count=10 2>/dev/null) = SWAPSPACE2; test $(dd if=/dev/mapper/resume-swap bs=1 skip=4096 count=17 2>/dev/null) = preserved-payload",
-        )?;
+        cancelled_header(run)?;
         for key in ["e", "x", "i", "t", "ret"] {
             vm::key(run, key)?;
         }
@@ -259,7 +394,55 @@ touch /fixture/nix/store/shared/initrd /fixture/nix/store/system1/init /fixture/
             ensure!(s["event"] == "catalog-ready", "Waiting for shell return");
             Ok(())
         })?;
-        seed_image(run, &target, &guid)?;
+        seed_image(run, &saved_target, &guid)?;
+        vm::key(run, "f6")?;
+        pending(run)?;
+        // The environment defaults to generation 2, but its saved target is 1.
+        // Explicit cold boot must pin 1 before invalidation changes selection.
+        action(run, "ColdBoot")?;
+        vm::key(run, "ret")?;
+        wait_for(90, Some(&mut owned.0), || {
+            ensure!(
+                vm::screen(run)?["config"]["resume"]["credential"]["pool_guid"] == "42",
+                "Waiting for the newly booted loader fixture"
+            );
+            Ok(())
+        })?;
+        // This owned disposable VM generates fresh SSH host keys in RAM on
+        // each kernel boot. Forget only its per-run host entry after observing
+        // the new fixture; production host-key checking is unchanged.
+        fs::remove_file(run.join("known_hosts"))?;
+        wait_for(90, Some(&mut owned.0), || {
+            let next_id = guest(run, "cat /proc/sys/kernel/random/boot_id")?;
+            ensure!(next_id != boot_id, "Waiting for cold kernel handoff");
+            guest(run, "grep -qw init=/nix/store/system1/init /proc/cmdline")?;
+            Ok(())
+        })?;
+        // The fixture payload is the loader itself, whose baked pool GUID is
+        // deliberately unrelated. Restore only the disposable runtime policy.
+        guest(run, "rm /etc/zbm-rs/config.json")?;
+        vm::write_file(
+            run,
+            "/etc/zbm-rs/config.json",
+            &serde_json::to_vec(&config)?,
+        )?;
+        vm::key(run, "f6")?;
+        wait_for(25, None, || {
+            state(run, "locked")?;
+            prompt(run)
+        })?;
+        password(run, "source-passphrase")?;
+        let after_cold = wait_for(25, None, || {
+            let s = state(run, "inactive")?;
+            ensure!(
+                s["event"] == "catalog-ready",
+                "Waiting for cold-boot fixture catalog"
+            );
+            Ok(s)
+        })?;
+        cancelled_header(run)?;
+        vm::screenshot(run, &run.join("after-cold-boot.png"))?;
+        seed_image(run, &target(&after_cold), &guid)?;
         vm::key(run, "f6")?;
         wait_for(25, None, || {
             let s = state(run, "pending")?;
@@ -314,7 +497,7 @@ touch /fixture/nix/store/shared/initrd /fixture/nix/store/system1/init /fixture/
         fs::write(
             run.join("report.json"),
             serde_json::to_vec_pretty(
-                &json!({"passed":true,"checks":["foreign-mapping","metadata-only-before-unlock","wrong-ZFS-password","different-LUKS-password","shared-credential","manager-restart","pending-default","other-generation-confirmation","Esc-preserves-image","verified-cancel-before-shell","payload-preserved","F10-preserves-entire-disk","no-secret-telemetry"],"real_ram_restore":false}),
+                &json!({"passed":true,"checks":["foreign-mapping","metadata-only-before-unlock","wrong-ZFS-password","different-LUKS-password","shared-credential","manager-restart","pending-default","other-generation-confirmation","Esc-preserves-image","expired-consent-blocks-cold-boot","standalone-discard-stays-in-menu","verified-cancel-before-shell","payload-preserved","cold-kexec-pins-saved-generation","F10-preserves-entire-disk","no-secret-telemetry"],"real_ram_restore":false,"cold_handoff_payload":"loader-fixture"}),
             )?,
         )?;
         Ok(())

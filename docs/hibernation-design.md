@@ -8,11 +8,22 @@ the machine was off. It must not be advertised as making ZFS hibernation safe.
 ## Existing flow
 
 Keep the pools, environments, generations/kernels and snapshot views. There is no
-new startup question, resume menu entry or shortcut. A recognized session selects
+new startup question or automatic action. A recognized session selects
 its exact environment/target by default. Menu/countdown/immediate retain their
 existing timing. Enter on that target resumes; the footer says Resume. Unlock
 uses the existing password panel. Cancelling the countdown or navigating does
 not cancel the saved session.
+
+While an image exists, F2 additionally offers **Discard saved session (stay in
+menu)** and **Cold boot selected system (discard saved session)**. Both use the
+existing confirmation and verified image cancellation. Standalone discard has
+no boot continuation. Cold boot pins the selected target before cancellation,
+including the saved generation when selecting a whole environment whose current
+default differs. The broker rejects cold boot while any image remains; handoff
+rechecks that a newly appearing image cannot turn cold boot into resume. No new
+bare keyboard shortcuts are assigned, and these actions are hidden without an
+image. An unreadable or still-locked swap cannot be treated as a cancellable
+known image.
 
 The context line shows Resume pending, the target carries a RESUME tag, and
 Selection/details explain the action. Compact layouts retain the context line.
@@ -189,6 +200,99 @@ authentication/lockdown integration is not implemented. ESP diagnostics must be
 disabled until their writes can be coordinated with saved filesystem state.
 These restrictions are not waived by the UI.
 
+## Agreed protected-boot architecture (not yet implemented)
+
+The existing guard above is implemented in ordinary mode. The experimental
+Linux 7.2.9 TPM-signature patch set is a build checkpoint, not a validated
+protected-resume implementation. Enforced resume stays rejected until the
+following trust chain and negative tests are complete.
+
+### Kernel roles and authenticated memory
+
+The signed enforced loader, target OS and unsigned rescue have separate runtime
+roles. Rescue retains its independent source/package set. The loader permits
+outgoing `kexec_file_load` only after owner authorization of the exact target.
+
+The proposed Framework adjustment is to share the protected `kernelPackages`
+between loader and target, retaining kexec in both. The earlier mandatory
+compile-time split is under reconsideration: the current host trusts full root
+with locally readable boot/IMA signing keys, and no concrete delegated
+`CAP_SYS_BOOT`-without-signing-keys path has been identified in the reviewed
+configuration. Compromise of those keys already permits signing arbitrary
+kernel/module inputs. This is a threat-model boundary, not a fix for TPM
+provenance across an arbitrary later kexec. Finalizing this adjustment does not
+waive the provenance tests below.
+
+Disabling target `CONFIG_KEXEC` and `CONFIG_KEXEC_FILE` remains optional stronger
+hardening, particularly if signing keys move out of reach of the running OS or
+keyless privileged attackers enter the threat model. It disables outgoing kexec,
+not receipt of the loader handoff. An early target-only
+`kernel.kexec_load_disabled=1` policy can instead share kernel builds, but must
+precede untrusted userspace; it cannot prevent execution of an already loaded
+image. Neither policy is enabled as part of this design discussion.
+
+Matthew Garrett's TPM-signature design is the selected experimental backend.
+Both protected kernels must preserve kernel ownership of its reserved TPM NV
+state and the EFI/PCR5 provenance boundary. Only the target needs the full
+hibernation writer and verifier. The loader does not need to create or restore
+RAM images, but keeping that support in a shared kernel is acceptable under the
+proposed baseline. The current helper uses one full experimental configuration;
+no separate loader/target builds are required solely by their runtime roles.
+
+Keep integrity Lockdown and signature enforcement. LUKS2 encrypts swap; TPM
+signatures authenticate the saved RAM image. This is not support for
+confidentiality Lockdown. Never replace image authentication with a Lockdown
+exception or interpret a successful LUKS unlock as authenticated memory.
+
+The unresolved EFI-to-kexec provenance must be tested before enabling this
+backend. A positive patched-to-patched handoff alone is insufficient. A loader
+which establishes TPM evidence must not transfer it to an old signed kernel
+without the corresponding protection, even when no hibernation image currently
+exists. Otherwise that kernel could invalidate the assumptions behind later
+TPM evidence. Test unsupported targets and adversarial TPM operations as well
+as the intended path; do not assume PCR5 is reset by kexec. The main loader's
+profile restriction covers its own handoffs, not subsequent syscalls from the
+running OS. If the shared-kernel baseline is adopted, record this residual risk
+explicitly rather than describing it as an end-to-end enforced kexec chain.
+
+### Owner authorization and compatibility
+
+Extend the signed BootAuthorization with a versioned protected-hibernation
+profile covering the exact kernel, initramfs, arguments and root selection.
+The publisher must validate the required build artifacts/configuration before
+signing this profile. A kernel version string, unsigned `prepared.json`, manual
+allowlist or possession of an ordinary PE signature is insufficient. Existing
+authorizations do not acquire the capability implicitly.
+
+The capable loader checks this profile for every outgoing boot, including cold
+boots, and rejects missing or unsupported profiles. Older generations remain
+available through independent rescue, subject to image cancellation. The exact
+schema and artifact validator follow the provenance experiment rather than
+claiming capabilities the backport has not demonstrated.
+
+### Resume and cancellation ordering
+
+The normal menu/countdown/immediate flow and exact saved target remain the
+default. Read-only loader imports, credential acquisition, boot-file inspection,
+verified cancellation and the stricter target resume-before-import gate remain
+separate boundaries. The target never silently falls back to a writable cold
+boot after a failed restore. ESP diagnostics remain incompatible until their
+writes are coordinated too. Any future pool-key-file credential source must
+preserve these boundaries; it is not implemented today.
+
+Rescue is an independently booted, unsigned EFI image requiring firmware Secure
+Boot to be disabled. Its kernel has hibernation disabled and does not advertise
+the protected TPM-hibernation capability. It retains outgoing kexec for recovery.
+It must still inspect the configured swap before the first pool import and use
+the same cancellation-only guard. Entering rescue, navigating or powering off
+does not erase an image. Booting any OS or opening an unrestricted shell first
+requires confirmed, synced and verified image invalidation. Rescue never resumes.
+This rescue role and its configuration are planned; an older pinned image
+without the guard must not be presented as satisfying this contract.
+
+See [independent rescue publication](nixos-deployment.md#optional-efi-publication-and-independent-rescue)
+for the existing installer and the planned candidate/known-good lifecycle.
+
 ## Remaining safety boundary and validation
 
 Header identity and artifact hashes cannot detect arbitrary intervening writes
@@ -210,6 +314,10 @@ then validate the actual laptop separately.
 ZFS/LUKS and the actual password/cancellation UI with synthetic image headers:
 different secrets, foreign mappings, restart, another generation sharing a kernel,
 cancellation before recovery shell and power-off preserving the logical disk.
+It also verifies both explicit F2 actions, stale-consent rejection without boot,
+standalone cancellation staying in the same kernel/menu, and a real cold kexec
+into the loader fixture with the pinned saved generation's arguments. The latter
+is a handoff check, not a complete NixOS boot or RAM restoration.
 `nix build .#checks.x86_64-linux.encrypted-hibernation` instead installs a disposable
 encrypted ZFS-root NixOS, rejects an intentionally early read-only pool import,
 and exercises real RAM restoration through the target initramfs. It verifies the

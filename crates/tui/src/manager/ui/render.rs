@@ -67,6 +67,7 @@ impl Ui {
         if self.resume_selected(state) {
             lines.push(heading("Resume saved session", GOOD));
             lines.push(Line::raw("Enter continues where you left off."));
+            lines.push(Line::raw("F2 offers session discard and cold boot."));
             lines.push(Line::raw(""));
         }
         match self.selected(state).map(|row| row.kind) {
@@ -331,7 +332,7 @@ impl Ui {
             return format!("Unavailable: {}", clean(reason));
         }
         if self.resume_selected(state) {
-            return "Enter resumes the saved session.".into();
+            return "Enter resumes the saved session. F2 offers discard and cold boot.".into();
         }
         if self.cancels_resume(Command::Open, state) {
             return "Booting this system requires discarding the saved session. Confirmation will be requested.".into();
@@ -743,7 +744,13 @@ impl Ui {
                 .selected()
                 .and_then(|i| self.menu_commands.get(i))
                 .copied();
-            let mut commands: Vec<_> = ALL.into_iter().filter(|c| *c != Command::Actions).collect();
+            let mut commands: Vec<_> = ALL
+                .into_iter()
+                .filter(|c| {
+                    *c != Command::Actions
+                        && (!c.needs_saved_session() || state.resume.session_id().is_some())
+                })
+                .collect();
             commands.sort_by_key(|c| (c.group().0, self.reason(*c, state, options).is_some()));
             self.menu_commands = commands;
             self.menu.select(Some(
@@ -823,6 +830,15 @@ impl Ui {
                             .map(|(_, command)| self.action_label(*command, state))
                             .unwrap_or_default(),
                     ),
+                    Line::raw(""),
+                    Line::raw("The saved RAM session will be lost."),
+                    Line::raw(match self.resume_confirmation.as_ref().map(|(_, c)| c) {
+                        Some(Command::CancelResume) => {
+                            "You will stay in the menu. No system will boot."
+                        }
+                        Some(Command::ColdBoot) => "The selected system will start from scratch.",
+                        _ => "The requested action will continue after verified cancellation.",
+                    }),
                     Line::raw(""),
                     Line::raw("Enter: discard saved session and continue    Esc: go back"),
                 ],

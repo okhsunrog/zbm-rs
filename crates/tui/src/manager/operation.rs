@@ -66,6 +66,11 @@ pub enum Action {
         target: BootTarget,
         args: Vec<String>,
     },
+    ColdBoot {
+        pool: Pool,
+        target: BootTarget,
+        args: Vec<String>,
+    },
 }
 
 pub enum Outcome {
@@ -103,7 +108,7 @@ impl Action {
             Self::Targets { .. } => "Inspecting snapshot boot targets",
             Self::Prepare { .. } => "Preparing snapshot clone",
             Self::Discard { .. } => "Discarding prepared clone",
-            Self::Boot { .. } => "Preparing kernel handoff",
+            Self::Boot { .. } | Self::ColdBoot { .. } => "Preparing kernel handoff",
         }
     }
 
@@ -117,7 +122,7 @@ impl Action {
             Self::Snapshots { .. } => "snapshots",
             Self::Targets { .. } => "boot-targets",
             Self::Prepare { .. } | Self::Discard { .. } => "snapshot-error",
-            Self::Boot { .. } => "boot-error",
+            Self::Boot { .. } | Self::ColdBoot { .. } => "boot-error",
         }
     }
 
@@ -137,6 +142,7 @@ impl Action {
         }
         let resume = crate::resume::current()?;
         self.guard_resume(&resume)?;
+        let cold_boot = matches!(self, Self::ColdBoot { .. });
         if let Self::Environments { readonly, .. } = &mut self {
             *readonly |= resume.protected();
         }
@@ -155,7 +161,9 @@ impl Action {
             }
         }
         if crate::config::image_enforced()
-            && let Self::Prepare { target, args, .. } | Self::Boot { target, args, .. } = &self
+            && let Self::Prepare { target, args, .. }
+            | Self::Boot { target, args, .. }
+            | Self::ColdBoot { target, args, .. } = &self
         {
             let target = target.clone();
             let args = args.clone();
@@ -241,7 +249,7 @@ impl Action {
             Self::Discard { pool, source } => {
                 Outcome::Discarded(boot_zfs::discard_prepared_clone(&zfs, &pool, &source).await?)
             }
-            Self::Boot { pool, target, args } => {
+            Self::Boot { pool, target, args } | Self::ColdBoot { pool, target, args } => {
                 let target = boot_zfs::refresh_target(&zfs, &target).await?;
                 let plan = if target.snapshot.is_some() {
                     boot_zfs::prepare_snapshot(&zfs, &pool, &target, &args).await?
@@ -265,7 +273,13 @@ impl Action {
                     }
                 })
                 .await??;
-                loaded.bind_resume(pool.guid, &plan)?;
+                if cold_boot {
+                    // A newly appearing image must never turn an explicit cold
+                    // boot into resume. LoadedKernel repeats this at execution.
+                    crate::resume::check_handoff(None)?;
+                } else {
+                    loaded.bind_resume(pool.guid, &plan)?;
+                }
                 boot_zfs::retain_snapshot_clone(&zfs, &pool, &plan).await?;
                 boot_zfs::release_owned(&zfs, &pool).await?;
                 Outcome::Boot(plan, loaded)
@@ -317,7 +331,11 @@ impl Action {
             | Self::Discard { pool, .. }
             | Self::Clone { pool, .. }
             | Self::Rollback { pool, .. } => Some(pool),
-            Self::Boot { pool, target, .. } if target.snapshot.is_some() => Some(pool),
+            Self::Boot { pool, target, .. } | Self::ColdBoot { pool, target, .. }
+                if target.snapshot.is_some() =>
+            {
+                Some(pool)
+            }
             _ => None,
         }
     }
@@ -496,6 +514,44 @@ mod tests {
             );
         }
         assert!(action().guard_resume(&status).is_err());
+    }
+
+    #[test]
+    fn cold_boot_rejects_even_a_matching_saved_session() {
+        let target: BootTarget = serde_json::from_value(serde_json::json!({
+            "dataset":"tank/root","generation":7,"label":"NixOS","root":"/guest",
+            "toplevel":"/nix/store/base","backend":{"kind":"Nixos"},"snapshot":null,
+            "mountpoint":null,"issue":null,
+            "inputs":{"kernel":"/shared/kernel","initrd":null,"init":"/nix/store/base/init","kernel_params":[]}
+        })).unwrap();
+        let pool = Pool {
+            name: "tank".into(),
+            guid: 42,
+            health: "ONLINE".into(),
+        };
+        let status = zbm_core::resume::Status::Pending {
+            session: Box::new(zbm_core::resume::Session {
+                id: "new-image".into(),
+                pool_guid: 42,
+                target: target.clone(),
+            }),
+        };
+        let ordinary = Action::Boot {
+            pool: pool.clone(),
+            target: target.clone(),
+            args: vec![],
+        };
+        let cold = Action::ColdBoot {
+            pool,
+            target,
+            args: vec![],
+        };
+        assert!(ordinary.guard_resume(&status).is_ok());
+        assert!(cold.guard_resume(&status).is_err());
+        assert!(
+            cold.guard_resume(&zbm_core::resume::Status::Inactive)
+                .is_ok()
+        );
     }
 
     #[test]
