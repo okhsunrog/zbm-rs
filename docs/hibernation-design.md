@@ -213,15 +213,18 @@ The signed enforced loader, target OS and unsigned rescue have separate runtime
 roles. Rescue retains its independent source/package set. The loader permits
 outgoing `kexec_file_load` only after owner authorization of the exact target.
 
-The proposed Framework adjustment is to share the protected `kernelPackages`
-between loader and target, retaining kexec in both. The earlier mandatory
-compile-time split is under reconsideration: the current host trusts full root
-with locally readable boot/IMA signing keys, and no concrete delegated
-`CAP_SYS_BOOT`-without-signing-keys path has been identified in the reviewed
-configuration. Compromise of those keys already permits signing arbitrary
-kernel/module inputs. This is a threat-model boundary, not a fix for TPM
-provenance across an arbitrary later kexec. Finalizing this adjustment does not
-waive the provenance tests below.
+The agreed Framework baseline shares the protected `kernelPackages` between
+loader and target, retaining kexec in both. Separate kernel builds are not a
+requirement. The current host trusts full root with locally readable boot/IMA
+signing keys; compromise of those keys already permits signing arbitrary
+kernel/module inputs. This is a threat-model boundary, not a proof of TPM
+provenance across arbitrary later kexec calls.
+
+Once the complete path works and passes acceptance, remove the older system
+generations using the normal generation/pruning workflow. Do not remove them
+before the working replacement has been verified. Deliberately chaining an old
+kernel or researching its possible TPM-provenance bypass is outside this
+deployment's implementation and acceptance scope.
 
 Disabling target `CONFIG_KEXEC` and `CONFIG_KEXEC_FILE` remains optional stronger
 hardening, particularly if signing keys move out of reach of the running OS or
@@ -229,14 +232,16 @@ keyless privileged attackers enter the threat model. It disables outgoing kexec,
 not receipt of the loader handoff. An early target-only
 `kernel.kexec_load_disabled=1` policy can instead share kernel builds, but must
 precede untrusted userspace; it cannot prevent execution of an already loaded
-image. Neither policy is enabled as part of this design discussion.
+image. Neither policy is currently enabled. The early sysctl is an optional
+target-userspace policy under consideration, not a reason to split kernel builds;
+it must remain unset in the loader and rescue, which need outgoing kexec.
 
 Matthew Garrett's TPM-signature design is the selected experimental backend.
 Both protected kernels must preserve kernel ownership of its reserved TPM NV
 state and the EFI/PCR5 provenance boundary. Only the target needs the full
 hibernation writer and verifier. The loader does not need to create or restore
-RAM images, but keeping that support in a shared kernel is acceptable under the
-proposed baseline. The current helper uses one full experimental configuration;
+RAM images, but keeping that support in the shared kernel is acceptable under the
+agreed baseline. The current helper uses one full experimental configuration;
 no separate loader/target builds are required solely by their runtime roles.
 
 Keep integrity Lockdown and signature enforcement. LUKS2 encrypts swap; TPM
@@ -244,16 +249,12 @@ signatures authenticate the saved RAM image. This is not support for
 confidentiality Lockdown. Never replace image authentication with a Lockdown
 exception or interpret a successful LUKS unlock as authenticated memory.
 
-The unresolved EFI-to-kexec provenance must be tested before enabling this
-backend. A positive patched-to-patched handoff alone is insufficient. A loader
-which establishes TPM evidence must not transfer it to an old signed kernel
-without the corresponding protection, even when no hibernation image currently
-exists. Otherwise that kernel could invalidate the assumptions behind later
-TPM evidence. Test unsupported targets and adversarial TPM operations as well
-as the intended path; do not assume PCR5 is reset by kexec. The main loader's
-profile restriction covers its own handoffs, not subsequent syscalls from the
-running OS. If the shared-kernel baseline is adopted, record this residual risk
-explicitly rather than describing it as an end-to-end enforced kexec chain.
+Verify EFI/PCR5 evidence and TPM NV protection across the actual supported
+patched-loader-to-patched-target handoff before enabling this backend. Do not
+assume PCR5 is reset by kexec or waive image-tampering and invalid/unavailable-TPM
+tests. The main loader's profile restriction covers its own handoffs, not
+subsequent syscalls from the running OS. This deployment does not claim an
+end-to-end enforced chain against arbitrary privileged kexec transitions.
 
 ### Owner authorization and compatibility
 
@@ -265,9 +266,10 @@ allowlist or possession of an ordinary PE signature is insufficient. Existing
 authorizations do not acquire the capability implicitly.
 
 The capable loader checks this profile for every outgoing boot, including cold
-boots, and rejects missing or unsupported profiles. Older generations remain
-available through independent rescue, subject to image cancellation. The exact
-schema and artifact validator follow the provenance experiment rather than
+boots, and rejects missing or unsupported profiles. After successful migration,
+old generations are removed rather than retained as a required recovery path;
+independent rescue remains available to repair the system. The exact schema and
+artifact validator follow the supported-path provenance tests rather than
 claiming capabilities the backport has not demonstrated.
 
 ### Resume and cancellation ordering

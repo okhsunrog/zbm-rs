@@ -84,14 +84,15 @@ survives our exact boot path or that the trust argument remains valid.
 
 Both the loader and hibernating target need the kernel-owned NV-index
 protection. A kernel signature alone does not establish that capability.
-In particular, booting a patched first kernel and then kexecing an older signed
-kernel raises a separate security question: the earlier PCR5 measurement must
-not be accepted as evidence that the older kernel filters userspace TPM
-commands. The RFC's published series does not contain a kexec-specific
-transition mechanism. This is an unverified attack scenario, not a demonstrated
-exploit or a completed mitigation.
+The agreed Framework deployment uses one shared patched `kernelPackages` and
+removes old system generations after the new path passes acceptance. A separate
+target kernel build without kexec is not required. Intentional transitions
+through old kernels and investigation of their possible TPM-provenance bypass
+are outside this deployment's acceptance scope. This does not establish that
+arbitrary privileged kexec chains preserve the RFC's trust assumptions.
 
-Acceptance must cover both patched-to-patched operation and rejection or
-invalidation of unsupported transitions. A successful RAM restore between two
-patched kernels alone would not settle this question. Do not bypass the PCR5
-check or remove enforced-mode resume rejection to make a VM test pass.
+Acceptance covers the actual EFI-to-patched-loader-to-patched-target path,
+TPM evidence/NV protection across that handoff, authenticated RAM restoration,
+and rejection of tampered images or invalid/unavailable TPM evidence. Do not
+bypass the PCR5 check or remove enforced-mode resume rejection to make a VM
+test pass. See the full [agreed architecture](../../../docs/hibernation-design.md#agreed-protected-boot-architecture-not-yet-implemented).

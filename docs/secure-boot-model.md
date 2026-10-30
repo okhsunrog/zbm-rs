@@ -5,6 +5,12 @@ for verified Linux/NixOS boot. See [configuration](configuration.md) for the
 implemented API, [the roadmap](roadmap.md) for remaining work and
 [verification](verification.md#secure-boot-acceptance-matrix) for acceptance gates.
 
+The agreed native-hibernation extension, including shared loader/target kernel
+packages, the versioned authorization profile and cancellation-only rescue, is
+specified in [the hibernation design](hibernation-design.md#agreed-protected-boot-architecture-not-yet-implemented).
+That extension remains unimplemented in enforced mode; its documented deployment
+scope does not claim protection against arbitrary privileged later kexec chains.
+
 ## Current implementation
 
 The shared schema provides `off`/`enforce`, a separate firmware requirement,
