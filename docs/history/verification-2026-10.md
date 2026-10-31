@@ -23,6 +23,8 @@ It is a local experimental extension, not part of Garrett's RFC.
 | `matrix-v7-unavailable-crb-sha256`, final `matrix-v9-unavailable-crb-sha256` | PASS, three restorations of the original RAM session, including retry after guest TPM absence without consuming the image; final run 377.65 s. |
 | `matrix-v9-cold-crb-sha256` | PASS, explicit repair boot with empty swap and unavailable TPM; healthy ZFS and ordinary paging work, integrity Lockdown remains active and hibernation remains unavailable. |
 | Protected runtime `p8`, final `p9` | PASS, all seven report checks: OVMF Secure Boot → enforced loader → PE/IMA/CMS-authorized target → original RAM restore, followed by another hibernation; missing/wrong signed profiles, F10 preservation and confirmed standalone cancellation/cold boot. Final run 324.98 s. |
+| `matrix-compressed-crb-sha256` | PASS, three restorations with default image compression, including TPM-absence refusal and retry. Kernel logs assert actual compression/decompression and authenticated context import. Run 760.11 s. |
+| Protected runtime `p10` | PASS, all seven protected-chain/UI checks with a compressed RAM image; actual compression and decompression asserted. Run 696.33 s. |
 
 Consumed-image failures remained protected by boot-record v2 on the following
 boot. Successful restorations retained the original boot ID and RAM-only data,
@@ -37,6 +39,9 @@ TPMs/disks/credentials, with no host disks or store shares. See the persistent
 These results do not establish physical Framework acceptance, upstream approval
 or that a ZFS pool cannot be modified while the laptop is asleep. Host
 hibernation was not enabled by these tests.
+
+The compressed runs overlapped a separate owner-certificate kernel build; their
+wall times include resource contention and are not compression benchmarks.
 
 The cold-unavailable fixture first exposed systemd's firmware/device wait after
 the deliberate TPM unbind. Its explicit repair arguments now include the standard

@@ -153,6 +153,10 @@ unbound the guest TPM: resume stopped before pool import without consuming the
 image. Restoring the exact original initramfs and TPM allowed retry, another
 hibernation and a third restoration. The finish hook returned the boot record
 to inactive and the target kexec prohibition remained set.
+The same three-cycle test passed with the kernel's default image compression.
+The complete protected-chain run separately passed a compressed RAM restore,
+the next hibernation and both explicit cancellation/cold-boot UI paths. Tests
+asserted actual compression and decompression, not only the planned arguments.
 
 ## Encrypted swap and credential ownership
 

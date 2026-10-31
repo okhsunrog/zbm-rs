@@ -19,6 +19,7 @@ let
   imaCertificate = publicCertificate input.imaCertificate "vm-ima.pem";
   signedKernel = builtins.path { path = input.signedKernel; name = "signed-kernel-v3.efi"; };
   signedModules = builtins.path { path = input.signedModules; name = "signed-modules-v3"; };
+  compressedImage = input.compressedImage or false;
   kernelPackages = import "${kernelSource}/nix/security-kernel.nix" {
     inherit pkgs;
     kernelPackages = pkgs.linuxPackages_latest;
@@ -26,7 +27,8 @@ let
     hibernationTpmSignature = true;
   };
   native = import ./check-encrypted-hibernation.nix {
-    inherit self pkgs nixpkgs system kernelPackages signedKernel signedModules;
+    inherit self pkgs nixpkgs system kernelPackages signedKernel signedModules compressedImage;
+    negativeCase = if compressedImage then "tpm-unavailable" else "signature";
     credentialPoolGuid = input.poolGuid;
     secretSource = input.secretSource;
     enforcedTarget = true;

@@ -213,7 +213,9 @@ def run(machine, *, source, tools):
     for name in ("key", "ima_key"):
         if signing[name].is_relative_to("/nix/store") or not signing[name].is_file():
             raise ValueError("Disposable private keys must remain outside Nix")
-    report = {"complete": False, "checks": [], "source": str(source), "host_disks_attached": False}
+    compressed = os.environ.get("ZBM_RESUME_VM_COMPRESSED") == "1"
+    report = {"complete": False, "checks": [], "source": str(source),
+              "host_disks_attached": False, "compressed_image": compressed}
     (work / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     def passed(name):
         report["checks"].append(name)
@@ -232,6 +234,7 @@ def run(machine, *, source, tools):
     pool_guid = machine.succeed("zpool get -Hp -o value guid testpool").strip()
     public = {
         "source": str(source), "poolGuid": pool_guid, "secretSource": str(secret),
+        "compressedImage": compressed,
         "certificate": str(signing["certificate"]), "imaCertificate": str(signing["ima_certificate"]),
         "signedKernel": os.environ["ZBM_RESUME_VM_SIGNED_KERNEL"],
         "signedModules": os.environ["ZBM_RESUME_VM_SIGNED_MODULES"],
@@ -317,6 +320,8 @@ def run(machine, *, source, tools):
             # Do not send shell protocol bytes into the loader or target
             # initramfs while the kernel handoff/restoration is still pending.
             machine.wait_for_console_text("PM: hibernation: hibernation exit", timeout=120)
+            if compressed:
+                assert "Loading and decompressing image data" in machine.get_console_log()
         machine.connected = restored
         if not restored:
             machine.connect()
@@ -341,6 +346,8 @@ def run(machine, *, source, tools):
     machine.succeed("printf preserved-protected-ram > /run/protected-resume-proof; echo 67108864 > /sys/power/image_size")
     machine.execute("systemctl --no-block hibernate", check_return=False)
     machine.wait_for_shutdown(timeout=datetime.timedelta(seconds=90))
+    if compressed:
+        assert "Compressing and saving image data" in machine.get_console_log()
     pending = loader_boot("pending")
     session = pending["state"]["resume"]["session"]["id"]
     before_swap = ssh("sha256sum /dev/vdd")

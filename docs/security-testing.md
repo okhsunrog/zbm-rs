@@ -53,6 +53,22 @@ first successful RAM restore before creating the negative image. The optional
 `restoreBeforeNegative = false` is only for isolated diagnosis; its result is
 named `negative-only` and does not establish repeated hibernation.
 
+`compressedImage = true` with `negativeCase = "tpm-unavailable"` additionally
+exercises three restorations with the kernel's default image compression. It
+asserts actual compression/decompression messages. The raw unsigned-snapshot
+layout probe remains a separate uncompressed test. For the complete protected
+chain, set `ZBM_RESUME_VM_COMPRESSED=1` in the runtime environment below; its report
+records `compressed_image` and checks the same compression/decompression path.
+
+Kernel-mechanics tests may reuse the final production kernel and signed modules
+with their public trust certificates. Supply only those public artifacts and
+fresh disposable devices/credentials, never the host's initramfs secrets, disks
+or signing keys. This avoids a second kernel build solely for mechanics testing.
+The complete instrumented-chain workflow below still uses disposable signers:
+owner-signing its diagnostic/SSH fixtures would create test images trusted by
+the real machine. Exact production EFI startup checks can instead boot the
+already published public image without creating owner-signed fixture variants.
+
 `lib.mkProtectedHibernationDriver {}` builds the complete-chain driver without
 running it inside a derivation. Run it as the regular repository owner, using
 a fresh work directory and disposable signing keys outside Nix. Supply an EFI/

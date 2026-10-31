@@ -3,7 +3,7 @@
   tpmDeviceModel ? "tpm-crb", negativeCase ? "signature",
   tpmBanks ? [ "sha1" "sha256" ], credentialPoolGuid ? "42",
   targetSigning ? null, enforcedTarget ? false, secretSource ? null,
-  restoreBeforeNegative ? true }:
+  restoreBeforeNegative ? true, compressedImage ? false }:
 let
   authenticated = kernelPackages != null;
   coldOnly = builtins.elem negativeCase [ "cold-unavailable" "cold-disabled" ];
@@ -80,7 +80,7 @@ let
         boot.kernelParams = [
           "console=ttyS0" "zfs.zfs_arc_max=134217728"
           "sysctl.kernel.kexec_load_disabled=1"
-        ] ++ pkgs.lib.optional authenticated "hibernate=nocompress"
+        ] ++ pkgs.lib.optional (authenticated && !compressedImage) "hibernate=nocompress"
           # Explicit repair boot: firmware still advertises the TPM that this
           # fixture deliberately unbinds. Keep native TPM units, but do not let
           # their generator wait forever for that intentionally absent device.
@@ -159,11 +159,12 @@ assert !authenticated || manifest.module_version == kernelPackages.kernel.modDir
 assert builtins.elem tpmDeviceModel [ "tpm-tis" "tpm-crb" ];
 assert builtins.elem negativeCase [ "signature" "payload" "tpm-reset" "tpm-unavailable" "cold-unavailable" "cold-disabled" ];
 assert negativeCase != "cold-unavailable" || authenticated;
+assert !compressedImage || (authenticated && negativeCase == "tpm-unavailable");
 assert restoreBeforeNegative || authenticated;
 assert tpmBanks != [] && pkgs.lib.unique tpmBanks == tpmBanks
   && builtins.all (bank: builtins.elem bank [ "sha1" "sha256" ]) tpmBanks;
 (pkgs.testers.runNixOSTest {
-  name = if authenticated then "zbm-authenticated-hibernation-${tpmDeviceModel}-${pkgs.lib.concatStringsSep "-" tpmBanks}-${negativeCase}${pkgs.lib.optionalString (!restoreBeforeNegative) "-negative-only"}"
+  name = if authenticated then "zbm-authenticated-hibernation-${tpmDeviceModel}-${pkgs.lib.concatStringsSep "-" tpmBanks}-${negativeCase}${pkgs.lib.optionalString (!restoreBeforeNegative) "-negative-only"}${pkgs.lib.optionalString compressedImage "-compressed"}"
     else if coldOnly then "zbm-encrypted-cold-disabled" else "zbm-encrypted-hibernation";
   globalTimeout = 1200;
   nodes.machine = { lib, config, ... }: {
@@ -277,6 +278,9 @@ assert tpmBanks != [] && pkgs.lib.unique tpmBanks == tpmBanks
     machine.succeed("printf preserved-in-ram > /run/resume-proof; echo 67108864 > /sys/power/image_size")
     machine.execute("systemctl --no-block hibernate", check_return=False)
     machine.wait_for_shutdown(timeout=datetime.timedelta(seconds=180))
+    ${pkgs.lib.optionalString compressedImage ''
+    assert "Compressing and saving image data" in machine.get_console_log()
+    ''}
     ${pkgs.lib.optionalString restoreBeforeNegative ''
     machine.start()
     machine.wait_for_unit("multi-user.target")
@@ -286,6 +290,9 @@ assert tpmBanks != [] && pkgs.lib.unique tpmBanks == tpmBanks
     machine.execute("systemctl --no-block kexec", check_return=False)
     # The target's shell resumes too; it does not emit a new boot handshake.
     machine.wait_for_console_text("PM: hibernation: hibernation exit", timeout=90)
+    ${pkgs.lib.optionalString compressedImage ''
+    assert "Loading and decompressing image data" in machine.get_console_log()
+    ''}
     ${pkgs.lib.optionalString (authenticated && (kernelPackages.kernel.zbmProtectedHibernation.contextHandoffProtocol or null) == 1) ''
     # The message precedes hibernation exit and was already consumed from the
     # driver's wait queue. The complete boot log retains both observations.
@@ -316,9 +323,12 @@ assert tpmBanks != [] && pkgs.lib.unique tpmBanks == tpmBanks
     machine.succeed("set -eu; test $(hostname) != resume-target; test ! -e /dev/mapper/resume-swap; ! zpool list -H -o name | grep -qx testpool")
     # The raw userspace snapshot interface shares the signature validator; it
     # must not accept an unsigned header. This never requests atomic restore.
+    # Its pinned page-layout helper only parses uncompressed swap images.
+    ${pkgs.lib.optionalString (!compressedImage) ''
     machine.succeed("cryptsetup open --key-file /etc/zfs/test.key /dev/vdd1 resume-swap")
     machine.succeed("uv run --offline --no-project --python ${pkgs.python3}/bin/python ${./check-snapshot-signature.py} /dev/mapper/resume-swap")
     machine.succeed("cryptsetup close resume-swap")
+    ''}
     ${pkgs.lib.optionalString (builtins.elem negativeCase [ "signature" "payload" ]) ''
     machine.succeed("cryptsetup open --key-file /etc/zfs/test.key /dev/vdd1 resume-swap")
     machine.succeed("uv run --offline --no-project --python ${pkgs.python3}/bin/python ${./tamper-hibernation-signature.py} /dev/mapper/resume-swap ${negativeCase}")

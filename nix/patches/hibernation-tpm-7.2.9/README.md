@@ -176,6 +176,11 @@ The CRB/SHA-256 unavailable-TPM run passed three restorations of the same origin
 RAM session: TPM absence stopped resume before pool import without consuming the
 image, the exact clean initramfs/TPM allowed retry, and the next hibernation and
 third restoration succeeded. The finish hook cleared the durable attempt state.
+The same three-cycle/TPM-absence scenario passed with `compressedImage = true`;
+the separate complete protected-chain runtime also passed all seven checks with
+`ZBM_RESUME_VM_COMPRESSED=1`. Both assert actual compression/decompression logs.
+The default uncompressed tamper tests remain separate so a decompression CRC
+cannot stand in for image-signature rejection.
 `negativeCase = "cold-unavailable"` separately checks a verified empty swap:
 repair cold-boot and paging must work with no TPM, while hibernation remains
 unavailable and integrity Lockdown remains active. This run passed. The explicit repair variant
