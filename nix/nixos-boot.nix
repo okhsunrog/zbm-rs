@@ -181,25 +181,30 @@ let
       (fs: builtins.head (lib.splitString "/" fs.device))
       (builtins.filter (fs: fs.fsType == "zfs") (builtins.attrValues config.fileSystems))
   );
+  activateResume = "${loader}/bin/zbm-rs --resume-activate-config ${loaderConfig}";
   recordResume = pkgs.writeShellScript "zbm-record-resume" ''
     set -eu
     export PATH=${lib.makeBinPath [ pkgs.util-linux pkgs.cryptsetup pkgs.lvm2 config.boot.zfs.package ]}
     swapoff ${lib.escapeShellArg resumeDevice}
-    trap 'swapon ${lib.escapeShellArg resumeDevice}' EXIT
+    trap ${lib.escapeShellArg activateResume} EXIT
     ${loader}/bin/zbm-rs --resume-record-current-config \
       ${lib.escapeShellArg config.fileSystems."/".device} ${loaderConfig}
-    swapon ${lib.escapeShellArg resumeDevice}
+    ${activateResume}
     trap - EXIT
   '';
   finishResume = pkgs.writeShellScript "zbm-finish-resume" ''
     set -eu
     export PATH=${lib.makeBinPath [ pkgs.util-linux pkgs.cryptsetup pkgs.lvm2 ]}
     swapoff ${lib.escapeShellArg resumeDevice}
-    trap 'swapon ${lib.escapeShellArg resumeDevice}' EXIT
+    trap ${lib.escapeShellArg activateResume} EXIT
     ${loader}/bin/zbm-rs --resume-finish-config ${loaderConfig}
-    swapon ${lib.escapeShellArg resumeDevice}
+    ${activateResume}
     trap - EXIT
   '';
+  resumeSleepService = lib.mkIf h.enable {
+    preStart = "${recordResume}";
+    postStop = "${finishResume}";
+  };
   runtimePath =
     description:
     lib.mkOption {
@@ -375,13 +380,16 @@ in
         after = [ "zbm-resume.service" ];
       })
     );
-    systemd.services.systemd-hibernate = lib.mkIf cfg.hibernation.enable {
-      preStart = "${recordResume}";
-      postStop = "${finishResume}";
-    };
+    # The composite operation does not start systemd-hibernate.service. Its
+    # record must cover the entire operation, including an early manual wake
+    # and systemd's suspend fallback after unsuccessful hibernation. Unlike
+    # system-sleep scripts, ExecStartPre failures abort the sleep operation.
+    systemd.services.systemd-hibernate = resumeSleepService;
+    systemd.services.systemd-suspend-then-hibernate = resumeSleepService;
     systemd.sleep.settings.Sleep = lib.mkIf cfg.hibernation.enable {
       AllowHybridSleep = false;
-      AllowSuspendThenHibernate = false;
+      # Opt in through the native sleep settings, alongside HibernateDelaySec.
+      AllowSuspendThenHibernate = lib.mkDefault false;
     };
     boot.initrd.systemd.root = null;
     boot.initrd.systemd.storePaths = [ earlyFstab ] ++ lib.optionals h.enable [ loader loaderConfig (lib.getBin pkgs.cryptsetup) (lib.getBin pkgs.lvm2) ];

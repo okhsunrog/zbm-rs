@@ -70,6 +70,9 @@
         kernel-patch-isolation = import ./nix/check-kernel-patch-isolation.nix { inherit pkgs; };
         signed-module-tree = import ./nix/check-signed-module-tree.nix { inherit self pkgs; };
         encrypted-hibernation = import ./nix/check-encrypted-hibernation.nix { inherit self pkgs nixpkgs system; };
+        encrypted-suspend-then-hibernate = import ./nix/check-encrypted-hibernation.nix {
+          inherit self pkgs nixpkgs system; sleepOperation = "suspend-then-hibernate";
+        };
         cold-resume-disabled = import ./nix/check-encrypted-hibernation.nix {
           inherit self pkgs nixpkgs system; negativeCase = "cold-disabled";
         };

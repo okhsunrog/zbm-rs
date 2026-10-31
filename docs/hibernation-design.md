@@ -208,10 +208,41 @@ policy must match, not just the PARTUUID. Legacy plain configurations retain
 `swapPartuuid`. The swap partition must
 already be configured/active; the module neither formats it nor partitions disks.
 The record step temporarily swaps it off, records the booted NixOS target, and
-reactivates it even if recording fails. Failure aborts hibernation. Memory pressure
-can make swapoff fail; that is not overridden. This hooks direct hibernation;
-suspend-then-hibernate and hybrid-sleep are disabled while this integration is
-enabled. Persistent initramfs mounts must all use the gated ZFS imports;
+reactivates it when verified inactive, including after ordinary recording errors.
+Reactivation checks the same device identity and resume state, then uses the
+kernel's `swapon` syscall on the pinned file descriptor. It never uses util-linux's
+automatic image-signature rewriting. A pending image, damaged record or unfinished
+attempt leaves swap off and reports failure. Failure aborts hibernation. Memory pressure
+can make swapoff fail; that is not overridden. Both `systemd-hibernate.service`
+and `systemd-suspend-then-hibernate.service` use fail-closed `ExecStartPre`
+preparation and `ExecStopPost` completion. The composite service does not start
+the direct hibernation service. Its record covers the whole operation: initial
+suspend, optional battery-estimation wakes, hibernation and systemd's suspend
+fallback if hibernation fails. Preparation alone does not mark an image pending;
+only the real Linux image signature does. Early manual wake leaves ordinary
+inactive swap, while completion refuses to clear a still-present image or an
+attempt belonging to another boot. System-sleep scripts cannot provide this
+gate because systemd ignores their errors.
+
+Suspend-then-hibernate remains off by default. Opt in using native NixOS settings;
+ordinary Suspend is unchanged and hybrid-sleep remains disabled:
+
+```nix
+systemd.sleep.settings.Sleep = {
+  AllowSuspendThenHibernate = true;
+  HibernateDelaySec = "2h";
+};
+```
+
+Request it with `systemctl suspend-then-hibernate`. Systemd owns wake alarms,
+battery policy and the transition; no extra timer or daemon is installed. Test
+the physical machine's alarm wake separately from VM acceptance. The disposable
+Q35 composite fixture uses real s2idle and real hibernation, but injects an ACPI
+power-button wake because CMOS alarms did not reliably wake that guest. A wake
+before the long deadline tests ordinary return; a wake after the short deadline
+tests systemd's timer-expiry path. This does not establish automatic RTC delivery
+or battery-alarm delivery on a laptop. Persistent
+initramfs mounts must all use the gated ZFS imports;
 configurations with other early persistent filesystems are rejected.
 
 ```nix

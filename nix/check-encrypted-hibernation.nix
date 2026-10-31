@@ -3,9 +3,11 @@
   tpmDeviceModel ? "tpm-crb", negativeCase ? "signature",
   tpmBanks ? [ "sha1" "sha256" ], credentialPoolGuid ? "42",
   targetSigning ? null, enforcedTarget ? false, secretSource ? null,
-  restoreBeforeNegative ? true, compressedImage ? false }:
+  restoreBeforeNegative ? true, compressedImage ? false,
+  sleepOperation ? "hibernate", extraTargetModules ? [] }:
 let
   authenticated = kernelPackages != null;
+  composite = sleepOperation == "suspend-then-hibernate";
   coldOnly = builtins.elem negativeCase [ "cold-unavailable" "cold-disabled" ];
   manifest = if authenticated then builtins.fromJSON
     (builtins.readFile "${signedModules}/zbm-module-manifest.json") else null;
@@ -48,6 +50,25 @@ let
           };
         };
         boot.zfs.unsafeAllowHibernation = true;
+        systemd.sleep.settings.Sleep = pkgs.lib.mkIf composite {
+          AllowSuspendThenHibernate = true;
+          HibernateDelaySec = "5s";
+        };
+        services.logind.settings.Login.HandlePowerKey = pkgs.lib.mkIf composite "ignore";
+        # Fault injection only: remove swap after systemd selected the resume
+        # location, so its real hibernate attempt fails and falls back to RAM.
+        environment.etc."systemd/system-sleep/zbm-test-fail-hibernate" = pkgs.lib.mkIf composite {
+          mode = "0755";
+          text = ''
+            #!${pkgs.runtimeShell}
+            if test -e /run/zbm-test-fail-hibernate && test "$SYSTEMD_SLEEP_ACTION" = hibernate; then
+              case "$1" in
+                pre) ${pkgs.util-linux}/bin/swapoff /dev/mapper/resume-swap ;;
+                post) ${pkgs.util-linux}/bin/swapon /dev/mapper/resume-swap ;;
+              esac
+            fi
+          '';
+        };
         boot.zfs.devNodes = "/dev/disk/by-path";
         boot.zfs.requestEncryptionCredentials = [ "testpool" ];
         boot.initrd.secrets."/etc/zfs/test.key" = if secretSource == null then "/etc/zfs/test.key" else secretSource;
@@ -80,7 +101,8 @@ let
         boot.kernelParams = [
           "console=ttyS0" "zfs.zfs_arc_max=134217728"
           "sysctl.kernel.kexec_load_disabled=1"
-        ] ++ pkgs.lib.optional (authenticated && !compressedImage) "hibernate=nocompress"
+        ] ++ pkgs.lib.optionals composite [ "mem_sleep_default=s2idle" "no_console_suspend" ]
+          ++ pkgs.lib.optional (authenticated && !compressedImage) "hibernate=nocompress"
           # Explicit repair boot: firmware still advertises the TPM that this
           # fixture deliberately unbinds. Keep native TPM units, but do not let
           # their generator wait forever for that intentionally absent device.
@@ -144,7 +166,7 @@ let
         environment.etc."zbm-rs/test-resume-policy.json".source = resumeConfig;
         system.stateVersion = "26.05";
       }
-    ];
+    ] ++ extraTargetModules;
   }).config;
   target = targetConfig.system.build.toplevel;
   resumeConfig = pkgs.writeText "test-resume-policy.json" (builtins.toJSON {
@@ -161,11 +183,13 @@ assert builtins.elem negativeCase [ "signature" "payload" "tpm-reset" "tpm-unava
 assert negativeCase != "cold-unavailable" || authenticated;
 assert !compressedImage || (authenticated && negativeCase == "tpm-unavailable");
 assert restoreBeforeNegative || authenticated;
+assert builtins.elem sleepOperation [ "hibernate" "suspend-then-hibernate" ];
 assert tpmBanks != [] && pkgs.lib.unique tpmBanks == tpmBanks
   && builtins.all (bank: builtins.elem bank [ "sha1" "sha256" ]) tpmBanks;
 (pkgs.testers.runNixOSTest {
-  name = if authenticated then "zbm-authenticated-hibernation-${tpmDeviceModel}-${pkgs.lib.concatStringsSep "-" tpmBanks}-${negativeCase}${pkgs.lib.optionalString (!restoreBeforeNegative) "-negative-only"}${pkgs.lib.optionalString compressedImage "-compressed"}"
-    else if coldOnly then "zbm-encrypted-cold-disabled" else "zbm-encrypted-hibernation";
+  name = (if authenticated then "zbm-authenticated-hibernation-${tpmDeviceModel}-${pkgs.lib.concatStringsSep "-" tpmBanks}-${negativeCase}${pkgs.lib.optionalString (!restoreBeforeNegative) "-negative-only"}${pkgs.lib.optionalString compressedImage "-compressed"}"
+    else if coldOnly then "zbm-encrypted-cold-disabled" else "zbm-encrypted-hibernation")
+    + pkgs.lib.optionalString composite "-suspend-then-hibernate";
   globalTimeout = 1200;
   nodes.machine = { lib, config, ... }: {
     imports = [ protectedProfile ];
@@ -276,7 +300,12 @@ assert tpmBanks != [] && pkgs.lib.unique tpmBanks == tpmBanks
     machine.succeed("test $(cat /sys/power/resume) = $(lsblk -dn -o MAJ:MIN /dev/mapper/resume-swap); grep -qw disk /sys/power/state")
     before = machine.succeed("cat /proc/sys/kernel/random/boot_id").strip()
     machine.succeed("printf preserved-in-ram > /run/resume-proof; echo 67108864 > /sys/power/image_size")
-    machine.execute("systemctl --no-block hibernate", check_return=False)
+    status_command = "${loader}/bin/zbm-rs --resume-status-config ${resumeConfig}"
+    record_command = "${targetConfig.systemd.services.systemd-hibernate.preStart}"
+    activate_command = "${loader}/bin/zbm-rs --resume-activate-config ${resumeConfig}"
+    ${pkgs.lib.optionalString composite (builtins.readFile ./check-suspend-then-hibernate.py)}
+    machine.execute("systemctl --no-block ${sleepOperation}", check_return=False)
+    ${pkgs.lib.optionalString composite "wake_from_suspend(8)"}
     machine.wait_for_shutdown(timeout=datetime.timedelta(seconds=180))
     ${pkgs.lib.optionalString compressedImage ''
     assert "Compressing and saving image data" in machine.get_console_log()
@@ -301,8 +330,8 @@ assert tpmBanks != [] && pkgs.lib.unique tpmBanks == tpmBanks
     machine.wait_for_unit("multi-user.target")
     after = machine.succeed("cat /proc/sys/kernel/random/boot_id").strip()
     assert before == after, (before, after, "cold boot occurred instead of RAM restore")
-    machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value systemd-hibernate.service) = inactive", timeout=30)
-    machine.succeed("test $(systemctl show -p Result --value systemd-hibernate.service) = success")
+    machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value systemd-${sleepOperation}.service) = inactive", timeout=30)
+    machine.succeed("test $(systemctl show -p Result --value systemd-${sleepOperation}.service) = success")
     assert json.loads(machine.succeed("${loader}/bin/zbm-rs --resume-status-config ${resumeConfig}"))["state"] == "inactive"
     # The restored kernel may have older block-cache pages. Confirm the cleared
     # attempt is actually on disk, rather than accepting a cached header alone.
@@ -310,6 +339,25 @@ assert tpmBanks != [] && pkgs.lib.unique tpmBanks == tpmBanks
     check_target_kexec_disabled()
     machine.succeed("test $(cat /run/resume-proof) = preserved-in-ram; test $(findmnt -n -o SOURCE /) = testpool/root; zpool status -x | grep -q 'all pools are healthy'")
     machine.succeed("journalctl -b --no-pager | grep -E 'hibernation (entry|exit)' ")
+    ${pkgs.lib.optionalString composite ''
+    # A second full timeout/restore must work after the manual wake, fallback
+    # and first restoration, retaining the same running kernel and TPM context.
+    machine.execute("systemctl --no-block ${sleepOperation}", check_return=False)
+    wake_from_suspend(8)
+    machine.wait_for_shutdown(timeout=datetime.timedelta(seconds=180))
+    machine.start()
+    machine.wait_for_unit("multi-user.target")
+    machine.succeed("test ! -e /dev/mapper/resume-swap; ! zpool list -H -o name | grep -qx testpool")
+    machine.succeed(load)
+    restore_start = len(machine.get_console_log())
+    machine.execute("systemctl --no-block kexec", check_return=False)
+    machine.wait_for_console_text("PM: hibernation: hibernation exit", timeout=90)
+    ${pkgs.lib.optionalString authenticated ''
+    assert "Restored authenticated NULL-primary context" in machine.get_console_log()[restore_start:]
+    ''}
+    machine.wait_for_unit("multi-user.target")
+    finished()
+    ''}
     ''}
     ${pkgs.lib.optionalString authenticated ''
     # Create a second authentic image, then corrupt just its ECDSA signature

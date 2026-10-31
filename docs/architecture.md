@@ -5,8 +5,10 @@ rescue roles are specified in [the hibernation design](hibernation-design.md).
 The ordinary-mode guard, experimental authenticated-memory backend and signed
 enforced-resume policy have separate acceptance gates. Authenticated VM RAM
 restoration, subsequent hibernation and the complete enforced Secure Boot chain
-passed with the experimental backend. Physical acceptance remains separate;
-host hibernation remains disabled. Independent rescue publication and its
+passed with the experimental backend. Physical acceptance remains deployment
+specific. Direct and opt-in suspend-then-hibernate use the same fail-closed
+native systemd unit lifecycle; no system-sleep hook controls image preparation.
+Independent rescue publication and its
 candidate/known-good lifecycle are described in
 [NixOS deployment](nixos-deployment.md#optional-efi-publication-and-independent-rescue).
 

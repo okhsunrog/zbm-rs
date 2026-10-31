@@ -125,6 +125,25 @@ impl Swap {
         status(&self.header()?)
     }
 
+    /// Reactivate verified empty swap without util-linux's automatic rewriting
+    /// of hibernation signatures. Open read-only so the kernel can claim it.
+    pub fn activate(&self) -> io::Result<()> {
+        if !matches!(self.status()?, Status::Inactive) {
+            return Err(error(
+                "Cannot activate swap while a saved session or unfinished attempt remains",
+            ));
+        }
+        // Pin the validated device across activation, rather than resolving a
+        // potentially replaced /dev link again. The kernel independently checks
+        // its swap signature; a newly appearing image fails without rewriting.
+        let path = std::ffi::CString::new(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
+            .expect("numeric file descriptor contains no NUL");
+        if unsafe { libc::swapon(path.as_ptr(), 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     /// Call while swap is inactive, before swapon and the hibernation request.
     /// The kernel preserves bootbits when marking the image. Never retrofit a
     /// record onto an already-created image.
@@ -504,6 +523,42 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.directory);
         }
+    }
+
+    #[test]
+    fn activation_refuses_images_and_consumed_or_damaged_attempts_without_writes() {
+        let fixture = Fixture::new();
+        fixture.recorded_image();
+        let h = fixture.swap.header().unwrap();
+        assert!(
+            fixture
+                .swap
+                .activate()
+                .unwrap_err()
+                .to_string()
+                .contains("saved session")
+        );
+        assert_eq!(h, fixture.swap.header().unwrap());
+        fixture.swap.arm_attempt(&digest(&h)).unwrap();
+        fixture
+            .swap
+            .file
+            .write_all_at(SWAP, (PAGE - 10) as u64)
+            .unwrap();
+        let h = fixture.swap.header().unwrap();
+        assert!(
+            fixture
+                .swap
+                .activate()
+                .unwrap_err()
+                .to_string()
+                .contains("saved session")
+        );
+        assert_eq!(h, fixture.swap.header().unwrap());
+        fixture.swap.file.write_all_at(b"oops", 20).unwrap();
+        let h = fixture.swap.header().unwrap();
+        assert!(fixture.swap.activate().is_err());
+        assert_eq!(h, fixture.swap.header().unwrap());
     }
 
     #[test]

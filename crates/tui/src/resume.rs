@@ -262,6 +262,7 @@ pub fn utility(args: &[std::ffi::OsString]) -> Result<bool> {
             || arg == "--resume-restore"
             || arg == "--resume-restore-config"
             || arg == "--resume-finish-config"
+            || arg == "--resume-activate-config"
     }) {
         anyhow::ensure!(
             unsafe { libc::geteuid() } == 0,
@@ -273,14 +274,16 @@ pub fn utility(args: &[std::ffi::OsString]) -> Result<bool> {
             "usage: zbm-rs --resume-record PARTUUID POOL_GUID PLAN_JSON | --resume-restore PARTUUID"
         );
         let finishing = args[0] == "--resume-finish-config";
+        let activating = args[0] == "--resume-activate-config";
         let device = if args[0] == "--resume-restore-config"
             || args[0] == "--resume-record-config"
             || finishing
+            || activating
         {
             let config = crate::config::parse(&std::fs::read_to_string(&args[1])?)?;
             anyhow::ensure!(
                 config.resume.role != zbm_core::resume::Role::CancelOnly,
-                "Cancellation-only rescue cannot record or restore a hibernation image"
+                "Cancellation-only rescue cannot record, reactivate or restore hibernation swap"
             );
             config
                 .resume
@@ -295,7 +298,9 @@ pub fn utility(args: &[std::ffi::OsString]) -> Result<bool> {
             }
         };
         let swap = zbm_core::resume::linux::Swap::open_device(&device, recording || finishing)?;
-        if finishing {
+        if activating {
+            swap.activate()?;
+        } else if finishing {
             swap.finish_attempt()?;
         } else if recording {
             use std::io::Read;

@@ -18,6 +18,12 @@ let
   }).config;
   off = evaluate false {};
   on = evaluate true {};
+  composite = evaluate true {
+    systemd.sleep.settings.Sleep = {
+      AllowSuspendThenHibernate = true;
+      HibernateDelaySec = "2h";
+    };
+  };
   encryptedSettings = {
     boot.loader.zbm-rs.hibernation = {
       swapPartuuid = nixpkgs.lib.mkForce "";
@@ -40,6 +46,12 @@ in
 assert builtins.elem "nohibernate" (nixpkgs.lib.splitString " " rescue.cmdline);
 assert !(builtins.elem "sysctl.kernel.kexec_load_disabled=1" (nixpkgs.lib.splitString " " rescue.cmdline));
 assert !(off.boot.initrd.systemd.services ? zbm-resume);
+assert on.systemd.sleep.settings.Sleep.AllowSuspendThenHibernate == false;
+assert composite.systemd.sleep.settings.Sleep.AllowSuspendThenHibernate;
+assert composite.systemd.sleep.settings.Sleep.HibernateDelaySec == "2h";
+assert !composite.systemd.sleep.settings.Sleep.AllowHybridSleep;
+assert composite.systemd.services.systemd-suspend-then-hibernate.preStart == on.systemd.services.systemd-hibernate.preStart;
+assert composite.systemd.services.systemd-suspend-then-hibernate.postStop == on.systemd.services.systemd-hibernate.postStop;
 assert off.boot.loader.zbm-rs.hibernation.resumeConfig == {};
 assert encryptedOff.boot.loader.zbm-rs.hibernation.resumeConfig == {};
 assert encryptedOff.boot.loader.zbm-rs.hibernation.cancellationConfig.role == "cancel-only";
