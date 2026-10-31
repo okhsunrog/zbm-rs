@@ -47,7 +47,33 @@ pub fn start_hung_mount(run: &Path) -> Result<u32> {
         }
     }
     mount_wrapper(run, true)?;
-    vm::key(run, "f8")?;
+    if vm::screen(run)?["ui"]["view"] != "Pools" {
+        vm::key(run, "f8")?;
+    }
+    let pool_index = wait_for(10, None, || {
+        let state = vm::screen(run)?;
+        ensure!(state["ui"]["view"] == "Pools", "Waiting for pool selection");
+        state["state"]["pools"]
+            .as_array()
+            .context("Missing pool catalog")?
+            .iter()
+            .position(|pool| pool["name"] == "zbm_fixture")
+            .context("Missing fault-isolation pool")
+    })?;
+    // Pool discovery order and the remembered pool-view selection can differ.
+    // Inspect the pool containing BAD rather than whichever row was last open.
+    vm::key(run, "home")?;
+    for _ in 0..pool_index {
+        vm::key(run, "down")?;
+    }
+    wait_for(10, None, || {
+        let state = vm::screen(run)?;
+        ensure!(
+            state["ui"]["view"] == "Pools" && state["state"]["selected"] == pool_index,
+            "Waiting for fault-isolation pool selection: {state}"
+        );
+        Ok(())
+    })?;
     vm::key(run, "ret")?;
     wait_for(10, None, || {
         let state = vm::screen(run)?;
