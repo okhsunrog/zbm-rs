@@ -147,7 +147,10 @@ impl Ui {
                 ));
                 lines.push(field("Encryption", &env.properties.encryption));
                 lines.push(Line::raw(""));
-                if let Some(error) = &env.unavailable {
+                if let Some(status) = self.unlock_status(env.pool_guid, &env.dataset) {
+                    lines.push(heading(status, FOCUS));
+                    lines.push(Line::raw("Please wait; boot targets are not ready yet."));
+                } else if let Some(error) = &env.unavailable {
                     lines.push(heading(
                         if env.properties.locked() {
                             "Locked"
@@ -546,7 +549,7 @@ impl Ui {
             format!(
                 " {position}/{} matches ({} total) ",
                 rows.len(),
-                Self::rows(state).len()
+                self.rows(state).len()
             )
         };
         let list_block = panel(View::of(state).title(), INK)

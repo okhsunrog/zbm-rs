@@ -7,6 +7,7 @@ let
     } ];
   }).config.system.build.zbm-rs-efi.passthru.configJson;
   defaults = json {};
+  preferred = json { settings.nixos.preferredSpecialisation = "niri"; };
   optionalTpm = json { settings.security.tpm.policy = "optional"; };
   requiredTpm = json { settings.security.tpm.policy = "required"; };
   minimum = json { settings = {
@@ -28,6 +29,8 @@ let
   };
 in pkgs.runCommand "zbm-module-config-parity" { nativeBuildInputs = [ pkgs.jq ]; } ''
   mkdir -p $out
+  ${binary}/bin/zbm-rs --validate-config ${preferred} > $out/preferred.json
+  jq -e '.nixos.preferred_specialisation == "niri"' $out/preferred.json
   ${binary}/bin/zbm-rs --validate-config ${defaults} > $out/nix-defaults.json
   ${binary}/bin/zbm-rs --validate-config ${pkgs.writeText "rust-defaults.json" "{}"} > $out/rust-defaults.json
   cmp $out/nix-defaults.json $out/rust-defaults.json

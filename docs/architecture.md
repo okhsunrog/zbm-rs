@@ -21,6 +21,14 @@ pool preference. Core adapters select the default Linux kernel or actual current
 NixOS profile; the TUI never assumes that index zero is bootable or current.
 Enter loads the default directly, K inspects alternatives and T opens snapshots.
 The manager carries a selected intent through unlock and catalog refresh.
+Unlock progress replaces stale locked labels while keys are being processed and
+boot targets rediscovered. The broker reports visited pool GUIDs, accumulated
+across successive keysource prompts; only these pools are refreshed after
+successful unlock. Pending catalog work and unrelated pools remain intact. Full Rescan still
+rediscovers all pools. Image-owned `nixos.preferred_specialisation` optionally
+selects a named variant within the discovered default generation, falling back
+to that generation's ordinary target. Exact saved-session selection takes
+precedence, including in Enter, K selection and automatic boot.
 Separate pool, kernel and generation views are optional navigation, not startup steps.
 
 Unlock follows only the requested BE's encryption dependencies through the broker.

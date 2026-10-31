@@ -55,6 +55,7 @@ compares actual derivation paths for changed image settings and compiled policy.
 | `manager.restart_limit` | `2` | 0..8; rapid failure threshold entering recovery |
 | `diagnostics.esp_partuuid` | `null` | opt-in GPT partition UUID for failure-only FAT reports; compiled into the image as well as validated JSON |
 | `zfs.import_policy` | `host-id` | host-id or read-only; automatic startup import, never force |
+| `nixos.preferred_specialisation` | `null` | preferred named variant of the default generation; missing variant falls back to that generation; never overrides a saved session |
 | `nixos.generation_limit` | `20` | 1..512; maximum generations per root or snapshot |
 | `resume.device` | `null` | explicit plain GPT partition or LUKS2 identity; experimental, security off and ESP logging disabled |
 | `resume.role` | `resume` | `cancel-only` disables restoration for independent rescue while retaining image detection and confirmed invalidation |
@@ -91,7 +92,7 @@ can still prevent persistence. A successful boot leaves the last failure intact.
 
 Runtime options are under `programs.zbm-rs.settings`: `boot.mode`, `boot.timeout`, `boot.preferredPoolGuid`,
 `ui.showSnapshots`, `ui.title`, `manager.restartLimit`, `zfs.importPolicy`,
-`nixos.generationLimit` and `kernelArgs`. Image packaging uses `image.profile`
+`nixos.generationLimit`, `nixos.preferredSpecialisation` and `kernelArgs`. Image packaging uses `image.profile`
 and `image.hardwareManifest`. The former top-level names remain renamed aliases.
 lib.mkImage accepts loaderConfig as a JSON-compatible Nix attrset. It goes through
 the same Rust schema validation as checked-in fixtures. Production uses
@@ -100,6 +101,16 @@ Image userspace defaults to eudev and ZFS without optional URL fetching, includi
 NixOS integration. Local encryption keys work; HTTPS keylocations are unavailable.
 NixOS derives this userspace from boot.zfs.package, preserving its version and
 matching module selection. Nix generates JSON only, never Rust source. JSON is not read from host /etc or /sys.
+
+For example, `programs.zbm-rs.settings.nixos.preferredSpecialisation = "niri";`
+selects Niri for Enter and automatic cold boot within the current default
+NixOS generation. With `lib.mkImage`, use
+`loaderConfig.nixos.preferred_specialisation = "niri";` instead. Null preserves
+the existing parent default. An absent or rejected variant falls back to the
+same generation's discovered default; an older variant is never substituted.
+K still offers all usable variants. A pending saved session always takes
+precedence and resumes its exact original generation and specialisation.
+Changing this immutable setting requires rebuilding and deploying the loader.
 
 A future small kernel-command-line emergency override layer belongs above this
 base configuration; it has not been implemented. It must not weaken the signed

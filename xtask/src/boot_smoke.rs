@@ -360,6 +360,18 @@ fn targets(run: &Path, secure: bool, specialisation: bool) -> Result<()> {
             state["state"]["error"].is_null(),
             "Generation discovery failed: {state}"
         );
+        if specialisation {
+            let selected = state["state"]["selected_target"].as_u64().unwrap() as usize;
+            let target = &state["state"]["targets"][selected];
+            ensure!(
+                target["generation"] == 2,
+                "Preference must stay in current generation"
+            );
+            ensure!(
+                target["specialisation"] == state["config"]["nixos"]["preferred_specialisation"],
+                "K must initially select the configured current-generation default"
+            );
+        }
         let targets = state["state"]["targets"]
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("Missing targets"))?;

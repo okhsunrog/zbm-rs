@@ -91,6 +91,7 @@ pub enum ImportPolicy {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Nixos {
+    pub preferred_specialisation: Option<String>,
     pub generation_limit: u32,
 }
 
@@ -122,6 +123,7 @@ pub struct Tpm {
 impl Default for Nixos {
     fn default() -> Self {
         Self {
+            preferred_specialisation: None,
             generation_limit: 20,
         }
     }
@@ -156,6 +158,21 @@ impl Config {
         }
         if self.manager.restart_limit > 8 {
             return Err("manager.restart_limit must be in 0..=8".into());
+        }
+        if self
+            .nixos
+            .preferred_specialisation
+            .as_ref()
+            .is_some_and(|name| {
+                name.is_empty()
+                    || name.len() > 256
+                    || name == "."
+                    || name == ".."
+                    || name.contains('/')
+                    || name.chars().any(char::is_control)
+            })
+        {
+            return Err("nixos.preferred_specialisation must be a nonempty component of at most 256 bytes without control characters".into());
         }
         if !(1..=512).contains(&self.nixos.generation_limit) {
             return Err("nixos.generation_limit must be in 1..=512".into());

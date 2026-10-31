@@ -65,7 +65,7 @@ fn exit_shell(run: &Path, previous: u32) -> Result<()> {
     for key in ["e", "x", "i", "t", "ret"] {
         vm::key(run, key)?;
     }
-    wait_for(10, None, || new_manager(run, previous, 1))?;
+    wait_for(10, None, || new_manager(run, previous, 3))?;
     Ok(())
 }
 
@@ -198,7 +198,7 @@ pub fn exercise(run: &Path) -> Result<()> {
     fs::write(run.join("operation-timeout.txt"), vm::console(run)?)?;
     restore_mount(run)?;
     vm::key(run, "n")?;
-    wait_for(10, None, || new_manager(run, previous, 1))?;
+    wait_for(10, None, || new_manager(run, previous, 3))?;
     let state: Value = vm::screen(run)?;
     ensure!(
         state["state"]["requires_restart"] == false,

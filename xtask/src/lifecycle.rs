@@ -159,11 +159,11 @@ fn exit_shell(run: &Path, previous: u32) -> Result<()> {
     for key in ["e", "x", "i", "t", "ret"] {
         vm::key(run, key)?;
     }
-    wait_for(10, None, || new_manager(run, previous, 1))?;
+    wait_for(10, None, || new_manager(run, previous, 3))?;
     Ok(())
 }
 fn changed(run: &Path, previous: u32) -> Result<()> {
-    wait_for(10, None, || new_manager(run, previous, 1))?;
+    wait_for(10, None, || new_manager(run, previous, 3))?;
     Ok(())
 }
 

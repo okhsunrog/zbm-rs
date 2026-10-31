@@ -28,6 +28,14 @@ pub enum Status {
     Passphrase(Challenge),
 }
 
+/// Catalog refresh scope observed by the broker, including keysource peers.
+/// No passphrase or key material is included in this response.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Resolution {
+    pub status: Status,
+    pub pool_guids: Vec<u64>,
+}
+
 /// An explicitly bound shared credential. Unlike keysource resolution, this
 /// never reads files from a dataset. Both consumers complete before Ready.
 pub async fn resolve_resume(
@@ -36,7 +44,7 @@ pub async fn resolve_resume(
     source: &crate::resume::CredentialSource,
     device: &crate::resume::device::Device,
     answer: Option<Answer>,
-) -> io::Result<Status> {
+) -> io::Result<Resolution> {
     let (guid, root) = source.target();
     if guid != pool.guid
         || !boot_zfs::managed_pools(zfs)
@@ -56,15 +64,21 @@ pub async fn resolve_resume(
         ));
     }
     if crate::resume::mapping::available(device)? && !properties.locked() {
-        return Ok(Status::Ready);
+        return Ok(Resolution {
+            status: Status::Ready,
+            pool_guids: vec![pool.guid],
+        });
     }
     let Some(answer) = answer else {
-        return challenge(
-            pool,
-            root,
-            &properties,
-            Some("Also unlocks encrypted swap before checking the saved session".into()),
-        );
+        return Ok(Resolution {
+            status: challenge(
+                pool,
+                root,
+                &properties,
+                Some("Also unlocks encrypted swap before checking the saved session".into()),
+            )?,
+            pool_guids: vec![pool.guid],
+        });
     };
     if !source.matches(
         answer.challenge.pool_guid,
@@ -93,7 +107,10 @@ pub async fn resolve_resume(
         return Err(error("Incorrect encryption-root passphrase"));
     }
     crate::resume::mapping::unlock(device, zfs.command_runner(), &answer.passphrase).await?;
-    Ok(Status::Ready)
+    Ok(Resolution {
+        status: Status::Ready,
+        pool_guids: vec![pool.guid],
+    })
 }
 
 fn error(message: impl std::fmt::Display) -> io::Error {
@@ -128,6 +145,7 @@ struct Context<'a> {
     pools: Vec<Pool>,
     answer: Option<Answer>,
     stack: Vec<(u64, String)>,
+    visited: std::collections::BTreeSet<u64>,
 }
 
 /// Validate the original boot selection before following any keysource metadata.
@@ -136,7 +154,7 @@ pub async fn resolve(
     pool: &Pool,
     dataset: &str,
     answer: Option<Answer>,
-) -> io::Result<Status> {
+) -> io::Result<Resolution> {
     let pools = boot_zfs::managed_pools(zfs).await?;
     if !pools
         .iter()
@@ -149,14 +167,18 @@ pub async fn resolve(
     if !properties.visible() || properties.canmount == "off" {
         return Err(error("Unlock target is not a mountable boot environment"));
     }
-    Context {
+    let mut context = Context {
         zfs,
         pools,
         answer,
         stack: vec![],
-    }
-    .unlock(dataset.to_owned())
-    .await
+        visited: Default::default(),
+    };
+    let status = context.unlock(dataset.to_owned()).await?;
+    Ok(Resolution {
+        status,
+        pool_guids: context.visited.into_iter().collect(),
+    })
 }
 
 impl Context<'_> {
@@ -174,6 +196,7 @@ impl Context<'_> {
                 })
                 .cloned()
                 .ok_or_else(|| error("Keysource pool was not imported by this manager"))?;
+            self.visited.insert(pool.guid);
             let properties = boot_zfs::properties(self.zfs, &dataset).await?;
             if !properties.locked() {
                 return Ok(Status::Ready);

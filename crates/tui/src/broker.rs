@@ -46,7 +46,7 @@ enum Request {
 enum Reply {
     ResumeStatus(zbm_core::resume::Status),
     ResumeCancelled,
-    Unlock(zbm_core::unlock::Status),
+    Unlock(zbm_core::unlock::Resolution),
     Ready,
     Pools(Vec<Pool>),
     Environments(Vec<BootEnvironment>),

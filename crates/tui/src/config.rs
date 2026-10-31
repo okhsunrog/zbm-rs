@@ -39,6 +39,31 @@ pub fn load(supervised: bool) -> anyhow::Result<Config> {
 mod tests {
     use super::*;
     #[test]
+    fn preferred_specialisation_is_optional_and_validated() {
+        assert!(
+            parse("{}")
+                .unwrap()
+                .nixos
+                .preferred_specialisation
+                .is_none()
+        );
+        for name in ["niri", "with space", "λ"] {
+            let json = serde_json::json!({"nixos":{"preferred_specialisation":name}});
+            assert_eq!(
+                parse(&json.to_string())
+                    .unwrap()
+                    .nixos
+                    .preferred_specialisation
+                    .as_deref(),
+                Some(name)
+            );
+        }
+        for name in ["", ".", "..", "../niri", "niri/child", "line\nfeed"] {
+            let json = serde_json::json!({"nixos":{"preferred_specialisation":name}});
+            assert!(parse(&json.to_string()).is_err(), "{name:?}");
+        }
+    }
+    #[test]
     fn nested_defaults_and_escaped_strings_round_trip() {
         let config = parse(r#"{"ui":{"title":"Boot \"Linux\""},"zfs":{"import_policy":"read-only"},"kernel_args":["quote=\"value\"","path=\\a","unicode=λ"]}"#).unwrap();
         assert_eq!(config.boot.timeout_secs, 5);

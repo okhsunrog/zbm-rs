@@ -27,6 +27,11 @@
         default = production;
         zbm-rs-efi = production;
         zbm-rs-efi-test = testing;
+        zbm-rs-efi-test-preferred = mkImage { testProfile = true;
+          loaderConfig = (builtins.fromJSON (builtins.readFile ./config/test.json)) // {
+            nixos.preferred_specialisation = "niri";
+          };
+        };
         zbm-rs-efi-test-resume = mkImage {
           testProfile = true;
           loaderConfig = {

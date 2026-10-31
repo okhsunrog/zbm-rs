@@ -14,6 +14,16 @@ pub(super) struct UnlockSelection {
     pub(super) dataset: String,
     pub(super) intent: Intent,
     pub(super) challenge: Option<zbm_core::unlock::Challenge>,
+    pub(super) refresh_pools: std::collections::BTreeSet<u64>,
+}
+
+/// Preserve pending startup work while prioritising only the affected pool.
+pub(super) fn refresh_unlocked_pool(
+    queue: &mut std::collections::VecDeque<zbm_core::Pool>,
+    pool: &zbm_core::Pool,
+) {
+    queue.retain(|pending| pending.guid != pool.guid);
+    queue.push_front(pool.clone());
 }
 
 pub(super) fn readonly(options: &Options) -> bool {
@@ -51,9 +61,16 @@ pub(super) fn preferred(state: &State, options: &Options) -> Option<usize> {
 pub(super) fn merge(
     state: &mut State,
     guid: u64,
-    environments: Vec<zbm_core::environment::BootEnvironment>,
+    mut environments: Vec<zbm_core::environment::BootEnvironment>,
     options: &Options,
 ) {
+    for environment in &mut environments {
+        environment.default_target = zbm_core::boot::preferred_specialisation(
+            &environment.targets,
+            environment.default_target,
+            options.config.nixos.preferred_specialisation.as_deref(),
+        );
+    }
     let selected = state
         .environments
         .get(state.selected_environment)
@@ -93,6 +110,7 @@ pub(super) fn intent_action(
             dataset: dataset.clone(),
             intent: Intent::Menu,
             challenge: None,
+            refresh_pools: Default::default(),
         });
         return Some(Action::Unlock {
             pool,
@@ -112,6 +130,7 @@ pub(super) fn intent_action(
             dataset: environment.dataset.clone(),
             intent,
             challenge: None,
+            refresh_pools: Default::default(),
         });
         return Some(Action::Unlock {
             pool,
@@ -177,6 +196,21 @@ pub(super) fn intent_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unlock_refresh_preserves_pending_peers_and_does_not_requeue_completed_pools() {
+        let pool = |guid| zbm_core::Pool {
+            name: format!("pool-{guid}"),
+            guid,
+            health: "ONLINE".into(),
+        };
+        let mut queue = std::collections::VecDeque::from([pool(2), pool(3), pool(2)]);
+        refresh_unlocked_pool(&mut queue, &pool(2));
+        assert_eq!(queue.iter().map(|p| p.guid).collect::<Vec<_>>(), vec![2, 3]);
+        queue.clear();
+        refresh_unlocked_pool(&mut queue, &pool(2));
+        assert_eq!(queue.iter().map(|p| p.guid).collect::<Vec<_>>(), vec![2]);
+    }
 
     #[test]
     fn kernels_leave_pool_and_snapshot_views() {

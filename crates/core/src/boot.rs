@@ -74,6 +74,29 @@ impl BootTarget {
     }
 }
 
+/// Prefer a named variant of the discovered default's generation only. Never
+/// substitute an older generation or invent a default for an ambiguous catalog.
+pub fn preferred_specialisation(
+    targets: &[BootTarget],
+    default: Option<usize>,
+    preferred: Option<&str>,
+) -> Option<usize> {
+    let Some(base) = default.and_then(|index| targets.get(index)) else {
+        return default;
+    };
+    let (Some(generation), Some(name)) = (base.generation(), preferred) else {
+        return default;
+    };
+    targets
+        .iter()
+        .position(|target| {
+            target.dataset == base.dataset
+                && target.generation() == Some(generation)
+                && target.specialisation() == Some(name)
+        })
+        .or(default)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootInputs {
     pub kernel: PathBuf,
@@ -640,6 +663,46 @@ impl planning::SystemdInitrd {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preference_stays_in_the_default_generation_and_dataset() {
+        let target = |generation, specialisation: Option<&str>, dataset: &str| BootTarget {
+            dataset: dataset.into(),
+            label: "fixture".into(),
+            root: "/guest".into(),
+            backend: Backend::Nixos(NixosTarget {
+                generation,
+                specialisation: specialisation.map(str::to_owned),
+                toplevel: "/nix/store/os".into(),
+                init: "/nix/store/os/init".into(),
+                kernel: "/kernel".into(),
+                initrd: None,
+                kernel_params: vec![],
+            }),
+            snapshot: None,
+            mountpoint: None,
+        };
+        let targets = vec![
+            target(8, None, "tank/root"),
+            target(7, Some("niri"), "tank/root"),
+            target(8, Some("niri"), "other/root"),
+            target(8, Some("niri"), "tank/root"),
+        ];
+        assert_eq!(
+            preferred_specialisation(&targets, Some(0), Some("niri")),
+            Some(3)
+        );
+        assert_eq!(
+            preferred_specialisation(&targets[..3], Some(0), Some("niri")),
+            Some(0)
+        );
+        assert_eq!(preferred_specialisation(&targets, None, Some("niri")), None);
+        assert_eq!(preferred_specialisation(&targets, Some(0), None), Some(0));
+        assert_eq!(
+            preferred_specialisation(&targets, Some(0), Some("absent")),
+            Some(0)
+        );
+    }
+
     #[test]
     fn variants_preserve_identity_defaults_and_sibling_failures() {
         use std::os::unix::fs::symlink;

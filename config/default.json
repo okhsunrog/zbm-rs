@@ -10,7 +10,8 @@
     "import_policy": "host-id"
   },
   "nixos": {
-    "generation_limit": 20
+    "generation_limit": 20,
+    "preferred_specialisation": null
   },
   "kernel_args": [],
   "boot": {

@@ -75,7 +75,7 @@ pub enum Action {
 
 pub enum Outcome {
     ResumeCancelled,
-    Unlock(zbm_core::unlock::Status),
+    Unlock(zbm_core::unlock::Resolution),
     Changed {
         environments: Vec<BootEnvironment>,
         selected: String,

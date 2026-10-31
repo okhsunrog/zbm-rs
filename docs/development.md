@@ -79,6 +79,10 @@ nix build .#zbm-rs-boot-fixture-specialisations --out-link result-specialisation
 cargo xtask boot-smoke --specialisation --image result-test \
   --fixture result-specialisations --run target/vm/specialisation-new --port 2232
 nix build .#checks.x86_64-linux.native-nixos
+# Same fixture; verify that K initially selects current generation's Niri variant.
+nix build .#zbm-rs-efi-test-preferred --out-link result-preferred
+cargo xtask boot-smoke --specialisation --image result-preferred \
+  --fixture result-specialisations --run target/vm/preferred-new --port 2233
 ```
 
 The native NixOS check additionally signs and installs parent and child together
@@ -107,7 +111,10 @@ cargo xtask arch-smoke --image result-snapshot --fixture target/arch-fixture-new
   --run target/vm/arch-live-new --mode live
 ```
 
-The ordinary smoke includes demand-driven encrypted keysource unlock and RAM-key
+The ordinary smoke uses separate target, encrypted-keysource and unrelated pools.
+It verifies unlock/discovery progress and refreshes only the two dependency pools,
+then checks full rescan and manager restart. It includes demand-driven encrypted
+keysource unlock and RAM-key
 cleanup. Live Arch acceptance also checks countdown cancellation and then boots
 the system directly from the environment menu. Add `--autoboot` to finish the
 same live fixture through immediate boot instead. These are disposable initramfs

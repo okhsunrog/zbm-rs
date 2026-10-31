@@ -169,7 +169,10 @@ async fn tui(
                     }
                     "resume-cancelled"
                 }
-                Ok(Outcome::Unlock(zbm_core::unlock::Status::Passphrase(challenge))) => {
+                Ok(Outcome::Unlock(zbm_core::unlock::Resolution {
+                    status: zbm_core::unlock::Status::Passphrase(challenge),
+                    pool_guids,
+                })) => {
                     ui.unlock_prompt = Some(format!(
                         "{}{}",
                         challenge.encryption_root,
@@ -181,13 +184,33 @@ async fn tui(
                     ));
                     if let Some(selection) = &mut unlocking {
                         selection.challenge = Some(challenge);
+                        selection.refresh_pools.extend(pool_guids);
                     }
+                    ui.unlock_progress = None;
                     ui.open_panel(Panel::Unlock);
                     "unlock-prompt"
                 }
-                Ok(Outcome::Unlock(zbm_core::unlock::Status::Ready)) => {
+                Ok(Outcome::Unlock(zbm_core::unlock::Resolution {
+                    status: zbm_core::unlock::Status::Ready,
+                    pool_guids,
+                })) => {
                     state.resume = crate::resume::display_status(&options.config).await;
-                    queue = state.pools.clone().into();
+                    // The broker reports dependencies across pools and successive
+                    // prompts. Keep unrelated catalogs and pending startup work.
+                    if let Some(selection) = &mut unlocking {
+                        selection.refresh_pools.extend(pool_guids);
+                        selection.refresh_pools.insert(selection.pool.guid);
+                        for pool in state
+                            .pools
+                            .iter()
+                            .filter(|p| selection.refresh_pools.contains(&p.guid))
+                        {
+                            navigation::refresh_unlocked_pool(&mut queue, pool);
+                        }
+                    }
+                    if let Some(progress) = &mut ui.unlock_progress {
+                        progress.discovering = true;
+                    }
                     catalog_active = true;
                     resume_unlock = true;
                     "unlocked"
@@ -274,6 +297,7 @@ async fn tui(
                     if let Some(guid) = inspecting.take() {
                         state.pool_errors.insert(guid, state.error.clone().unwrap());
                     }
+                    ui.unlock_progress = None;
                     if completed.error_event == "unlock-error" {
                         if unlocking
                             .as_ref()
@@ -293,6 +317,7 @@ async fn tui(
             refresh(terminal, &mut state, options, &mut ui)?;
             emit(options, event, &state, &ui)?;
         } else if workflow.expire() {
+            ui.unlock_progress = None;
             // Cancellation can interrupt an import/clone/export after an effect.
             // Keep the intent journal and require a fresh manager to reconcile.
             state.activity = workflow.view();
@@ -319,6 +344,7 @@ async fn tui(
                 let mut action = None;
                 if resume_unlock {
                     resume_unlock = false;
+                    ui.unlock_progress = None;
                     if let Some(selection) = unlocking.take() {
                         if matches!(selection.intent, Intent::Menu) {
                             if let Some(index) = preferred(&state, options) {
@@ -368,6 +394,7 @@ async fn tui(
                             dataset: dataset.clone(),
                             intent: Intent::Menu,
                             challenge: None,
+                            refresh_pools: Default::default(),
                         });
                         action = Some(Action::Unlock {
                             pool,
@@ -670,6 +697,13 @@ async fn tui(
                     }
                 }
                 if let Some(action) = action {
+                    if let Action::Unlock { pool, dataset, .. } = &action {
+                        ui.unlock_progress = Some(ui::UnlockProgress {
+                            pool_guid: pool.guid,
+                            dataset: dataset.clone(),
+                            discovering: false,
+                        });
+                    }
                     if let Action::Environments { pool, .. } = &action {
                         inspecting = Some(pool.guid);
                         state.pool_view = false;

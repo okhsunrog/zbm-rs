@@ -107,8 +107,16 @@ pub enum Panel {
     Unlock,
 }
 
+/// Presentation state only; does not authorize boot or alter cached ZFS facts.
+pub struct UnlockProgress {
+    pub pool_guid: u64,
+    pub dataset: String,
+    pub discovering: bool,
+}
+
 #[derive(Default)]
 pub struct Ui {
+    pub unlock_progress: Option<UnlockProgress>,
     pub resume_confirmation: Option<(String, Command)>,
     pub unlock_prompt: Option<String>,
     screens: BTreeMap<String, Screen>,
@@ -133,6 +141,21 @@ pub enum Input {
     Changed(&'static str),
     Command(Command, bool),
     Ignored,
+}
+
+impl Ui {
+    fn unlock_status(&self, pool_guid: u64, dataset: &str) -> Option<&'static str> {
+        self.unlock_progress
+            .as_ref()
+            .filter(|p| p.pool_guid == pool_guid && p.dataset == dataset)
+            .map(|p| {
+                if p.discovering {
+                    "Keys unlocked; finding boot targets…"
+                } else {
+                    "Unlocking encryption keys…"
+                }
+            })
+    }
 }
 
 fn target_id(t: &BootTarget) -> RowId {
@@ -206,7 +229,7 @@ impl Ui {
         self.resume_search = false;
         self.prepared = None;
     }
-    fn rows(state: &State) -> Vec<Row> {
+    fn rows(&self, state: &State) -> Vec<Row> {
         match View::of(state) {
             View::Pools => state
                 .pools
@@ -232,9 +255,10 @@ impl Ui {
                     id: RowId::Environment(format!("{}:{}", e.pool_guid, e.dataset)),
                     kind: Kind::Environment(i),
                     title: format!("{}{}", if e.is_default { "* " } else { "" }, e.dataset),
-                    subtitle: e
-                        .unavailable
-                        .clone()
+                    subtitle: self
+                        .unlock_status(e.pool_guid, &e.dataset)
+                        .map(str::to_owned)
+                        .or_else(|| e.unavailable.clone())
                         .or_else(|| e.default_error.clone())
                         .unwrap_or_else(|| {
                             e.targets
@@ -253,7 +277,17 @@ impl Ui {
                                     "No default boot target; K chooses an alternative".into()
                                 })
                         }),
-                    tag: if e.is_default && e.unavailable.is_some() {
+                    tag: if let Some(progress) = self
+                        .unlock_progress
+                        .as_ref()
+                        .filter(|p| p.pool_guid == e.pool_guid && p.dataset == e.dataset)
+                    {
+                        if progress.discovering {
+                            "DISCOVERING"
+                        } else {
+                            "UNLOCKING"
+                        }
+                    } else if e.is_default && e.unavailable.is_some() {
                         if e.properties.locked() {
                             "BOOTFS / LOCKED"
                         } else {
@@ -350,7 +384,7 @@ impl Ui {
 
     fn visible(&self, state: &State) -> Vec<Row> {
         let query = &self.screens[&self.key].query;
-        Self::rows(state)
+        self.rows(state)
             .into_iter()
             .filter(|row| fuzzy(&format!("{} {}", row.title, row.subtitle), query))
             .collect()
@@ -535,7 +569,7 @@ impl Ui {
         }
     }
     pub fn telemetry(&self, state: &State) -> serde_json::Value {
-        serde_json::json!({"view":View::of(state),"filter":self.screens.get(&self.key).map(|s|s.query.as_str()).unwrap_or(""),"searching":self.searching,"panel":self.panel,"selected_row":self.selected(state).map(|r|r.id),"selected_action":if self.panel == Panel::Actions { self.menu.selected().and_then(|i| self.menu_commands.get(i)) } else { None }})
+        serde_json::json!({"unlock_progress":self.unlock_progress.as_ref().map(|p| if p.discovering { "discovering" } else { "unlocking" }),"view":View::of(state),"filter":self.screens.get(&self.key).map(|s|s.query.as_str()).unwrap_or(""),"searching":self.searching,"panel":self.panel,"selected_row":self.selected(state).map(|r|r.id),"selected_action":if self.panel == Panel::Actions { self.menu.selected().and_then(|i| self.menu_commands.get(i)) } else { None }})
     }
     pub fn reason(&self, command: Command, state: &State, options: &Options) -> Option<String> {
         if options.config.security.mode == crate::config::SecurityMode::Enforce
@@ -1272,6 +1306,106 @@ mod tests {
         assert_eq!(state.resume.session_id(), Some("session-one"));
     }
     #[test]
+    fn unlock_progress_replaces_stale_locked_labels_without_changing_key_state() {
+        let mut state = resume_state();
+        state.targets.clear();
+        state.environments = vec![serde_json::from_value(serde_json::json!({
+            "pool_guid":42,"dataset":"tank/root","is_default":true,
+            "targets":[],"default_target":null,"default_error":null,
+            "rejected_generations":[],"unavailable":"Locked; unlock to discover boot targets","root":null,
+            "properties":{"mountpoint":"/","canmount":"noauto","encryption":"aes-256-gcm",
+                "encryptionroot":"tank/root","keystatus":"unavailable","keyformat":"passphrase","active":"on",
+                "commandline":null,"kernel":null,"rootprefix":null}
+        })).unwrap()];
+        let mut ui = Ui {
+            unlock_progress: Some(UnlockProgress {
+                pool_guid: 42,
+                dataset: "tank/root".into(),
+                discovering: false,
+            }),
+            ..Ui::default()
+        };
+        ui.sync(&mut state);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        for discovering in [false, true] {
+            ui.unlock_progress.as_mut().unwrap().discovering = discovering;
+            terminal.draw(|f| ui.draw(f, &state, &options())).unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>();
+            assert!(!text.contains("Locked; unlock"));
+            assert!(!text.contains("LOCKED"));
+            assert!(text.contains(if discovering {
+                "Keys unlocked; finding boot targets"
+            } else {
+                "Unlocking encryption keys"
+            }));
+            assert!(state.environments[0].properties.locked());
+            assert!(ui.boot_target(&state).is_none());
+        }
+    }
+
+    #[test]
+    fn preferred_variant_never_overrides_the_saved_session() {
+        let mut state = resume_state();
+        let saved = state.targets[0].clone();
+        let mut variant = saved.clone();
+        if let zbm_core::boot::Backend::Nixos(n) = &mut variant.backend {
+            n.specialisation = Some("niri".into());
+            n.toplevel = "/nix/store/niri".into();
+        }
+        let environment = serde_json::from_value(serde_json::json!({
+            "pool_guid":42,"dataset":"tank/root","is_default":true,
+            "targets":[saved,variant],"default_target":0,"default_error":null,
+            "rejected_generations":[],"unavailable":null,"root":"/guest",
+            "properties":{"mountpoint":"/","canmount":"noauto","encryption":"off",
+                "encryptionroot":null,"keystatus":"-","keyformat":"none","active":"on",
+                "commandline":null,"kernel":null,"rootprefix":null}
+        }))
+        .unwrap();
+        let mut config = options();
+        config.config.nixos.preferred_specialisation = Some("niri".into());
+        super::super::navigation::merge(&mut state, 42, vec![environment], &config);
+        assert_eq!(state.environments[0].default_target, Some(1));
+        state.targets.clear();
+        let mut ui = Ui::default();
+        ui.sync(&mut state);
+        assert_eq!(ui.boot_target(&state).unwrap().specialisation(), None);
+        let action = super::super::navigation::intent_action(
+            super::super::navigation::Intent::Boot,
+            &mut state,
+            &mut ui,
+            &config,
+            &mut None,
+        )
+        .unwrap();
+        let super::super::Action::Boot { target, .. } = action else {
+            panic!("expected boot")
+        };
+        assert_eq!(target.specialisation(), None);
+        super::super::navigation::intent_action(
+            super::super::navigation::Intent::Kernels,
+            &mut state,
+            &mut ui,
+            &config,
+            &mut None,
+        );
+        assert_eq!(state.selected_target, 0);
+        state.resume = zbm_core::resume::Status::Inactive;
+        state.targets.clear();
+        ui.sync(&mut state);
+        assert_eq!(
+            ui.boot_target(&state).unwrap().specialisation(),
+            Some("niri")
+        );
+    }
+
+    #[test]
     fn cold_boot_pins_the_saved_generation_before_the_environment_default_changes() {
         let mut state = resume_state();
         let saved = state.targets[0].clone();
@@ -1475,7 +1609,7 @@ mod tests {
             targets: vec![base, child],
             ..State::default()
         };
-        let rows = Ui::rows(&state);
+        let rows = Ui::default().rows(&state);
         assert_eq!(rows.len(), 2);
         assert_ne!(rows[0].id, rows[1].id);
     }

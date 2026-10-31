@@ -177,10 +177,31 @@ pub fn run(
         if scsi {
             ensure!(disk.starts_with("/dev/sd"), "Expected a SCSI disk: {disk}");
         }
-        let provision = r#"zpool create -f -o cachefile=none -m none zbm_fixture DISPOSABLE_DISK && zfs create -o mountpoint=none zbm_fixture/ROOT && zfs snapshot zbm_fixture/ROOT@fresh && zfs clone -o mountpoint=none zbm_fixture/ROOT@fresh zbm_fixture/clone && zfs rename zbm_fixture/clone zbm_fixture/renamed && zfs promote zbm_fixture/renamed && printf '%s\n' disposable-zbm-test-passphrase > /run/zbm-test-key && zfs create -o encryption=aes-256-gcm -o keyformat=passphrase -o keylocation=file:///run/zbm-test-key -o mountpoint=none zbm_fixture/crypt && zfs unload-key zbm_fixture/crypt && zfs load-key zbm_fixture/crypt && test "$(zfs get -H -o value keystatus zbm_fixture/crypt)" = available && zfs set canmount=noauto mountpoint=/ zbm_fixture/ROOT; zfs set org.zfsbootmenu:active=on zbm_fixture; zfs create -o canmount=noauto -o mountpoint=legacy zbm_fixture/default; zfs create -o canmount=noauto -o mountpoint=/ -o org.zfsbootmenu:active=off zbm_fixture/hidden; zfs create -o canmount=noauto -o mountpoint=/home zbm_fixture/data; zfs set canmount=noauto mountpoint=/ zbm_fixture/crypt; zpool set bootfs=zbm_fixture/default zbm_fixture; printf '%s' source-passphrase > /run/zbm-source-key; zfs create -o encryption=aes-256-gcm -o keyformat=passphrase -o keylocation=file:///run/zbm-source-key -o mountpoint=/keystore zbm_fixture/keystore; mkdir -p /keystore/keys; cp /run/zbm-test-key /keystore/keys/crypt.key; zfs unmount zbm_fixture/keystore; zfs set keylocation=prompt zbm_fixture/keystore; zfs set keylocation=file:///keys/crypt.key org.zfsbootmenu:keysource=zbm_fixture/keystore zbm_fixture/crypt; zpool export zbm_fixture"#;
+        // Independently discoverable disposable block devices for cross-pool
+        // key dependencies and a peer that must not be rescanned on unlock.
+        for name in ["keysource", "unrelated"] {
+            let disk = vm::absolute(run)?.join(format!("{name}-pool.img"));
+            fs::File::create(&disk)?.set_len(128 * 1024 * 1024)?;
+            let mut qmp = vm::qmp(run)?;
+            qmp.request(
+                "blockdev-add",
+                serde_json::json!({"driver":"raw","node-name":name,
+                "file":{"driver":"file","filename":disk}}),
+            )?;
+            qmp.request(
+                "device_add",
+                serde_json::json!({"driver":"virtio-blk-pci",
+                "bus":format!("zbm-{name}-slot"),"drive":name,"id":name,
+                "serial":format!("zbm-{name}")}),
+            )?;
+            wait_for(10, None, || {
+                vm::ssh(run, &format!("test -b /dev/disk/by-id/virtio-zbm-{name}"))
+            })?;
+        }
+        let provision = r#"zpool create -f -o cachefile=none -m none zbm_fixture DISPOSABLE_DISK && zfs create -o mountpoint=none zbm_fixture/ROOT && zfs snapshot zbm_fixture/ROOT@fresh && zfs clone -o mountpoint=none zbm_fixture/ROOT@fresh zbm_fixture/clone && zfs rename zbm_fixture/clone zbm_fixture/renamed && zfs promote zbm_fixture/renamed && printf '%s\n' disposable-zbm-test-passphrase > /run/zbm-test-key && zfs create -o encryption=aes-256-gcm -o keyformat=passphrase -o keylocation=file:///run/zbm-test-key -o mountpoint=none zbm_fixture/crypt && zfs unload-key zbm_fixture/crypt && zfs load-key zbm_fixture/crypt && test "$(zfs get -H -o value keystatus zbm_fixture/crypt)" = available && zfs set canmount=noauto mountpoint=/ zbm_fixture/ROOT; zfs set org.zfsbootmenu:active=on zbm_fixture; zfs create -o canmount=noauto -o mountpoint=legacy zbm_fixture/default; zfs create -o canmount=noauto -o mountpoint=/ -o org.zfsbootmenu:active=off zbm_fixture/hidden; zfs create -o canmount=noauto -o mountpoint=/home zbm_fixture/data; zfs set canmount=noauto mountpoint=/ zbm_fixture/crypt; zpool set bootfs=zbm_fixture/default zbm_fixture; printf '%s' source-passphrase > /run/zbm-source-key; zfs create -o encryption=aes-256-gcm -o keyformat=passphrase -o keylocation=file:///run/zbm-source-key -o mountpoint=/keystore zbm_fixture/keystore; mkdir -p /keystore/keys; cp /run/zbm-test-key /keystore/keys/crypt.key; zfs unmount zbm_fixture/keystore; zfs set keylocation=prompt zbm_fixture/keystore; zfs set keylocation=file:///keys/crypt.key org.zfsbootmenu:keysource=zbm_fixture/keystore zbm_fixture/crypt; zpool create -o cachefile=none -m none zbm_keysource /dev/disk/by-id/virtio-zbm-keysource; zfs create -o encryption=aes-256-gcm -o keyformat=passphrase -o keylocation=file:///run/zbm-source-key -o mountpoint=/peer-keystore zbm_keysource/keystore; mkdir -p /peer-keystore/keys; cp /run/zbm-test-key /peer-keystore/keys/crypt.key; zfs unmount zbm_keysource/keystore; zfs set keylocation=prompt zbm_keysource/keystore; zfs set org.zfsbootmenu:keysource=zbm_keysource/keystore zbm_fixture/crypt; zpool create -o cachefile=none -m none zbm_unrelated /dev/disk/by-id/virtio-zbm-unrelated; zpool export zbm_keysource; zpool export zbm_unrelated; zpool export zbm_fixture"#;
         vm::ssh(run, &provision.replace("DISPOSABLE_DISK", disk))?;
         vm::key(run, "r")?;
-        let pool = wait_for(20, Some(&mut owned.0), || ready(run, 2, 1))?;
+        let pool = wait_for(20, Some(&mut owned.0), || ready(run, 2, 3))?;
         ensure!(
             pool["state"]["pools"][0]["name"] == "zbm_fixture",
             "Wrong pool: {pool}"
@@ -263,9 +284,19 @@ pub fn run(
         for key in ["e", "x", "i", "t", "ret"] {
             vm::key(run, key)?;
         }
-        wait_for(10, Some(&mut owned.0), || new_manager(run, old_pid, 1))?;
+        wait_for(10, Some(&mut owned.0), || new_manager(run, old_pid, 3))?;
+        // A multi-pool startup may still be cataloguing after the first ready
+        // event. Rescan input is intentionally blocked during that operation.
+        wait_for(20, Some(&mut owned.0), || {
+            let state = vm::screen(run)?;
+            ensure!(
+                state["event"] == "catalog-ready" && state["state"]["operation"].is_null(),
+                "Waiting for completed startup catalog before rescan"
+            );
+            Ok(())
+        })?;
         vm::key(run, "r")?;
-        wait_for(20, Some(&mut owned.0), || ready(run, 2, 1))?;
+        wait_for(20, Some(&mut owned.0), || ready(run, 2, 3))?;
         vm::screenshot(run, &run.join("shell-return.png"))?;
         fs::write(run.join("shell-return.txt"), vm::console(run)?)?;
         if failures {
@@ -390,12 +421,15 @@ fn keysource(run: &Path) -> Result<()> {
             "Expected keysource passphrase prompt"
         );
         ensure!(
-            vm::console(run)?.contains("zbm_fixture/keystore"),
+            vm::console(run)?.contains("zbm_keysource/keystore"),
             "Prompt must identify the source encryption root"
         );
         Ok(())
     })?;
     vm::screenshot(run, &run.join("keysource-prompt.png"))?;
+    let events_before = vm::ssh(run, "wc -l < /run/zbm-rs/events.jsonl")?
+        .trim()
+        .parse::<usize>()?;
     for key in [
         "s", "o", "u", "r", "c", "e", "minus", "p", "a", "s", "s", "p", "h", "r", "a", "s", "e",
         "ret",
@@ -409,10 +443,39 @@ fn keysource(run: &Path) -> Result<()> {
         );
         vm::ssh(
             run,
-            "test \"$(zfs get -H -o value keystatus zbm_fixture/crypt)\" = available; test \"$(zfs get -H -o value keystatus zbm_fixture/keystore)\" = available; test -z \"$(ls -A /run/zbm-rs/keys)\"",
+            "test \"$(zfs get -H -o value keystatus zbm_fixture/crypt)\" = available; test \"$(zfs get -H -o value keystatus zbm_keysource/keystore)\" = available; test -z \"$(ls -A /run/zbm-rs/keys)\"",
         )?;
         Ok(())
     })?;
+    let events = vm::ssh(run, "cat /run/zbm-rs/events.jsonl")?;
+    let progress = events
+        .lines()
+        .skip(events_before)
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect::<Vec<_>>();
+    ensure!(
+        progress.iter().any(|v| v["event"] == "operation-started" && v["ui"]["unlock_progress"] == "unlocking"),
+        "Missing unlock progress event"
+    );
+    ensure!(
+        progress
+            .iter()
+            .any(|v| v["ui"]["unlock_progress"] == "discovering"),
+        "Missing post-unlock discovery progress"
+    );
+    ensure!(
+        progress
+            .iter()
+            .filter(|v| v["event"] == "boot-environments")
+            .count()
+            == 2,
+        "Unlock must refresh target and keysource pools, without rescanning the unrelated pool"
+    );
+    fs::write(
+        run.join("keysource-unlock-events.json"),
+        serde_json::to_vec_pretty(&progress)?,
+    )?;
+    vm::screenshot(run, &run.join("keysource-unlocked.png"))?;
     ensure!(
         !fs::read_to_string(run.join("serial.log"))?.contains("source-passphrase"),
         "Passphrase leaked into telemetry"

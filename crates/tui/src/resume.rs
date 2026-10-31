@@ -126,7 +126,7 @@ pub async fn unlock(
     pool: &zbm_core::Pool,
     dataset: &str,
     answer: Option<zbm_core::unlock::Answer>,
-) -> Result<zbm_core::unlock::Status> {
+) -> Result<zbm_core::unlock::Resolution> {
     let config = crate::config::load(true)?;
     if let Some(source) = &config.resume.credential
         && source.matches(pool.guid, dataset)

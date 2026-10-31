@@ -232,6 +232,10 @@ pub fn boot(run: &Path, options: BootOptions<'_>) -> Result<()> {
         cmd.args([
             "-device",
             "pcie-root-port,id=zbm-fixture-slot,slot=10,chassis=10",
+            "-device",
+            "pcie-root-port,id=zbm-keysource-slot,slot=11,chassis=11",
+            "-device",
+            "pcie-root-port,id=zbm-unrelated-slot,slot=12,chassis=12",
         ]);
         cmd.args([
             "-nic",

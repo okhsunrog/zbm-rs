@@ -11,7 +11,7 @@ let
       diagnostics.esp_partuuid = cfg.settings.diagnostics.espPartuuid;
       diagnostics.continuous = cfg.settings.diagnostics.continuous;
       zfs.import_policy = cfg.settings.zfs.importPolicy;
-      nixos.generation_limit = cfg.settings.nixos.generationLimit;
+      nixos = { generation_limit = cfg.settings.nixos.generationLimit; preferred_specialisation = cfg.settings.nixos.preferredSpecialisation; };
       resume = cfg.settings.resume.policy // lib.optionalAttrs (cfg.settings.resume.swapPartuuid != null) {
         swap_partuuid = cfg.settings.resume.swapPartuuid;
       };
@@ -68,6 +68,7 @@ in {
     settings.diagnostics.espPartuuid = lib.mkOption { type = lib.types.nullOr lib.types.str; default = null; description = "Explicit GPT ESP partition UUID for bounded failure reports; null disables disk writes."; };
     settings.diagnostics.continuous = lib.mkOption { type = lib.types.bool; default = false; description = "Continuously sync bounded kernel, lifecycle and health logs to the explicit ESP; preserves eight boots. Never records passphrase keystrokes."; };
     settings.zfs.importPolicy = lib.mkOption { type = lib.types.enum [ "host-id" "read-only" ]; default = "host-id"; description = "Policy for automatic startup imports; discovery itself remains non-mutating and imports are never forced."; };
+    settings.nixos.preferredSpecialisation = lib.mkOption { type = lib.types.nullOr lib.types.str; default = null; description = "Preferred named specialisation of the current default NixOS generation. Missing variants fall back to that generation; saved-session resume always takes priority."; };
     settings.nixos.generationLimit = lib.mkOption { type = lib.types.ints.between 1 512; default = 20; description = "Maximum NixOS generations per root dataset."; };
     settings.kernelArgs = lib.mkOption { type = lib.types.listOf lib.types.str; default = []; description = "Additional target kernel arguments; overriding Bootspec init or whitespace/quoting is unsupported."; };
     enable = lib.mkEnableOption "build a standalone zbm-rs EFI boot manager";

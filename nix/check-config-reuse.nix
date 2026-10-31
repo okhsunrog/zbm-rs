@@ -5,6 +5,7 @@ let
     ui = { title = "Alternate menu"; show_snapshots = false; };
     boot = { mode = "countdown"; timeout_secs = 17; };
     nixos.generation_limit = 7;
+    nixos.preferred_specialisation = "niri";
     zfs.import_policy = "read-only";
     security.tpm.policy = "optional";
   }; };
