@@ -5,6 +5,17 @@ statements and superseded loader-owned NvPCR experiments describe their original
 runs. Use [current verification](../verification.md) and [TPM ownership](../tpm.md)
 for supported behavior.
 
+## Signed loader manifest hashes — 2026-10-31
+
+Owner installation readback exposed a stale `efi_sha256`: the publisher updated
+kernel/initramfs hashes after signing but retained the unsigned EFI hash. The
+publisher now hashes the final signed EFI too. A real publication using the
+existing disposable VM image and runtime keys passed all three digest comparisons
+and PE verification; its signed EFI hash differs from the unsigned input. The
+protected runtime fixture now checks these digests before starting its boot flow.
+All 12 Python security-boundary tests passed. This metadata fix changes neither
+kernel code nor the previously tested hibernation protocol.
+
 ## TPM-authenticated hibernation backend v2 — 2026-10-31
 
 Linux 7.2.9 with patches 0001–0028 and ZFS 2.4.4 passed the full build and

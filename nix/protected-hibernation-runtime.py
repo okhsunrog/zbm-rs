@@ -260,6 +260,11 @@ def run(machine, *, source, tools):
                  "--ima-key", signing["ima_key"], "--ima-cert", signing["ima_certificate"],
                  "--sign-file", bundle["sign_file"], "--evmctl", bundle["evmctl"],
                  "--ukify", bundle["ukify"], "--allow-fixture"], stderr=log)
+    published = json.loads((deploy / "manifest.json").read_text())
+    for name, relative in (("efi", "esp/EFI/BOOT/BOOTX64.EFI"),
+                           ("kernel", "vmlinuz"), ("initramfs", "initramfs.img")):
+        if hashlib.sha256((deploy / relative).read_bytes()).hexdigest() != published[f"{name}_sha256"]:
+            raise ValueError(f"Published {name} hash differs from the signed deployment")
     archive = prepare_root(source, bundle, staging, signing)
     ssh_key = work / "ssh.key"
     shutil.copyfile(deploy / "id_ed25519", ssh_key)

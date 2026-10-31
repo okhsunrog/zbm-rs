@@ -233,8 +233,8 @@ def main():
         manifest["deployment"] = {"efi_signed": True, "ima_policy_signed": True,
                                   "modules_verified": signed, "disposable_fixture": args.allow_fixture}
         import hashlib
-        for name in ("kernel", "initramfs"):
-            file = output / ("vmlinuz" if name == "kernel" else "initramfs.img")
+        for name, file in (("efi", efi), ("kernel", output / "vmlinuz"),
+                           ("initramfs", output / "initramfs.img")):
             manifest[f"{name}_sha256"] = hashlib.sha256(file.read_bytes()).hexdigest()
         manifest["sizes"] = {"efi": efi.stat().st_size, "kernel": (output / "vmlinuz").stat().st_size,
                              "initramfs": (output / "initramfs.img").stat().st_size}
