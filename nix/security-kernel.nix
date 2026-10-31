@@ -48,8 +48,9 @@ let
   protectedKernel = kernel.overrideAttrs (old: {
     passthru = (old.passthru or {}) // lib.optionalAttrs hibernationTpmSignature {
       zbmProtectedHibernation = {
-        backend = "linux-tpm-signature-v1";
+        backend = "linux-tpm-signature-v2";
         recordProtocol = 2;
+        contextHandoffProtocol = 1;
         kernel = "${kernel}/bzImage";
         kernelConfig = kernel.configfile;
       };

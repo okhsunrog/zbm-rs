@@ -2,8 +2,11 @@
 
 This implementation is experimental and disabled by default. It changes neither
 installed images nor host sleep settings. It does not implement ZFS hibernation
-cookies, authenticate a saved RAM image, or prove that a pool was unchanged while
-the machine was off. It must not be advertised as making ZFS hibernation safe.
+cookies or prove that a pool was unchanged while the machine was off. The
+experimental kernel backend authenticates RAM separately. Authenticated RAM
+restoration, subsequent hibernation and the complete protected chain passed in
+disposable VMs; physical acceptance remains pending.
+It must not be advertised as making ZFS hibernation safe.
 
 ## Existing flow
 
@@ -125,15 +128,31 @@ pool consistency seal. `--resume-status-config` inspects this state without
 modifying the device. Unit tests cover consumed images, stale consent, a wrong
 boot ID and torn records. The ordinary Linux 6.18.55 encrypted-root VM restored
 RAM, retained its boot ID, completed the finish hook, and matched direct and
-buffered header reads. TPM-authenticated failure cases remain pending.
+buffered header reads. The TPM-authenticated CRB/SHA-256 and TIS/dual-bank VMs
+restored RAM and successfully created the next signed image. Signature-trailer
+and actual RAM-payload tampering, plus a cleared guest TPM, were rejected before
+pool import; consumed images remained protected on the next boot. The separate
+complete Secure Boot/PE/IMA/CMS loader-to-target run also restored RAM, retained
+the early kexec prohibition and created the next image. These are VM results,
+not physical Framework acceptance.
 
 If the kernel cannot hibernate, a verified empty swap may still cold-boot after
 the same filesystem/pool preflight. This supports repair through rescue without
 TPM provenance. No image or incomplete attempt can use that branch, and it does
 not initialize a hibernation device. The encrypted-root VM passed this path with
 `nohibernate`, including rejection of an early read-only pool import, healthy
-ZFS and ordinary paging after cold boot. The separate TPM-unavailable variant
-is prepared; its runtime result is pending.
+ZFS and ordinary paging after cold boot.
+The TPM-unavailable repair variant supplies `systemd.tpm2_wait=0`: its deliberate
+driver unbind leaves firmware advertising a device that systemd would otherwise
+wait for after switch-root. This changes systemd's synchronization only; the
+native resume gate still rejects missing TPM when an image exists.
+
+The authenticated CRB/SHA-256 test restored the same session three times,
+preserving its original boot ID and RAM-only file. Between restorations it
+unbound the guest TPM: resume stopped before pool import without consuming the
+image. Restoring the exact original initramfs and TPM allowed retry, another
+hibernation and a third restoration. The finish hook returned the boot record
+to inactive and the target kexec prohibition remained set.
 
 ## Encrypted swap and credential ownership
 
@@ -229,17 +248,19 @@ resume device for the next systemd hibernation. Recording verifies the currently
 mounted root dataset and actual running arguments against the published plan.
 
 The operator must explicitly opt into NixOS's unsafeAllowHibernation policy.
-The loader still rejects enforced resume while authenticated RAM restoration
-and the complete protected handoff are awaiting acceptance. ESP diagnostics must be
+Enforced resume requires the authenticated backend and signed capability
+described below. Its disposable VM acceptance has passed; physical deployment
+remains a separate gate. ESP diagnostics must be
 disabled until their writes can be coordinated with saved filesystem state.
 These restrictions are not waived by the UI.
 
-## Agreed protected-boot architecture (partial implementation, not accepted)
+## Agreed protected-boot architecture
 
-The existing guard above is implemented in ordinary mode. The experimental
-Linux 7.2.9 TPM-signature patch set is a build checkpoint, not a validated
-protected-resume implementation. Enforced resume stays rejected until the
-following trust chain and negative tests are complete.
+The existing guard above is implemented in ordinary and enforced modes. The
+experimental Linux 7.2.9 TPM-signature patch set passed authenticated RAM restore,
+subsequent hibernation and the complete protected-loader chain in disposable VMs.
+The following trust chain and negative tests define that supported path. Host
+enablement still requires a matching owner-signed build and physical acceptance.
 
 ### Kernel roles and authenticated memory
 
@@ -290,6 +311,27 @@ signatures authenticate the saved RAM image. This is not support for
 confidentiality Lockdown. Never replace image authentication with a Lockdown
 exception or interpret a successful LUKS unlock as authenticated memory.
 
+The first successful restore exposed a repeat-cycle defect: restored RAM held
+the previous TPM boot's cached NULL-primary context. The experimental backend
+`linux-tpm-signature-v2` adds a one-shot context handoff through reserved EFI ACPI
+memory excluded from the RAM image. The signed `LNXHPV02` image header binds
+the original NULL name and the physical handoff address. Full image verification
+and an exact address match must precede handoff preparation; matching E820 ranges
+alone does not bind an allocation's offset within an EFI pool.
+
+Copying a fresh context alone would introduce an unauthenticated trust step.
+The verifier therefore challenges the same AK that authenticated the saved
+image's signing-key provenance with a fresh random nonce. Its signed session
+audit must match the locally computed transcript for the fixed-template NULL
+CreatePrimary operation. Only then is the current NULL context exported. After
+RAM restoration, TPM resume imports it only when the old cached NULL identity
+matches the signed original name, consumes it once, and wipes the handoff.
+New kexec initialization and abandoned restoration clear it too. In-session
+reset detection stays enabled; stale hardware handles are not flushed against
+the new TPM context. Runtime checks passed on disposable CRB and TIS TPMs. This
+is a local experimental extension, not an upstream-approved change or a solution
+to all physical TPM bus attacks and cold-boot trust assumptions.
+
 Verify EFI/PCR5 evidence and TPM NV protection across the actual supported
 patched-loader-to-patched-target handoff before enabling this backend. Do not
 assume PCR5 is reset by kexec or waive image-tampering and invalid/unavailable-TPM
@@ -300,7 +342,9 @@ end-to-end enforced chain against arbitrary privileged kexec transitions.
 ### Owner authorization and compatibility
 
 BootAuthorization version 2 adds a `protected_hibernation` profile. Its version
-is 1, backend is `linux-tpm-signature-v1`, and `record_protocol` is 2. The signed
+is 1, backend is `linux-tpm-signature-v2`, and `record_protocol` is 2. The immutable
+build contract additionally requires context-handoff protocol 1; legacy kernel
+metadata cannot advertise this backend. The signed
 `resume_policy_sha256` binds the dedicated partition/LUKS UUIDs, mapping name and
 credential source (pool GUID and encryption root). UUID case, decimal GUID
 spelling and legacy plain-partition syntax normalize; mapping/dataset names
@@ -323,9 +367,9 @@ owner's Nix build/install hook; it is not remote build attestation.
 The broker checks this profile before clone creation and again before every
 verified handoff when resume is configured, including cold boots. Missing,
 unsupported or mismatched profiles fail, as does a missing/conflicting early
-target kexec prohibition. The publisher and broker checks are implemented;
-enforced configuration remains blocked until the native TPM and complete
-protected-chain VM tests pass. After successful migration,
+target kexec prohibition. The publisher and broker checks passed native TPM
+and complete protected-chain VM testing, including cold-boot refusal for missing
+capabilities or a different resume policy. After successful migration,
 old generations are removed rather than retained as a required recovery path;
 independent rescue remains available to repair the system. The exact schema and
 artifact validator follow the supported-path provenance tests rather than
@@ -357,8 +401,10 @@ restore is refused, Enter requires cancellation confirmation, Esc preserves the
 image, and standalone discard stays in the menu. The ordinary flow and F10's
 whole-disk preservation check also passed. Integration into the independent
 candidate/known-good deployment is implemented and passed the disposable FAT
-publication test; host pin integration and exact-artifact boot acceptance remain
-pending. An older pinned
+publication test. The host configuration source pins this guarded baseline;
+its exact production rescue artifact also passed firmware boot, menu, F2 and
+poweroff checks in a disposable VM. Host installation and physical acceptance
+remain pending. An older pinned
 image without the guard must not be presented as satisfying this contract.
 
 See [independent rescue publication](nixos-deployment.md#optional-efi-publication-and-independent-rescue)
@@ -404,11 +450,13 @@ The optional `lib.mkTpmHibernationProbe` and `lib.mkTpmHibernationTest` factorie
 accept the same experimental `kernelPackages` plus public signed kernel/module
 artifacts. The first checks EFI/PCR5 and the reserved NV index across
 `kexec_file_load`; the second extends the encrypted-root fixture with actual
-authenticated RAM restoration and corruption of one ECDSA trailer byte. The
+authenticated RAM restoration and signature-trailer or actual RAM-payload
+corruption, TPM reset and unavailable-TPM retry. The
 negative case requires signature rejection and failure of the resume gate before
 the pool-import predecessor can run. This fixture uses uncompressed images to
 isolate signature validation from decompression/CRC failures. Neither factory
 enables firmware Secure Boot or the loader's enforced BootAuthorization/IMA
 handoff, so those remain separate tests. Signing keys never enter the guest or
-Nix derivations. Adding these fixtures is not a successful runtime result; see
-the patch-set README for the current validation status.
+Nix derivations. The complete chain has its own runtime-only
+`lib.mkProtectedHibernationDriver`; see [the reproduction workflow](security-testing.md#authenticated-hibernation-chain)
+and the patch-set README for recorded results and remaining physical acceptance.

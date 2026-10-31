@@ -43,6 +43,58 @@ explicitly pass `--allow-fixture`; `--fixture-directory` additionally inserts
 synthetic target inputs. Such an image is never a production recovery image.
 Private fixture signing keys remain outside the guest and Git.
 
+## Authenticated hibernation chain
+
+The experimental Linux 7.2.9 backport has its own
+[architecture and acceptance boundary](hibernation-design.md). Kernel-mechanics
+tests use `lib.mkTpmHibernationProbe` and `lib.mkTpmHibernationTest` with matching
+public signed kernel/module artifacts. Their default restore test retains the
+first successful RAM restore before creating the negative image. The optional
+`restoreBeforeNegative = false` is only for isolated diagnosis; its result is
+named `negative-only` and does not establish repeated hibernation.
+
+`lib.mkProtectedHibernationDriver {}` builds the complete-chain driver without
+running it inside a derivation. Run it as the regular repository owner, using
+a fresh work directory and disposable signing keys outside Nix. Supply an EFI/
+module CA and its digitalSignature IMA leaf as described above. The public signed
+kernel and module tree must match the current source's protected-kernel recipe
+and that same CA. Do not use owner keys or production disks.
+
+```sh
+work=/path/to/fresh-disposable-run
+mkdir -p "$work/runtime" "$work/out" "$work/parent-tmp"
+chmod 700 "$work/runtime"
+nix build --impure --expr \
+  '(builtins.getFlake ("git+file://" + toString ./.)).lib.mkProtectedHibernationDriver {}' \
+  --out-link "$work/driver"
+TMPDIR="$work/parent-tmp" XDG_RUNTIME_DIR="$work/runtime" \
+ZBM_RESUME_VM_WORKDIR="$work" \
+ZBM_RESUME_VM_KEY=/private/disposable-ca.key \
+ZBM_RESUME_VM_CERT=/public/disposable-ca.pem \
+ZBM_RESUME_VM_IMA_KEY=/private/disposable-ima.key \
+ZBM_RESUME_VM_IMA_CERT=/public/disposable-ima.pem \
+ZBM_RESUME_VM_SIGNED_KERNEL=/public/signed-kernel.efi \
+ZBM_RESUME_VM_SIGNED_MODULES=/public/signed-modules \
+uv run --offline --no-project "$work/driver/bin/nixos-test-driver" -K -o "$work/out"
+```
+
+Keep the runtime path short enough for UNIX sockets. The driver owns QEMU,
+swtpm and an independent OVMF variable store, with SSH forwarded only at
+`127.0.0.1:22941`. There are no host disks or store shares. The parent signs final
+boot artifacts; private signing keys never enter the guest or derivation inputs.
+The guest receives a disposable ZFS/LUKS credential. Archive extraction interprets
+absolute guest links inside the private extraction root and streams the prepared
+tree straight into the guest ZFS dataset, avoiding a RAM-backed staging copy.
+
+The report distinguishes completed checks from a complete run. Acceptance needs
+actual original boot ID and RAM data, not just a successful kernel handoff. It
+also checks missing/mismatched signed capability refusal on cold boots, F10
+preserving the complete swap disk, confirmed discard-only staying in the menu,
+and cold boot after cancellation. Review the captured pending/consent screenshots.
+Separate mechanics tests cover signature/payload corruption, TPM clear/absence
+and rejection before pool import; a valid complete-chain run does not replace
+those failure checks or physical laptop acceptance.
+
 ## TPM ownership
 
 See [the TPM guide](tpm.md) for the boot sequence, exact policy behavior,

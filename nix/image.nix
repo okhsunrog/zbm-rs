@@ -286,7 +286,7 @@ let
     ${lib.optionalString testProfile "cp ${runtime}/id_ed25519 $out/id_ed25519"}
     uv run --offline --no-project --python ${pkgs.python3}/bin/python ${source}/nix/image-metadata.py \
       $out ${lib.escapeShellArg kernel.modDirVersion} ${lib.escapeShellArg zfsModule.version} \
-      ${if testProfile then "yes" else "no"} ${lib.escapeShellArg profile} ${source}/nix/image-size-policy.json ${initramfsCompression}
+      ${if testProfile then "yes" else "no"} ${lib.escapeShellArg profile} ${source}/nix/image-size-policy.json ${initramfsCompression} ${if protectedResume then "yes" else "no"}
   '';
   sizeCheck = pkgs.runCommand "zbm-image-size-check" {} ''
     test -s ${image}/sizes.json
@@ -298,8 +298,10 @@ assert lib.assertMsg (builtins.elem profile [ "portable" "host-only" ]) "Unknown
 assert lib.assertMsg (hostId == null || (builtins.isString hostId && builtins.match "[0-9a-fA-F]{8}" hostId != null && hostId != "00000000"))
   "hostId must be null or eight hexadecimal digits identifying this ZFS host";
 assert lib.assertMsg (builtins.elem kernelPolicy [ "validate" "configure" ]) "Unknown loader kernel policy";
-assert lib.assertMsg (!protectedResume || (kernel.zbmProtectedHibernation.recordProtocol or null) == 2)
-  "Enforced native resume requires the approved TPM-protected kernel build.";
+assert lib.assertMsg (!protectedResume || ((kernel.zbmProtectedHibernation.recordProtocol or null) == 2
+  && (kernel.zbmProtectedHibernation.backend or null) == "linux-tpm-signature-v2"
+  && (kernel.zbmProtectedHibernation.contextHandoffProtocol or null) == 1))
+  "Enforced native resume requires the approved TPM kernel with authenticated context handoff.";
 assert lib.assertMsg (!enforced || (targetAuthorities != [] && imaCertificate != null)) "Enforced image needs public authorization and IMA certificates";
 assert lib.assertMsg (!tpmEnabled || runtimeLibc == "glibc") "Current TPM provider requires the glibc userspace profile";
 assert lib.assertMsg (profile != "host-only" || hardwareManifest != null || extraModules != [] || forcedModules != []) "Host-only requires an explicit manifest or NixOS module lists";

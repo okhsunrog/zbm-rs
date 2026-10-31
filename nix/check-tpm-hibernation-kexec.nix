@@ -60,10 +60,17 @@ pkgs.testers.runNixOSTest {
     evidence()
     ${pkgs.lib.optionalString memoryMapProbe ''
     firmware_maps = []
+    resume_tables: list[str] = []
     for attempt in range(2):
         print("FIRMWARE_BOOT", attempt)
         print(machine.succeed("od -An -tx4 -j 448 -N 32 /sys/kernel/boot_params/data"))
-        print(machine.succeed("dmesg | grep -E 'BIOS-e820:|efi:.*(MEMMAP|memmap|PCR5=)'"))
+        efi_log = machine.succeed("dmesg | grep -E 'BIOS-e820:|efi:.*(MEMMAP|memmap|PCR5=|TPMResume=)' ")
+        print(efi_log)
+        if ${if (kernelPackages.kernel.zbmProtectedHibernation.contextHandoffProtocol or null) == 1 then "True" else "False"}:
+            import re
+            resume_table = re.search(r"TPMResume=(0x[0-9a-f]+)", efi_log)
+            assert resume_table is not None, efi_log
+            resume_tables.append(resume_table[1])
         firmware_maps.append(machine.succeed("dmesg | grep BIOS-e820:"))
         if attempt == 0:
             machine.shutdown()
@@ -71,6 +78,7 @@ pkgs.testers.runNixOSTest {
             machine.wait_for_unit("multi-user.target")
             evidence()
     assert firmware_maps[0] == firmware_maps[1], (firmware_maps, "Firmware E820 changed across boots")
+    assert not resume_tables or resume_tables[0] == resume_tables[1], (resume_tables, "TPM handoff moved across boots")
     ''}
     machine.succeed("test $(cat /proc/sys/kernel/kexec_load_disabled) = 0")
     # These are the two PCR banks included in the RFC's key provenance.

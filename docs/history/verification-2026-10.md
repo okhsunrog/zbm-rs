@@ -5,6 +5,45 @@ statements and superseded loader-owned NvPCR experiments describe their original
 runs. Use [current verification](../verification.md) and [TPM ownership](../tpm.md)
 for supported behavior.
 
+## TPM-authenticated hibernation backend v2 — 2026-10-31
+
+Linux 7.2.9 with patches 0001–0028 and ZFS 2.4.4 passed the full build and
+targeted TPM/EFI/power compilation. All 7409 modules and the PE kernel in the
+disposable public artifact were signed and independently verified. Patch 0028
+SHA-256: `bc841f7c052c43538c8dc40d8d05643b6ad5b23743bd954db62fb1738fb9a9a2`.
+It is a local experimental extension, not part of Garrett's RFC.
+
+| Run | Result |
+| --- | --- |
+| `matrix-v6-map-crb-sha256` | PASS, exact E820 and authenticated-context handoff address across firmware boots; PCR5/NV protection across kexec. |
+| `matrix-v7-signature-crb-sha256` | PASS, actual RAM restore and next hibernation, raw unsigned `/dev/snapshot` stream rejected, altered ECDSA trailer rejected before pool import. |
+| `matrix-v7-signature-tis-dual` | PASS, RAM restore, next hibernation and signature rejection with TIS/SHA-1+SHA-256. |
+| `matrix-v8-payload-crb-sha256` | PASS, copied RAM byte altered while retaining its original signature trailer; signature verification rejected the image before pool import. |
+| `matrix-v7-reset-crb-dual` | PASS, guest-only TPM clear after a successful restore and next hibernation; stale provenance rejected before pool import. |
+| `matrix-v7-unavailable-crb-sha256`, final `matrix-v9-unavailable-crb-sha256` | PASS, three restorations of the original RAM session, including retry after guest TPM absence without consuming the image; final run 377.65 s. |
+| `matrix-v9-cold-crb-sha256` | PASS, explicit repair boot with empty swap and unavailable TPM; healthy ZFS and ordinary paging work, integrity Lockdown remains active and hibernation remains unavailable. |
+| Protected runtime `p8`, final `p9` | PASS, all seven report checks: OVMF Secure Boot → enforced loader → PE/IMA/CMS-authorized target → original RAM restore, followed by another hibernation; missing/wrong signed profiles, F10 preservation and confirmed standalone cancellation/cold boot. Final run 324.98 s. |
+
+Consumed-image failures remained protected by boot-record v2 on the following
+boot. Successful restorations retained the original boot ID and RAM-only data,
+healthy ZFS and the early target kexec-load prohibition. The full-chain run's
+pending and confirmation screenshots were visually inspected. Ordinary image
+smoke passed all 16 checks; Rust formatting/tests/Clippy and Python boundary
+checks passed separately.
+
+Private signers stayed in the parent process, outside Nix. Guests used disposable
+TPMs/disks/credentials, with no host disks or store shares. See the persistent
+[reproduction workflow](../security-testing.md#authenticated-hibernation-chain).
+These results do not establish physical Framework acceptance, upstream approval
+or that a ZFS pool cannot be modified while the laptop is asleep. Host
+hibernation was not enabled by these tests.
+
+The cold-unavailable fixture first exposed systemd's firmware/device wait after
+the deliberate TPM unbind. Its explicit repair arguments now include the standard
+`systemd.tpm2_wait=0`; native resume authentication is not bypassed. The TPM-removal
+oneshot remains active after success so switch-root preparation cannot run it
+twice. The initial hung run was interrupted and retained; it is not a PASS.
+
 ## Encrypted Arch and Framework image integration — 2026-10-17
 
 Implemented explicit passphrase unlock through zfskit's secret stdin, with an

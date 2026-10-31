@@ -157,8 +157,8 @@ Boot to be disabled. Do not count on BootOrder automatically recovering a kernel
 hang or duplicate the main image at the removable-media path and call that an
 independent recovery version. VM acceptance covers the tested firmware/devices,
 not physical boot or every future pool feature. Before enabling hibernation,
-rescue must also implement the cancellation-only contract in the
-[protected-boot architecture](hibernation-design.md#agreed-protected-boot-architecture-not-yet-implemented).
+install and validate an independent rescue implementing the cancellation-only contract in the
+[protected-boot architecture](hibernation-design.md#agreed-protected-boot-architecture).
 
 TPM SRK/NvPCR setup remains owned by the selected OS. Package the actual loader's
 signed PCR policy and public key in that OS's initrd as appropriate; don't reset

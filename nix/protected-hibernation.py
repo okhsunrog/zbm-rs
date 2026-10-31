@@ -206,6 +206,9 @@ def validate(contract, kernel, initramfs, arguments):
     """Kernel/initramfs references are supplied by the owner install hook."""
     if contract.get("version") != 1 or contract.get("record_protocol") != 2:
         raise ValueError("Unsupported protected-hibernation build contract")
+    if (contract.get("backend") != "linux-tpm-signature-v2"
+            or contract.get("context_handoff_protocol") != 1):
+        raise ValueError("Protected hibernation requires authenticated TPM context handoff")
     validate_units(contract)
     for secret in contract["secret_paths"]:
         path = Path(secret)
@@ -239,5 +242,5 @@ def validate(contract, kernel, initramfs, arguments):
         if argument.startswith("rdinit=") or argument.startswith("initcall_blacklist="):
             raise ValueError("Protected target bypasses the approved initramfs or kernel initialization")
     config = json.loads(Path(contract["resume_config"]).read_text())["resume"]
-    return {"version": 1, "backend": "linux-tpm-signature-v1", "record_protocol": 2,
+    return {"version": 1, "backend": "linux-tpm-signature-v2", "record_protocol": 2,
             "resume_policy_sha256": policy_id(config)}

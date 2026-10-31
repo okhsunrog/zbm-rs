@@ -1,9 +1,12 @@
 # Architecture
 
-Native hibernation state, cancellation and the planned protected-loader/target/
+Native hibernation state, cancellation and the protected-loader/target/
 rescue roles are specified in [the hibernation design](hibernation-design.md).
-The current ordinary-mode guard and experimental TPM backport are distinct from
-the unimplemented enforced-resume policy. Independent rescue publication and its
+The ordinary-mode guard, experimental authenticated-memory backend and signed
+enforced-resume policy have separate acceptance gates. Authenticated VM RAM
+restoration, subsequent hibernation and the complete enforced Secure Boot chain
+passed with the experimental backend. Physical acceptance remains separate;
+host hibernation remains disabled. Independent rescue publication and its
 candidate/known-good lifecycle are described in
 [NixOS deployment](nixos-deployment.md#optional-efi-publication-and-independent-rescue).
 

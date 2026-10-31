@@ -199,7 +199,7 @@ impl BootAuthorization {
             (None, 1) => (),
             (Some(profile), 2)
                 if profile.version == 1
-                    && profile.backend == "linux-tpm-signature-v1"
+                    && profile.backend == "linux-tpm-signature-v2"
                     && profile.record_protocol == 2
                     && profile.resume_policy_sha256.len() == 64
                     && profile
@@ -618,7 +618,7 @@ mod tests {
         );
         authorization.protected_hibernation = Some(ProtectedHibernation {
             version: 1,
-            backend: "linux-tpm-signature-v1".into(),
+            backend: "linux-tpm-signature-v2".into(),
             record_protocol: 2,
             resume_policy_sha256: resume_policy_id(&config).unwrap(),
         });
@@ -633,6 +633,21 @@ mod tests {
             .fixed_arguments
             .push("sysctl.kernel.kexec_load_disabled=1".into());
         assert!(authorization.require_protected_hibernation(&config).is_ok());
+        authorization
+            .protected_hibernation
+            .as_mut()
+            .unwrap()
+            .backend = "linux-tpm-signature-v1".into();
+        assert!(
+            authorization
+                .require_protected_hibernation(&config)
+                .is_err()
+        );
+        authorization
+            .protected_hibernation
+            .as_mut()
+            .unwrap()
+            .backend = "linux-tpm-signature-v2".into();
         let mut equivalent = config.clone();
         if let Some(crate::resume::CredentialSource::ZfsUnlock { pool_guid, .. }) =
             &mut equivalent.credential

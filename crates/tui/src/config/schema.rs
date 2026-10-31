@@ -140,13 +140,8 @@ impl Config {
         self.security.validate()?;
         self.build_policy().validate()?;
         self.resume.validate().map_err(|e| e.to_string())?;
-        if self.resume.enabled() {
-            if self.security.mode == SecurityMode::Enforce {
-                return Err("Native hibernation image authentication is not implemented for enforced images".into());
-            }
-            if self.diagnostics.esp_partuuid.is_some() {
-                return Err("Resume requires ESP diagnostics disabled until storage coordination is implemented".into());
-            }
+        if self.resume.enabled() && self.diagnostics.esp_partuuid.is_some() {
+            return Err("Resume requires ESP diagnostics disabled until storage coordination is implemented".into());
         }
         if !(1..=300).contains(&self.boot.timeout_secs) {
             return Err("boot.timeout_secs must be in 1..=300".into());

@@ -21,6 +21,8 @@
         ({ inherit self pkgs nixpkgs system; } // args);
       lib.mkProtectedBootFixture = args: import ./nix/protected-boot-fixture.nix
         ({ inherit pkgs nixpkgs system; } // args);
+      lib.mkProtectedHibernationDriver = args: import ./nix/protected-hibernation-driver.nix
+        ({ inherit self pkgs; } // args);
       packages.${system} = {
         default = production;
         zbm-rs-efi = production;

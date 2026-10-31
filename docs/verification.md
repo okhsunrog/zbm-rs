@@ -21,10 +21,18 @@ are separate observations.
 | Target authorization | Kernel/initramfs/argument rejection, pinned CMS policy, authorized root selection and actual signed second-kernel boot. |
 | TPM | PCR11/PCR15 replay, read-only startup, no loader SRK/NV allocation, required absence refusal and optional absence with target checks preserved. |
 | Native OS TPM setup | The NixOS fixture creates its own SRK and initializes native v261 NvPCRs without masks or loader-policy conflicts. |
+| Experimental authenticated hibernation | Linux 7.2.9 through patch 0028 restored RAM and created the next image with CRB/SHA-256 and TIS/dual-bank TPMs, LUKS2 swap and ZFS. Signature-trailer/payload tampering and TPM clear were rejected before pool import; consumed attempts remained protected on the next boot. The complete OVMF Secure Boot/PE/IMA/CMS enforced loader-to-target chain restored RAM and created the next image. |
+| TPM interruption and repeat cycles | CRB/SHA-256 restored the same RAM session three times. Unavailable TPM stopped resume before pool import without consuming the image; restoring TPM and the clean initramfs allowed retry and another complete cycle, retaining the original boot ID, RAM data and target kexec prohibition. |
+| Empty-swap repair without TPM | Explicit repair boot with `systemd.tpm2_wait=0` passed: healthy ZFS and ordinary paging, no hibernation, integrity Lockdown retained. This parameter does not bypass the native image gate. |
+| Cancellation-only rescue | Verified cancellation/UI scenarios and FAT candidate/known-good publication passed. The exact production EFI artifact passed OVMF boot, menu/F2 and F10; production disk access and physical boot remain separate gates. |
 | Recovery and lifecycle | Manager faults, console restoration, process reaping, restart, protected recovery and clean poweroff. |
 
 These are isolated VM and source checks. Physical Framework deployment, target v262 signed NvPCR
 integration and across-kexec PCR15 log transport remain open gates.
+The ordinary TPM rows describe the userspace measurement policy. The opt-in
+hibernation kernel separately provisions and protects its RFC-specific NV index;
+it has no normal-deployment acceptance claim. See
+[hibernation architecture and validation](hibernation-design.md).
 
 ## Reproduction and records
 

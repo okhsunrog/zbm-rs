@@ -7,6 +7,10 @@
     "maxEfiBytes": 83886080,
     "baselineEfiBytes": 25980928
   },
+  "protected-test": {
+    "maxEfiBytes": 83886080,
+    "baselineEfiBytes": 33519104
+  },
   "host-only": {
     "maxEfiBytes": 67108864,
     "baselineEfiBytes": null

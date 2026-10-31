@@ -7,9 +7,10 @@ implemented API, [the roadmap](roadmap.md) for remaining work and
 
 The agreed native-hibernation extension, including shared loader/target kernel
 packages, the versioned authorization profile and cancellation-only rescue, is
-specified in [the hibernation design](hibernation-design.md#agreed-protected-boot-architecture-not-yet-implemented).
-That extension remains unimplemented in enforced mode; its documented deployment
-scope does not claim protection against arbitrary privileged later kexec chains.
+specified in [the hibernation design](hibernation-design.md#agreed-protected-boot-architecture).
+The experimental backend passed the disposable enforced-chain VM test; physical
+acceptance remains separate. Its documented deployment scope does not claim
+protection against arbitrary privileged later kexec chains.
 
 ## Current implementation
 

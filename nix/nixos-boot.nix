@@ -66,6 +66,8 @@ let
   protectedContractInput = pkgs.writeText "zbm-protected-hibernation-input.json" (builtins.toJSON {
     version = 1;
     record_protocol = 2;
+    inherit (config.boot.kernelPackages.kernel.zbmProtectedHibernation) backend;
+    context_handoff_protocol = config.boot.kernelPackages.kernel.zbmProtectedHibernation.contextHandoffProtocol;
     inherit (config.boot.kernelPackages.kernel.zbmProtectedHibernation) kernel;
     kernel_config = config.boot.kernelPackages.kernel.zbmProtectedHibernation.kernelConfig;
     kernel_certificate = cfg.signing.kernelCertificate;
@@ -282,8 +284,10 @@ in
     assertions = [
       {
         assertion = !(h.enable && cfg.signing.enable) ||
-          (config.boot.kernelPackages.kernel.zbmProtectedHibernation.recordProtocol or null) == 2;
-        message = "Signed native hibernation requires the approved shared TPM-protected kernel build.";
+          ((config.boot.kernelPackages.kernel.zbmProtectedHibernation.recordProtocol or null) == 2
+            && (config.boot.kernelPackages.kernel.zbmProtectedHibernation.backend or null) == "linux-tpm-signature-v2"
+            && (config.boot.kernelPackages.kernel.zbmProtectedHibernation.contextHandoffProtocol or null) == 1);
+        message = "Signed native hibernation requires the shared TPM-protected kernel with authenticated context handoff.";
       }
       {
         assertion = !cfg.hibernation.enable || builtins.all

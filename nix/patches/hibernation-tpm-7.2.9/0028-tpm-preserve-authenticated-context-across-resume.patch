@@ -1,0 +1,815 @@
+From c68d6cfe2a4ea8e3fa49dd8204da46a1263a927f Mon Sep 17 00:00:00 2001
+From: okhsunrog <me@okhsunrog.dev>
+Date: Sat, 31 Oct 2026 00:06:13 +0300
+Subject: [PATCH] Preserve authenticated TPM session state across RAM
+ restoration
+
+After the complete image signature verifies, pass the fresh NULL-primary context through reserved EFI memory. Bind its one-shot consumer to the original NULL name and handoff address in the signed image header; clear abandoned handoffs and leave in-session reset detection unchanged.
+---
+ drivers/char/tpm/tpm-interface.c    |  1 +
+ drivers/char/tpm/tpm.h              |  1 +
+ drivers/char/tpm/tpm2-kernel-key.c  | 84 ++++++++++++++++++++++---
+ drivers/char/tpm/tpm2-sessions.c    | 96 +++++++++++++++++++++++++++--
+ drivers/firmware/efi/efi.c          |  3 +
+ drivers/firmware/efi/libstub/tpm.c  | 22 +++++++
+ drivers/firmware/efi/tpm-security.c | 34 ++++++++++
+ include/linux/efi.h                 | 27 ++++++++
+ include/linux/tpm.h                 | 34 +++++-----
+ include/linux/tpm_command.h         |  5 ++
+ kernel/power/hibernate.c            |  3 +
+ kernel/power/hibernate_tpm.c        | 86 +++++++++++++++++++++++---
+ kernel/power/power.h                |  2 +
+ 13 files changed, 358 insertions(+), 40 deletions(-)
+
+diff --git a/drivers/char/tpm/tpm-interface.c b/drivers/char/tpm/tpm-interface.c
+index 1d1adf2..59bdfe8 100644
+--- a/drivers/char/tpm/tpm-interface.c
++++ b/drivers/char/tpm/tpm-interface.c
+@@ -510,6 +510,7 @@ int tpm_pm_resume(struct device *dev)
+ 	if (chip == NULL)
+ 		return -ENODEV;
+ 
++	tpm2_hibernate_import(chip);
+ 	chip->flags &= ~TPM_CHIP_FLAG_SUSPENDED;
+ 
+ 	/*
+diff --git a/drivers/char/tpm/tpm.h b/drivers/char/tpm/tpm.h
+index f26d8d3..a04a6ca 100644
+--- a/drivers/char/tpm/tpm.h
++++ b/drivers/char/tpm/tpm.h
+@@ -249,6 +249,7 @@ int tpm2_sessions_init(struct tpm_chip *chip);
+ void tpm2_free_auth(struct tpm2_auth *auth);
+ int tpm2_audit_session_handle(struct tpm_chip *chip, u32 *handle);
+ int tpm2_load_null(struct tpm_chip *chip, u32 *null_key);
++int tpm2_create_audited_null(struct tpm_chip *chip, u32 *handle);
+ 
+ extern const u8 tpm2_kernel_nv_magic[TPM2_KERNEL_NV_SIZE];
+ void tpm2_kernel_nv_name(bool written, u8 name[TPM2_NULL_NAME_SIZE]);
+diff --git a/drivers/char/tpm/tpm2-kernel-key.c b/drivers/char/tpm/tpm2-kernel-key.c
+index 3f9f642..4415fa3 100644
+--- a/drivers/char/tpm/tpm2-kernel-key.c
++++ b/drivers/char/tpm/tpm2-kernel-key.c
+@@ -571,7 +571,8 @@ static const u32 tpm2_kkey_expected_cc[TPM2_KKEY_NR_CMDS] = {
+ };
+ 
+ /* Check that the attestation is a session audit, and find its digest */
+-static const u8 *tpm2_kkey_attest_digest(const u8 *attest, u16 len)
++static const u8 *tpm2_kkey_attest_digest(const u8 *attest, u16 len,
++				       const u8 *nonce, u16 nonce_len)
+ {
+ 	struct tpm2_rsp r;
+ 	const u8 *digest;
+@@ -582,9 +583,11 @@ static const u8 *tpm2_kkey_attest_digest(const u8 *attest, u16 len)
+ 	    tpm2_rsp_u16(&r) != TPM2_ST_ATTEST_SESSION_AUDIT)
+ 		return NULL;
+ 
+-	/* qualifiedSigner, extraData */
+-	tpm2_rsp_tpm2b(&r, &size);
++	/* qualifiedSigner, then the freshness challenge in extraData */
+ 	tpm2_rsp_tpm2b(&r, &size);
++	digest = tpm2_rsp_tpm2b(&r, &size);
++	if (!digest || size != nonce_len || (size && memcmp(digest, nonce, size)))
++		return NULL;
+ 	/* clockInfo (clock, resetCount, restartCount, safe), firmwareVersion */
+ 	tpm2_rsp_bytes(&r, 8 + 4 + 4 + 1);
+ 	tpm2_rsp_bytes(&r, 8);
+@@ -759,8 +762,7 @@ static int tpm2_kkey_check_create(const struct tpm2_kkey_entry *e,
+  * tpm2_kernel_key_verify() - verify the provenance of a kernel signing key
+  * @chip:	the TPM chip
+  * @prov:	provenance returned by tpm2_kernel_key_create()
+- * @x:		filled with the X coordinate of the key's public key
+- * @y:		filled with the Y coordinate of the key's public key
++ * @identity:	verified signing key and the AK that authenticated its provenance
+  *
+  * Checks that @prov shows the key was created by the kernel:
+  *
+@@ -779,7 +781,7 @@ static int tpm2_kkey_check_create(const struct tpm2_kkey_entry *e,
+  */
+ int tpm2_kernel_key_verify(struct tpm_chip *chip,
+ 			   const struct tpm2_key_provenance *prov,
+-			   u8 x[EC_PT_SZ], u8 y[EC_PT_SZ])
++			   struct tpm2_kernel_key_identity *identity)
+ {
+ 	struct tpm2_kkey_entry e[TPM2_KKEY_NR_CMDS];
+ 	u8 ak_x[EC_PT_SZ], ak_y[EC_PT_SZ];
+@@ -829,7 +831,7 @@ int tpm2_kernel_key_verify(struct tpm_chip *chip,
+ 	if (rc)
+ 		return rc;
+ 
+-	session_digest = tpm2_kkey_attest_digest(attest, attest_len);
++	session_digest = tpm2_kkey_attest_digest(attest, attest_len, NULL, 0);
+ 	if (!session_digest)
+ 		return -EKEYREJECTED;
+ 
+@@ -867,8 +869,74 @@ int tpm2_kernel_key_verify(struct tpm_chip *chip,
+ 	/* the key was created after a read of the magic value */
+ 	rc = tpm2_kkey_check_nv_read(&e[1]);
+ 	if (!rc)
+-		rc = tpm2_kkey_check_create(&e[2], x, y);
++		rc = tpm2_kkey_check_create(&e[2], identity->x, identity->y);
++	if (!rc) {
++		memcpy(identity->ak_x, ak_x, sizeof(ak_x));
++		memcpy(identity->ak_y, ak_y, sizeof(ak_y));
++	}
+ 
+ 	return rc;
+ }
+ EXPORT_SYMBOL_GPL(tpm2_kernel_key_verify);
++
++/*
++ * Certify the fresh NULL primary using the AK that authenticated the saved
++ * image. A replayed AK public key or a bus-substituted NULL key is insufficient:
++ * a fresh signed nonce and the exact, locally recorded CreatePrimary audit
++ * transcript must agree. No new TOFU decision is delegated to the old kernel.
++ * Caller holds the chip's ops throughout verification and context export.
++ */
++int tpm2_kernel_null_certify(struct tpm_chip *chip,
++			    const struct tpm2_kernel_key_identity *identity)
++{
++	struct tpm2_signed_audit audit = { };
++	const struct tpm2_audit_entry *log;
++	u8 nonce[SHA256_DIGEST_SIZE], digest[SHA256_DIGEST_SIZE];
++	const u8 *session_digest;
++	struct sha256_ctx ctx;
++	u32 null_key = 0;
++	int rc;
++
++	get_random_bytes(nonce, sizeof(nonce));
++	tpm2_end_auth_session(chip);
++	rc = tpm2_start_auth_session(chip, true);
++	if (rc)
++		goto out;
++	rc = tpm2_create_audited_null(chip, &null_key);
++	if (rc)
++		goto out;
++	rc = tpm2_get_signed_audit_digest(chip, nonce, sizeof(nonce), &audit);
++	if (rc)
++		goto out;
++	rc = -EKEYREJECTED;
++	if (memcmp(audit.ak_x, identity->ak_x, sizeof(audit.ak_x)) ||
++	    memcmp(audit.ak_y, identity->ak_y, sizeof(audit.ak_y)))
++		goto out;
++	sha256(audit.attest, audit.attest_len, digest);
++	rc = tpm2_kernel_key_verify_signature(identity->ak_x, identity->ak_y,
++					     digest, audit.sig_r, audit.sig_s);
++	if (rc)
++		goto out;
++	rc = -EKEYREJECTED;
++	session_digest = tpm2_kkey_attest_digest(audit.attest, audit.attest_len,
++					     nonce, sizeof(nonce));
++	/* The sole HMAC-audited operation above is the fixed NULL CreatePrimary. */
++	if (!session_digest || tpm2_get_audit_log(chip, &log) != 1)
++		goto out;
++	memset(digest, 0, sizeof(digest));
++	sha256_init(&ctx);
++	sha256_update(&ctx, digest, sizeof(digest));
++	sha256_update(&ctx, log[0].cphash, SHA256_DIGEST_SIZE);
++	sha256_update(&ctx, log[0].rphash, SHA256_DIGEST_SIZE);
++	sha256_final(&ctx, digest);
++	if (memcmp(digest, session_digest, sizeof(digest)))
++		goto out;
++	rc = 0;
++out:
++	tpm2_free_signed_audit(&audit);
++	tpm2_end_auth_session(chip);
++	if (null_key)
++		tpm2_flush_context(chip, null_key);
++	memzero_explicit(nonce, sizeof(nonce));
++	return rc;
++}
+diff --git a/drivers/char/tpm/tpm2-sessions.c b/drivers/char/tpm/tpm2-sessions.c
+index 9fc9588..bc8cea4 100644
+--- a/drivers/char/tpm/tpm2-sessions.c
++++ b/drivers/char/tpm/tpm2-sessions.c
+@@ -64,6 +64,8 @@
+  */
+ 
+ #include "tpm.h"
++#include <linux/efi.h>
++#include <linux/io.h>
+ #include <linux/random.h>
+ #include <linux/scatterlist.h>
+ #include <linux/unaligned.h>
+@@ -477,7 +479,7 @@ EXPORT_SYMBOL_GPL(tpm_buf_append_hmac_session);
+ #ifdef CONFIG_TCG_TPM2_HMAC
+ 
+ static int tpm2_create_primary(struct tpm_chip *chip, u32 hierarchy,
+-			       u32 *handle, u8 *name);
++			       u32 *handle, u8 *name, bool audit);
+ 
+ /*
+  * assume hash sha256 and nonces u, v of size SHA256_DIGEST_SIZE but
+@@ -1089,7 +1091,7 @@ int tpm2_load_null(struct tpm_chip *chip, u32 *null_key)
+ 	}
+ 
+ 	/* Try to re-create null key, given the integrity failure: */
+-	rc = tpm2_create_primary(chip, TPM2_RH_NULL, &tmp_null_key, name);
++	rc = tpm2_create_primary(chip, TPM2_RH_NULL, &tmp_null_key, name, false);
+ 	if (rc)
+ 		goto err;
+ 
+@@ -1396,6 +1398,7 @@ static int tpm2_parse_create_primary(struct tpm_chip *chip, struct tpm_buf *buf,
+  * @hierarchy: The hierarchy handle to create under
+  * @handle:    The returned volatile handle on success
+  * @name:      The name of the returned key
++ * @audit:     Execute in the caller's HMAC audit session
+  *
+  * For platforms that might not have a persistent primary, this can be
+  * used to create one quickly on the fly (it uses Elliptic Curve not
+@@ -1410,7 +1413,7 @@ static int tpm2_parse_create_primary(struct tpm_chip *chip, struct tpm_buf *buf,
+  * * TPM_RC	- A TPM error
+  */
+ static int tpm2_create_primary(struct tpm_chip *chip, u32 hierarchy,
+-			       u32 *handle, u8 *name)
++			       u32 *handle, u8 *name, bool audit)
+ {
+ 	struct tpm_buf *template __free(kfree) = NULL;
+ 	struct tpm_buf *buf __free(kfree) = NULL;
+@@ -1476,8 +1479,16 @@ static int tpm2_create_primary(struct tpm_chip *chip, u32 hierarchy,
+ 	/* END parameters */
+ 
+ 	/* primary handle */
+-	tpm_buf_append_u32(buf, hierarchy);
+-	tpm_buf_append_empty_auth(buf, TPM2_RS_PW);
++	if (audit) {
++		rc = tpm_buf_append_name(chip, buf, hierarchy, NULL);
++		if (rc)
++			return rc;
++		tpm_buf_append_hmac_session(chip, buf, TPM2_SA_CONTINUE_SESSION,
++					    NULL, 0);
++	} else {
++		tpm_buf_append_u32(buf, hierarchy);
++		tpm_buf_append_empty_auth(buf, TPM2_RS_PW);
++	}
+ 
+ 	/* sensitive create size is 4 for two empty buffers */
+ 	tpm_buf_append_u16(buf, 4);
+@@ -1497,8 +1508,15 @@ static int tpm2_create_primary(struct tpm_chip *chip, u32 hierarchy,
+ 	/* creation PCR (none) */
+ 	tpm_buf_append_u32(buf, 0);
+ 
++	if (audit) {
++		rc = tpm_buf_fill_hmac_session(chip, buf);
++		if (rc)
++			return rc;
++	}
+ 	rc = tpm_transmit_cmd(chip, buf, 0,
+ 			      "attempting to create NULL primary");
++	if (audit)
++		rc = tpm_buf_check_hmac_response(chip, buf, rc);
+ 
+ 	if (rc == TPM2_RC_SUCCESS)
+ 		rc = tpm2_parse_create_primary(chip, buf, handle, hierarchy,
+@@ -1513,7 +1531,7 @@ static int tpm2_create_null_primary(struct tpm_chip *chip)
+ 	int rc;
+ 
+ 	rc = tpm2_create_primary(chip, TPM2_RH_NULL, &null_key,
+-				 chip->null_key_name);
++				 chip->null_key_name, false);
+ 
+ 	if (rc == TPM2_RC_SUCCESS) {
+ 		unsigned int offset = 0; /* dummy offset for null key context */
+@@ -1526,6 +1544,13 @@ static int tpm2_create_null_primary(struct tpm_chip *chip)
+ 	return rc;
+ }
+ 
++int tpm2_create_audited_null(struct tpm_chip *chip, u32 *handle)
++{
++	u8 name[TPM2_NAME_SIZE];
++
++	return tpm2_create_primary(chip, TPM2_RH_NULL, handle, name, true);
++}
++
+ /**
+  * tpm2_sessions_init() - start of day initialization for the sessions code
+  * @chip: TPM chip
+@@ -1550,4 +1575,63 @@ int tpm2_sessions_init(struct tpm_chip *chip)
+ 
+ 	return rc;
+ }
++
++#ifdef CONFIG_HIBERNATION_TPM_SIGNATURE
++/* Called with the chip's ops held, only after the complete image verifies. */
++int tpm2_hibernate_export(struct tpm_chip *chip,
++			  const u8 old_name[TPM2_NAME_SIZE])
++{
++	struct linux_efi_tpm_resume *resume = efi_tpm_resume_map();
++
++	if (!resume)
++		return -ENODEV;
++	WRITE_ONCE(resume->ready, 0);
++	memcpy(resume->old_name, old_name, sizeof(resume->old_name));
++	memcpy(resume->null_name, chip->null_key_name, sizeof(resume->null_name));
++	memcpy(resume->null_x, chip->null_ec_key_x, sizeof(resume->null_x));
++	memcpy(resume->null_y, chip->null_ec_key_y, sizeof(resume->null_y));
++	memcpy(resume->null_context, chip->null_key_context,
++	       sizeof(resume->null_context));
++	/* Publish the complete, authenticated, one-shot handoff last. */
++	smp_store_release(&resume->ready, 1);
++	memunmap(resume);
++	return 0;
++}
++
++/*
++ * Keep SUSPENDED set until the cached context has been replaced. Never derive
++ * a new TOFU key here: consume only the restore kernel's verified context,
++ * and only for the original NULL name bound into the signed RAM image.
++ */
++void tpm2_hibernate_import(struct tpm_chip *chip)
++{
++	struct linux_efi_tpm_resume *resume;
++
++	if (!(chip->flags & TPM_CHIP_FLAG_TPM2) ||
++	    (chip->flags & TPM_CHIP_FLAG_DISABLE))
++		return;
++	resume = efi_tpm_resume_map();
++	if (!resume)
++		return;
++	if (smp_load_acquire(&resume->ready) != 1 ||
++	    memcmp(resume->old_name, chip->null_key_name,
++		   sizeof(resume->old_name)))
++		goto out;
++	if (cmpxchg(&resume->ready, 1, 0) != 1)
++		goto out;
++	/* No TPM command may flush a stale handle from the pre-reset image. */
++	tpm2_free_auth(chip->auth);
++	chip->auth = NULL;
++	memcpy(chip->null_key_name, resume->null_name, sizeof(resume->null_name));
++	memcpy(chip->null_ec_key_x, resume->null_x, sizeof(resume->null_x));
++	memcpy(chip->null_ec_key_y, resume->null_y, sizeof(resume->null_y));
++	memcpy(chip->null_key_context, resume->null_context,
++	       sizeof(resume->null_context));
++	memzero_explicit(resume->old_name,
++			 sizeof(*resume) - offsetof(typeof(*resume), old_name));
++	dev_info(&chip->dev, "Restored authenticated NULL-primary context\n");
++out:
++	memunmap(resume);
++}
++#endif
+ #endif /* CONFIG_TCG_TPM2_HMAC */
+diff --git a/drivers/firmware/efi/efi.c b/drivers/firmware/efi/efi.c
+index f8e2ecc..0c3f526 100644
+--- a/drivers/firmware/efi/efi.c
++++ b/drivers/firmware/efi/efi.c
+@@ -651,6 +651,9 @@ static const efi_config_table_type_t common_tables[] __initconst = {
+ #endif
+ #ifdef CONFIG_KERNEL_TPM_SECURITY
+ 	{LINUX_EFI_PCR5_LOG_GUID,		&efi_pcr5_log,		"PCR5"		},
++#endif
++#ifdef CONFIG_HIBERNATION_TPM_SIGNATURE
++	{LINUX_EFI_TPM_RESUME_GUID,	&efi_tpm_resume,	"TPMResume"	},
+ #endif
+ 	{},
+ };
+diff --git a/drivers/firmware/efi/libstub/tpm.c b/drivers/firmware/efi/libstub/tpm.c
+index f03490a..e288931 100644
+--- a/drivers/firmware/efi/libstub/tpm.c
++++ b/drivers/firmware/efi/libstub/tpm.c
+@@ -305,6 +305,27 @@ static efi_status_t efi_tpm_read_pcr5(efi_tcg2_protocol_t *tcg2,
+  * later verify that the firmware extended PCR 5 when ExitBootServices()
+  * was called.
+  */
++static void efi_tpm_allocate_resume(void)
++{
++	efi_guid_t guid = LINUX_EFI_TPM_RESUME_GUID;
++	struct linux_efi_tpm_resume *resume;
++	efi_status_t status;
++
++	if (!IS_ENABLED(CONFIG_HIBERNATION_TPM_SIGNATURE))
++		return;
++	status = efi_bs_call(allocate_pool, EFI_ACPI_RECLAIM_MEMORY,
++			     sizeof(*resume), (void **)&resume);
++	if (status != EFI_SUCCESS)
++		return;
++	memset(resume, 0, sizeof(*resume));
++	resume->magic = LINUX_EFI_TPM_RESUME_MAGIC;
++	resume->version = LINUX_EFI_TPM_RESUME_VERSION;
++	resume->size = sizeof(*resume);
++	status = efi_bs_call(install_configuration_table, &guid, resume);
++	if (status != EFI_SUCCESS)
++		efi_bs_call(free_pool, resume);
++}
++
+ void efi_tpm_record_pcr5(void)
+ {
+ 	efi_guid_t tcg2_guid = EFI_TCG2_PROTOCOL_GUID;
+@@ -358,6 +379,7 @@ void efi_tpm_record_pcr5(void)
+ 		efi_err("Unable to install PCR 5 log table\n");
+ 		goto err_free;
+ 	}
++	efi_tpm_allocate_resume();
+ 	return;
+ 
+ err_free:
+diff --git a/drivers/firmware/efi/tpm-security.c b/drivers/firmware/efi/tpm-security.c
+index aee497d..922a136 100644
+--- a/drivers/firmware/efi/tpm-security.c
++++ b/drivers/firmware/efi/tpm-security.c
+@@ -18,6 +18,28 @@
+ unsigned long __initdata efi_pcr5_log = EFI_INVALID_TABLE_ADDR;
+ bool kernel_tpm_security_available __ro_after_init;
+ 
++#ifdef CONFIG_HIBERNATION_TPM_SIGNATURE
++unsigned long __ro_after_init efi_tpm_resume = EFI_INVALID_TABLE_ADDR;
++
++struct linux_efi_tpm_resume *efi_tpm_resume_map(void)
++{
++	struct linux_efi_tpm_resume *resume;
++
++	if (efi_tpm_resume == EFI_INVALID_TABLE_ADDR)
++		return NULL;
++	resume = memremap(efi_tpm_resume, sizeof(*resume), MEMREMAP_WB);
++	if (!resume)
++		return NULL;
++	if (resume->magic != LINUX_EFI_TPM_RESUME_MAGIC ||
++	    resume->version != LINUX_EFI_TPM_RESUME_VERSION ||
++	    resume->size != sizeof(*resume)) {
++		memunmap(resume);
++		return NULL;
++	}
++	return resume;
++}
++#endif
++
+ static int __init efi_tpm_check_pcr5(void)
+ {
+ 	struct linux_efi_pcr5_log *log;
+@@ -27,6 +49,18 @@ static int __init efi_tpm_check_pcr5(void)
+ 	u32 count;
+ 	int i, rc;
+ 
++#ifdef CONFIG_HIBERNATION_TPM_SIGNATURE
++	/* Never inherit an armed handoff through an unrelated kexec boot. */
++	struct linux_efi_tpm_resume *resume = efi_tpm_resume_map();
++
++	if (resume) {
++		WRITE_ONCE(resume->ready, 0);
++		memzero_explicit(resume->old_name,
++				 sizeof(*resume) - offsetof(typeof(*resume), old_name));
++		memunmap(resume);
++	}
++#endif
++
+ 	if (efi_pcr5_log == EFI_INVALID_TABLE_ADDR)
+ 		return 0;
+ 
+diff --git a/include/linux/efi.h b/include/linux/efi.h
+index 989de0e..638d416 100644
+--- a/include/linux/efi.h
++++ b/include/linux/efi.h
+@@ -424,6 +424,8 @@ void efi_native_runtime_setup(void);
+ #define LINUX_EFI_BOOT_MEMMAP_GUID		EFI_GUID(0x800f683f, 0xd08b, 0x423a,  0xa2, 0x93, 0x96, 0x5c, 0x3c, 0x6f, 0xe2, 0xb4)
+ #define LINUX_EFI_UNACCEPTED_MEM_TABLE_GUID	EFI_GUID(0xd5d1de3c, 0x105c, 0x44f9,  0x9e, 0xa9, 0xbc, 0xef, 0x98, 0x12, 0x00, 0x31)
+ #define LINUX_EFI_PCR5_LOG_GUID			EFI_GUID(0xb38f9ff0, 0xb8ef, 0xe28f,  0x80, 0x8d, 0xe2, 0x9a, 0xa7, 0xef, 0xb8, 0x8f)
++/* Experimental authenticated-hibernation NULL-primary handoff. */
++#define LINUX_EFI_TPM_RESUME_GUID			EFI_GUID(0x6681e65d, 0xfa83, 0x4e70,  0x9e, 0xc3, 0x23, 0x8f, 0x7a, 0x7f, 0x5e, 0x91)
+ 
+ #define RISCV_EFI_BOOT_PROTOCOL_GUID		EFI_GUID(0xccd15fec, 0x6f73, 0x4eec,  0x83, 0x95, 0x3e, 0x69, 0xe4, 0xb9, 0x40, 0xbf)
+ 
+@@ -655,6 +657,31 @@ extern unsigned long efi_pcr5_log;
+ extern bool kernel_tpm_security_available;
+ #endif
+ 
++/*
++ * Reserved ACPI memory is excluded from the RAM image. The restore kernel
++ * publishes a fresh NULL context only after authenticating the entire image.
++ * The old name is part of that signed image and binds the consumer TPM.
++ */
++#define LINUX_EFI_TPM_RESUME_MAGIC	0x31524d5054584e4cULL
++#define LINUX_EFI_TPM_RESUME_VERSION	1
++
++struct linux_efi_tpm_resume {
++	u64 magic;
++	u32 version;
++	u32 size;
++	u32 ready;
++	u8 old_name[TPM2_NAME_SIZE];
++	u8 null_name[TPM2_NAME_SIZE];
++	u8 null_x[EC_PT_SZ];
++	u8 null_y[EC_PT_SZ];
++	u8 null_context[TPM2_MAX_CONTEXT_SIZE];
++};
++
++#ifdef CONFIG_HIBERNATION_TPM_SIGNATURE
++extern unsigned long efi_tpm_resume;
++struct linux_efi_tpm_resume *efi_tpm_resume_map(void);
++#endif
++
+ /*
+  * All runtime access to EFI goes through this structure:
+  */
+diff --git a/include/linux/tpm.h b/include/linux/tpm.h
+index 9be88f1..785c147 100644
+--- a/include/linux/tpm.h
++++ b/include/linux/tpm.h
+@@ -91,20 +91,6 @@ struct tpm_chip_seqops {
+ 	const struct seq_operations *seqops;
+ };
+ 
+-/* Fixed define for the curve we use which is NIST_P256 */
+-#define EC_PT_SZ	32
+-
+-/*
+- * fixed define for the size of a name.  This is actually HASHALG size
+- * plus 2, so 32 for SHA256
+- */
+-#define TPM2_NAME_SIZE	34
+-
+-/*
+- * The maximum size for an object context
+- */
+-#define TPM2_MAX_CONTEXT_SIZE 4096
+-
+ struct tpm_chip {
+ 	struct device dev;
+ 	struct device devs;
+@@ -385,6 +371,12 @@ struct tpm2_key_provenance {
+ 	u8 data[TPM2_KEY_PROVENANCE_MAX];
+ };
+ 
++/* Both keys are returned only after the entire provenance has verified. */
++struct tpm2_kernel_key_identity {
++	u8 x[EC_PT_SZ], y[EC_PT_SZ];
++	u8 ak_x[EC_PT_SZ], ak_y[EC_PT_SZ];
++};
++
+ #ifdef CONFIG_TCG_TPM2_KERNEL_KEY
+ int tpm2_kernel_key_create(struct tpm_chip *chip, struct tpm2_kernel_key *key,
+ 			   struct tpm2_key_provenance *prov);
+@@ -395,7 +387,9 @@ void tpm2_kernel_key_destroy(struct tpm_chip *chip,
+ 			     struct tpm2_kernel_key *key);
+ int tpm2_kernel_key_verify(struct tpm_chip *chip,
+ 			   const struct tpm2_key_provenance *prov,
+-			   u8 x[EC_PT_SZ], u8 y[EC_PT_SZ]);
++			   struct tpm2_kernel_key_identity *identity);
++int tpm2_kernel_null_certify(struct tpm_chip *chip,
++			    const struct tpm2_kernel_key_identity *identity);
+ int tpm2_kernel_key_verify_signature(const u8 x[EC_PT_SZ],
+ 				     const u8 y[EC_PT_SZ],
+ 				     const u8 digest[SHA256_DIGEST_SIZE],
+@@ -421,7 +415,7 @@ static inline void tpm2_kernel_key_destroy(struct tpm_chip *chip,
+ }
+ static inline int tpm2_kernel_key_verify(struct tpm_chip *chip,
+ 					 const struct tpm2_key_provenance *prov,
+-					 u8 x[EC_PT_SZ], u8 y[EC_PT_SZ])
++					 struct tpm2_kernel_key_identity *identity)
+ {
+ 	return -EOPNOTSUPP;
+ }
+@@ -434,6 +428,14 @@ tpm2_kernel_key_verify_signature(const u8 x[EC_PT_SZ], const u8 y[EC_PT_SZ],
+ }
+ #endif
+ 
++#ifdef CONFIG_HIBERNATION_TPM_SIGNATURE
++int tpm2_hibernate_export(struct tpm_chip *chip,
++			  const u8 old_name[TPM2_NAME_SIZE]);
++void tpm2_hibernate_import(struct tpm_chip *chip);
++#else
++static inline void tpm2_hibernate_import(struct tpm_chip *chip) { }
++#endif
++
+ #ifdef CONFIG_TCG_TPM2_HMAC
+ 
+ int tpm2_start_auth_session(struct tpm_chip *chip, bool audit);
+diff --git a/include/linux/tpm_command.h b/include/linux/tpm_command.h
+index 6bbc6e3..23e988c 100644
+--- a/include/linux/tpm_command.h
++++ b/include/linux/tpm_command.h
+@@ -425,6 +425,11 @@ struct tpm_digest {
+ 	u8 digest[TPM2_MAX_DIGEST_SIZE];
+ } __packed;
+ 
++/* Fixed sizes shared by the TPM sessions and authenticated-resume handoff. */
++#define EC_PT_SZ			32
++#define TPM2_NAME_SIZE		34
++#define TPM2_MAX_CONTEXT_SIZE	4096
++
+ #define TPM_HEADER_SIZE		10
+ 
+ struct tpm_header {
+diff --git a/kernel/power/hibernate.c b/kernel/power/hibernate.c
+index 7bbef9c..6942e90 100644
+--- a/kernel/power/hibernate.c
++++ b/kernel/power/hibernate.c
+@@ -580,6 +580,7 @@ int hibernation_restore(int platform_mode)
+ 
+ 	error = snapshot_image_verify();
+ 	if (error) {
++		hibernate_tpm_clear_handoff();
+ 		pr_err("Image signature verification failed: %d\n", error);
+ 		return error;
+ 	}
+@@ -596,6 +597,8 @@ int hibernation_restore(int platform_mode)
+ 		 */
+ 		BUG_ON(!error);
+ 	}
++	/* A returning restore must never leave an authenticated handoff armed. */
++	hibernate_tpm_clear_handoff();
+ 	dpm_resume_end(PMSG_RECOVER);
+ 	console_resume_all();
+ 	pm_restore_console();
+diff --git a/kernel/power/hibernate_tpm.c b/kernel/power/hibernate_tpm.c
+index 43f8d73..669540b 100644
+--- a/kernel/power/hibernate_tpm.c
++++ b/kernel/power/hibernate_tpm.c
+@@ -19,12 +19,21 @@
+ 
+ #include <linux/efi.h>
+ #include <linux/init.h>
++#include <linux/io.h>
+ #include <linux/security.h>
+ #include <linux/tpm.h>
+ 
+ #include "power.h"
+ 
+ #define HIB_TPM_SIG_MAGIC	"LNXHSIG1"
++#define HIB_TPM_HEADER_MAGIC	"LNXHPV02"
++
++struct hib_tpm_header {
++	u8 magic[8];
++	u64 handoff_address;
++	struct tpm2_key_provenance provenance;
++	u8 null_name[TPM2_NAME_SIZE];
++};
+ 
+ /* The signature page */
+ struct hib_tpm_sig {
+@@ -36,16 +45,30 @@ struct hib_tpm_sig {
+ };
+ 
+ static_assert(sizeof(struct hib_tpm_sig) <= HIB_SIG_TRAILER_SIZE);
+-static_assert(sizeof(struct tpm2_key_provenance) <= HIB_SIG_HEADER_SIZE);
++static_assert(sizeof(struct hib_tpm_header) <= HIB_SIG_HEADER_SIZE);
+ 
+ /* The key used to sign the image being created */
+ static struct tpm2_kernel_key hib_tpm_key;
+ static bool hib_tpm_key_valid;
+ 
+ /* The public key shown to have been created by the kernel, on restore */
+-static u8 hib_tpm_x[EC_PT_SZ], hib_tpm_y[EC_PT_SZ];
++static struct tpm2_kernel_key_identity hib_tpm_identity;
++static u8 hib_tpm_null_name[TPM2_NAME_SIZE];
++static u64 hib_tpm_handoff_address;
+ static bool hib_tpm_header_ok;
+ 
++void hibernate_tpm_clear_handoff(void)
++{
++	struct linux_efi_tpm_resume *resume = efi_tpm_resume_map();
++
++	if (!resume)
++		return;
++	WRITE_ONCE(resume->ready, 0);
++	memzero_explicit(resume->old_name,
++			 sizeof(*resume) - offsetof(typeof(*resume), old_name));
++	memunmap(resume);
++}
++
+ static struct tpm_chip *hib_tpm_get_chip(void)
+ {
+ 	struct tpm_chip *chip = tpm_default_chip();
+@@ -92,18 +115,27 @@ static void hib_tpm_end(void)
+ 
+ static int hib_tpm_begin(void *data, size_t size)
+ {
+-	struct tpm2_key_provenance *prov = data;
++	struct hib_tpm_header *header = data;
+ 	struct tpm_chip *chip;
+ 	int rc;
+ 
+ 	/* the image may be read more than once */
+ 	hib_tpm_end();
++	if (size < sizeof(*header))
++		return -EINVAL;
++	memset(header, 0, sizeof(*header));
+ 
+ 	chip = hib_tpm_get_chip();
+ 	if (!chip)
+ 		return -ENODEV;
+ 
+-	rc = tpm2_kernel_key_create(chip, &hib_tpm_key, prov);
++	rc = tpm2_kernel_key_create(chip, &hib_tpm_key, &header->provenance);
++	if (!rc) {
++		memcpy(header->magic, HIB_TPM_HEADER_MAGIC, sizeof(header->magic));
++		header->handoff_address = efi_tpm_resume;
++		memcpy(header->null_name, chip->null_key_name,
++		       sizeof(header->null_name));
++	}
+ 	hib_tpm_put_chip(chip);
+ 	if (rc) {
+ 		pr_err("Failed to create image signing key: %d\n", rc);
+@@ -147,11 +179,15 @@ static int hib_tpm_sign(const u8 *digest, void *trailer, size_t size)
+ 
+ static int hib_tpm_check_header(const void *data, size_t size)
+ {
+-	const struct tpm2_key_provenance *prov = data;
++	const struct hib_tpm_header *header = data;
+ 	struct tpm_chip *chip;
+ 	int rc;
+ 
+ 	hib_tpm_header_ok = false;
++	hibernate_tpm_clear_handoff();
++	if (size < sizeof(*header) ||
++	    memcmp(header->magic, HIB_TPM_HEADER_MAGIC, sizeof(header->magic)))
++		return -EKEYREJECTED;
+ 
+ 	/* PCR 5 can only distinguish the kernel if firmware extends it */
+ 	if (!kernel_tpm_security_available) {
+@@ -178,7 +214,8 @@ static int hib_tpm_check_header(const void *data, size_t size)
+ 		return -EKEYREJECTED;
+ 	}
+ 
+-	rc = tpm2_kernel_key_verify(chip, prov, hib_tpm_x, hib_tpm_y);
++	rc = tpm2_kernel_key_verify(chip, &header->provenance,
++				   &hib_tpm_identity);
+ 	hib_tpm_put_chip(chip);
+ 	if (rc) {
+ 		pr_err("Image signing key was not created by the kernel: %d\n",
+@@ -186,6 +223,9 @@ static int hib_tpm_check_header(const void *data, size_t size)
+ 		return rc > 0 ? -EKEYREJECTED : rc;
+ 	}
+ 
++	/* Trusted only after the whole-image signature has also verified. */
++	memcpy(hib_tpm_null_name, header->null_name, sizeof(hib_tpm_null_name));
++	hib_tpm_handoff_address = header->handoff_address;
+ 	hib_tpm_header_ok = true;
+ 	return 0;
+ }
+@@ -193,6 +233,8 @@ static int hib_tpm_check_header(const void *data, size_t size)
+ static int hib_tpm_verify(const u8 *digest, const void *trailer, size_t size)
+ {
+ 	const struct hib_tpm_sig *sig = trailer;
++	struct tpm_chip *chip;
++	int rc;
+ 
+ 	if (!hib_tpm_header_ok)
+ 		return -EKEYREJECTED;
+@@ -201,12 +243,31 @@ static int hib_tpm_verify(const u8 *digest, const void *trailer, size_t size)
+ 		return -EKEYREJECTED;
+ 
+ 	/* the image must be signed with the key the kernel created */
+-	if (memcmp(sig->x, hib_tpm_x, sizeof(hib_tpm_x)) ||
+-	    memcmp(sig->y, hib_tpm_y, sizeof(hib_tpm_y)))
++	if (memcmp(sig->x, hib_tpm_identity.x, sizeof(sig->x)) ||
++	    memcmp(sig->y, hib_tpm_identity.y, sizeof(sig->y)))
+ 		return -EKEYREJECTED;
+ 
+-	return tpm2_kernel_key_verify_signature(hib_tpm_x, hib_tpm_y, digest,
+-						sig->r, sig->s);
++	rc = tpm2_kernel_key_verify_signature(hib_tpm_identity.x,
++					     hib_tpm_identity.y, digest,
++					     sig->r, sig->s);
++	if (rc)
++		return rc;
++	/* E820 equality alone does not bind an object's offset within a pool. */
++	if (hib_tpm_handoff_address != efi_tpm_resume) {
++		pr_err("TPM resume handoff table moved across firmware boots\n");
++		return -EKEYREJECTED;
++	}
++	chip = hib_tpm_get_chip();
++	if (!chip)
++		return -ENODEV;
++	/* This reserved-memory handoff survives replacement of kernel RAM. */
++	rc = tpm2_kernel_null_certify(chip, &hib_tpm_identity);
++	if (rc)
++		pr_err("Fresh TPM NULL-primary attestation failed: %d\n", rc);
++	if (!rc)
++		rc = tpm2_hibernate_export(chip, hib_tpm_null_name);
++	hib_tpm_put_chip(chip);
++	return hib_tpm_err(rc);
+ }
+ 
+ const struct hib_sig_ops hib_tpm_sig_ops = {
+@@ -226,10 +287,15 @@ const struct hib_sig_ops hib_tpm_sig_ops = {
+ bool hibernate_tpm_available(void)
+ {
+ 	struct tpm_chip *chip;
++	struct linux_efi_tpm_resume *resume;
+ 	bool tpm2;
+ 
+ 	if (!kernel_tpm_security_available)
+ 		return false;
++	resume = efi_tpm_resume_map();
++	if (!resume)
++		return false;
++	memunmap(resume);
+ 
+ 	chip = tpm_default_chip();
+ 	if (!chip)
+diff --git a/kernel/power/power.h b/kernel/power/power.h
+index 8115df3..95b111a 100644
+--- a/kernel/power/power.h
++++ b/kernel/power/power.h
+@@ -200,8 +200,10 @@ extern int snapshot_image_verify(void);
+ #ifdef CONFIG_HIBERNATION_TPM_SIGNATURE
+ extern const struct hib_sig_ops hib_tpm_sig_ops;
+ extern bool hibernate_tpm_available(void);
++extern void hibernate_tpm_clear_handoff(void);
+ #else
+ static inline bool hibernate_tpm_available(void) { return false; }
++static inline void hibernate_tpm_clear_handoff(void) { }
+ #endif
+ 
+ extern bool hibernate_acquire(void);
+-- 
+2.56.0
+

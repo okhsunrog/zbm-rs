@@ -1,4 +1,4 @@
-# Linux 7.2.9: seven TPM prerequisites, the RFC, and three compatibility fixes.
+# Linux 7.2.9: seven TPM prerequisites, the RFC, and four compatibility fixes.
 # Experimental and opt-in; see patches/hibernation-tpm-7.2.9/README.md.
 # Isolate each public patch from the surrounding flake path. A loader/UI/doc
 # update must not rebuild the unchanged kernel or invalidate signed modules.
@@ -32,4 +32,5 @@ map (entry: entry // {
   { name = "0025-tpm-preserve-7.2-header-definitions"; patch = ./patches/hibernation-tpm-7.2.9/0025-tpm-preserve-7.2-header-definitions.patch; }
   { name = "0026-efi-preserve-initrd-table-across-kexec"; patch = ./patches/hibernation-tpm-7.2.9/0026-efi-preserve-initrd-table-across-kexec.patch; }
   { name = "0027-efi-x86-preserve-hibernation-memory-topology"; patch = ./patches/hibernation-tpm-7.2.9/0027-efi-x86-preserve-hibernation-memory-topology.patch; }
+  { name = "0028-tpm-preserve-authenticated-context-across-resume"; patch = ./patches/hibernation-tpm-7.2.9/0028-tpm-preserve-authenticated-context-across-resume.patch; }
 ]

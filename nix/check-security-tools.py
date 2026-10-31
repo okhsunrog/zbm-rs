@@ -21,6 +21,7 @@ kernel = load("check-security-kernel")
 publisher = load("publish-loader")
 authorizer = load("authorize-boot")
 hibernation = load("protected-hibernation")
+resume_runtime = load("protected-hibernation-runtime")
 linux_publisher = load("authorize-linux")
 spec = importlib.util.spec_from_file_location("nixos", Path(__file__).parents[1] / "xtask/fixtures/authorize_nixos.py")
 nixos = importlib.util.module_from_spec(spec)
@@ -39,6 +40,32 @@ def record(name, mode, body=b"", links=1):
 
 
 class Boundaries(unittest.TestCase):
+    def test_runtime_store_links_are_resolved_only_in_the_guest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = root / "nix/store"
+            store.mkdir(parents=True)
+            artifact = store / "signed-kernel"
+            artifact.write_bytes(b"guest-only")
+            (store / "absolute").symlink_to("/nix/store/signed-kernel")
+            (store / "relative").symlink_to("signed-kernel")
+            (store / "loop").symlink_to("loop")
+            (store / "escape").symlink_to("../../../outside")
+            (store / "host-only").symlink_to(str(Path(__file__).resolve()))
+            (root / "etc").mkdir()
+            (root / "etc/foreign").write_bytes(b"not-a-store-artifact")
+            (store / "foreign").symlink_to("/etc/foreign")
+            for name in ("absolute", "relative"):
+                self.assertEqual(resume_runtime.guest_store_file(root, f"/nix/store/{name}"), artifact)
+            for name in ("loop", "escape", "host-only", "missing", "foreign"):
+                with self.assertRaises((ValueError, OSError)):
+                    resume_runtime.guest_store_file(root, f"/nix/store/{name}")
+
+    def test_protected_resume_requires_the_authenticated_context_backend(self):
+        with self.assertRaisesRegex(ValueError, "authenticated TPM context"):
+            hibernation.validate({"version": 1, "record_protocol": 2,
+                                  "backend": "linux-tpm-signature-v1"}, None, None, [])
+
     def test_protected_resume_policy_normalizes_only_equivalent_identities(self):
         policy = {"device": {"type": "luks2", "partuuid": "12345678-1234-1234-1234-123456789abc",
                             "luks_uuid": "ca55a30a-636e-4e69-9e68-bb36bf380408", "mapping": "resume-swap"},

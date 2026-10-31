@@ -13,7 +13,8 @@ microcode = out / "microcode.cpio"
 if microcode.exists():
     assert microcode.read_bytes()[:6] == b"070701", "Microcode requires an uncompressed newc archive"
     sizes["microcode"] = microcode.stat().st_size
-budget = policy["test" if test == "yes" else profile]
+protected = sys.argv[8] == "yes"
+budget = policy[("protected-test" if protected else "test") if test == "yes" else profile]
 assert sizes["efi"] <= budget["maxEfiBytes"], f"EFI size budget exceeded: {sizes}"
 if budget["baselineEfiBytes"] is not None:
     allowed = budget["baselineEfiBytes"] * (100 + policy["allowedGrowthPercent"]) // 100 + policy["growthAllowanceBytes"]

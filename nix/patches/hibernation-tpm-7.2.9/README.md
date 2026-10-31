@@ -7,11 +7,11 @@ use Sean Rhodes's userspace encrypted-snapshot series.
 
 ## Status
 
-As of 30 October 2026, the full Linux 7.2.9 kernel and matching ZFS 2.4.4 build
-with patches 0001–0027 passed. The build uses a disposable public VM certificate and retains
-forced integrity Lockdown, kexec signatures and module signatures. VM runtime
-validation remains in progress; compilation is not a working-hibernation or
-security acceptance claim. The port is not installed on the physical host. No
+As of 31 October 2026, the full Linux 7.2.9 kernel and matching ZFS 2.4.4 build
+with patches 0001–0028 passed. The build uses a disposable public VM certificate and retains
+forced integrity Lockdown, kexec signatures and module signatures. Authenticated
+RAM restoration, subsequent hibernation and the complete enforced Secure Boot
+chain passed in disposable VMs. The port is not installed on the physical host. No
 upstream merge or release date is established by the RFC.
 
 The CRB/SHA-256-only and TIS/SHA-1+SHA-256 EFI/kexec probes passed: the NV index
@@ -32,23 +32,40 @@ and does not relax the hibernation E820 check. All 27 patches apply cleanly and
 match the audited source tree; the dedicated compilation preflight passed.
 The complete 27-patch kernel/ZFS rebuild passed. The CRB/SHA-256-only probe then
 passed both exact firmware-E820 equality across two cold boots and the real kexec
-handoff with unchanged PCR5 and protected NV state. Authenticated RAM retesting
-is in progress.
+handoff with unchanged PCR5 and protected NV state. One authenticated RAM restore
+then passed, retaining the boot ID, RAM-only data, healthy ZFS and the target
+kexec prohibition. The second hibernation failed because restored RAM retained
+a stale NULL-primary context from the previous TPM boot. Patch 0028 addresses
+that repeat-cycle defect; its targeted compilation and full kernel/ZFS build
+passed. The CRB/SHA-256 probe also passed exact E820 and TPM handoff-address
+equality across firmware boots, PCR5/NV protection and the real kexec transition.
+With patch 0028, CRB/SHA-256 and TIS/dual-bank VMs restored the original kernel
+boot ID and RAM-only state, retained healthy ZFS and created the next signed
+hibernation image. The complete OVMF Secure Boot → enforced zbm-rs → PE/IMA/CMS
+authorized NixOS chain also restored RAM and created the next image. Its UI test
+verified F10 preserving the entire swap disk, cancellation confirmation/Esc,
+discard-only staying in the menu and protected cold boot after cancellation.
+Missing capabilities and a mismatched resume policy were refused on cold boots.
+
+Separate negative-only runs on the 27-patch kernel rejected a modified ECDSA
+signature and a cleared guest TPM before ZFS import. After Linux consumed the
+image signature, boot-record v2 still required explicit cancellation on the
+following boot. These checks deliberately skip the initial restore to isolate
+failure handling; they do not establish repeat-cycle acceptance.
 
 The existing, unpatched 7.2.9 kernel was tested in a disposable VM: forced
 integrity Lockdown prevents hibernation and the resume guard leaves the swap
 image intact. The separate LUKS2/ZFS native-resume VM test passed with an
 ordinary kernel; it does not validate this new TPM signature implementation.
 
-Still required for this port:
+Patch 0028 also rejected modified signature trailers, a changed RAM-payload byte
+with its original signature trailer intact, and a cleared guest TPM before pool
+import. The following boot still required explicit cancellation after a consumed
+image failed verification. These tests retain an initial successful restoration;
+they are not the older negative-only diagnostic runs.
 
-- EFI/TPM provisioning and an actual signed RAM-image save/restore in a VM.
-- Verification across the loader's kexec transition, including EFI TPM state.
-- Rejection of tampered images and unavailable/untrusted TPM provenance before
-  any ZFS import or filesystem mount.
-- Integration with the loader's enforced-security resume policy, which still
-  rejects resume rather than assuming LUKS authenticates a RAM image.
-- Physical hardware acceptance after the VM checks pass.
+Physical hardware acceptance and deployment with the owner's matching public
+trust inputs remain required. LUKS unlock never substitutes for RAM authentication.
 
 ## Patch order and provenance
 
@@ -82,11 +99,24 @@ table allocation, the final memory-map buffer occupied a separate, moving ACPI
 range in the failing VM. No CRC bypass, fixed-address workaround or relaxed
 memory-map option is used.
 
+`0028` is a local authenticated-context extension, not part of Garrett's RFC.
+It transfers the current NULL-primary context through reserved EFI ACPI memory
+after full RAM-image verification. The signed image binds the original NULL
+name and exact handoff address. A fresh nonce challenge to the original
+provenance AK authenticates the audit transcript for NULL CreatePrimary before
+the handoff becomes ready. TPM resume checks the old identity, consumes the
+context once and wipes it; abandoned handoffs are cleared. It does not disable
+in-session TPM reset detection. The format is `LNXHPV02` and the build contract
+requires backend `linux-tpm-signature-v2`, context-handoff protocol 1. See
+[the trust boundary](../../../docs/hibernation-design.md#kernel-roles-and-authenticated-memory).
+
 The corrected series passes the dedicated TPM/EFI/power compilation preflight,
 including the EFI stub, TPM kernel-key implementation and RAM-signature backend
 (124 objects with integrity Lockdown and forced signatures enabled). The full
-kernel/module build and matching ZFS build passed through patch 0026; the full
-0027 build is pending. Runtime validation is a separate gate. Patch inputs are
+kernel/module build and matching ZFS build passed through patch 0028. All 7409
+modules in the public VM artifact were signed and independently verified, as
+was its PE kernel signature.
+Runtime validation is a separate gate. Patch inputs are
 individually content-addressed, so changes elsewhere in the flake do not rebuild
 an unchanged protected kernel or invalidate its signed modules.
 
@@ -132,18 +162,25 @@ other swtpm banks, because PCR_Allocate preserves banks omitted from the request
 the tests assert the actual kernel-exposed allocation, not just the requested
 setting. Allocation was checked across a disposable TPM power cycle.
 
-The RAM fixture also accepts `negativeCase = "signature"` (default),
-`"tpm-reset"`, or `"tpm-unavailable"`. The reset case clears only the disposable
+The RAM fixture also accepts `negativeCase = "signature"` (default), `"payload"`,
+`"tpm-reset"`, or `"tpm-unavailable"`. The payload case changes a copied RAM byte
+without altering its valid signature trailer. The reset case clears only the disposable
 guest TPM. The unavailable case uses a fixture-only appended cpio flag to unbind
 the guest TPM driver before resume; after rejection it restores the exact
 original initramfs and retries the still-intact image. This deliberately tests
 kernel mechanics without IMA, and is not an authorized enforced-loader handoff.
 Consumed-image failures must remain protected across the following power cycle
-through the boot-record v2 attempt flag. These new negative variants have not
-yet passed runtime acceptance.
+through the boot-record v2 attempt flag. Signature, payload and reset runs passed
+with patch 0028 after successful RAM restoration and the next hibernation.
+The CRB/SHA-256 unavailable-TPM run passed three restorations of the same original
+RAM session: TPM absence stopped resume before pool import without consuming the
+image, the exact clean initramfs/TPM allowed retry, and the next hibernation and
+third restoration succeeded. The finish hook cleared the durable attempt state.
 `negativeCase = "cold-unavailable"` separately checks a verified empty swap:
 repair cold-boot and paging must work with no TPM, while hibernation remains
-unavailable and integrity Lockdown remains active.
+unavailable and integrity Lockdown remains active. This run passed. The explicit repair variant
+uses `systemd.tpm2_wait=0` to prevent a later firmware/device synchronization wait
+after the deliberately unbound TPM; native image authentication is unchanged.
 
 ## Security assumptions
 
@@ -157,13 +194,15 @@ Image authentication does not establish that a ZFS pool has remained unchanged
 while the system was asleep. The existing resume-before-import ordering and
 explicit saved-session cancellation remain necessary.
 
-### kexec is an unresolved acceptance condition
+### Supported kexec path and remaining acceptance
 
 The target EFI stub does not execute during `kexec_file_load`. On x86, the
 kexec boot parameters can carry the first kernel's EFI configuration tables;
 the RFC's PCR5 table is allocated in ACPI-reclaim memory. This makes inheritance
-from a patched loader kernel plausible, but does not establish that the table
-survives our exact boot path or that the trust argument remains valid.
+from a patched loader kernel possible. Disposable CRB and TIS probes verified
+the supported handoff, PCR5 inheritance and NV protection. The separate complete
+signed loader chain and authenticated RAM restoration also passed; these are
+disposable VM results and do not establish physical laptop acceptance.
 
 Both the loader and hibernating target need the kernel-owned NV-index
 protection. A kernel signature alone does not establish that capability.
@@ -180,5 +219,5 @@ and rescue omit it, retaining the ability to hand off to the target.
 Acceptance covers the actual EFI-to-patched-loader-to-patched-target path,
 TPM evidence/NV protection across that handoff, authenticated RAM restoration,
 and rejection of tampered images or invalid/unavailable TPM evidence. Do not
-bypass the PCR5 check or remove enforced-mode resume rejection to make a VM
-test pass. See the full [agreed architecture](../../../docs/hibernation-design.md#agreed-protected-boot-architecture-not-yet-implemented).
+bypass the PCR5 check or treat test-only policy enablement as deployment
+acceptance. See the full [agreed architecture](../../../docs/hibernation-design.md#agreed-protected-boot-architecture).
