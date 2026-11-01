@@ -141,7 +141,8 @@ replaces shell recovery, including last-ditch errors, with restart (only after
 successful early security setup), reboot and poweroff. A failed setup does not
 enter an automatic reboot loop. The signed OVMF synthetic-handoff scenario
 checks these paths. Menu/broker NixOS ZFS-root and trusted snapshot-clone tests also
-pass; generic-Linux and physical acceptance remain outstanding.
+pass. Later encrypted Arch and physical Framework results are recorded in
+[verification](verification.md).
 
 ## Private lifecycle protocol
 

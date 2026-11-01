@@ -5,7 +5,9 @@ installed images nor host sleep settings. It does not implement ZFS hibernation
 cookies or prove that a pool was unchanged while the machine was off. The
 experimental kernel backend authenticates RAM separately. Authenticated RAM
 restoration, subsequent hibernation and the complete protected chain passed in
-disposable VMs; physical acceptance remains pending.
+disposable VMs. Secure Boot loading and repeated authenticated hibernation/resume
+also passed on the owner's Framework Laptop 13 (Intel Core Ultra Series 1), with
+encrypted ZFS and LUKS2 swap; see the [physical results](verification.md#physical-framework-validation-2026-11-01).
 It must not be advertised as making ZFS hibernation safe.
 
 ## Existing flow
@@ -284,8 +286,8 @@ mounted root dataset and actual running arguments against the published plan.
 
 The operator must explicitly opt into NixOS's unsafeAllowHibernation policy.
 Enforced resume requires the authenticated backend and signed capability
-described below. Its disposable VM acceptance has passed; physical deployment
-remains a separate gate. ESP diagnostics must be
+described below. Its disposable VM acceptance and the recorded Framework
+deployment checks have passed. ESP diagnostics must be
 disabled until their writes can be coordinated with saved filesystem state.
 These restrictions are not waived by the UI.
 
@@ -438,8 +440,10 @@ whole-disk preservation check also passed. Integration into the independent
 candidate/known-good deployment is implemented and passed the disposable FAT
 publication test. The host configuration source pins this guarded baseline;
 its exact production rescue artifact also passed firmware boot, menu, F2 and
-poweroff checks in a disposable VM. Host installation and physical acceptance
-remain pending. An older pinned
+poweroff checks in a disposable VM. On the owner's Framework, firmware rejected
+the unsigned rescue with Secure Boot enabled; with it disabled, rescue booted
+and loaded the selected NixOS specialisation. Saved-session cancellation itself
+retains the VM coverage described above. An older pinned
 image without the guard must not be presented as satisfying this contract.
 
 See [independent rescue publication](nixos-deployment.md#optional-efi-publication-and-independent-rescue)
@@ -494,4 +498,5 @@ enables firmware Secure Boot or the loader's enforced BootAuthorization/IMA
 handoff, so those remain separate tests. Signing keys never enter the guest or
 Nix derivations. The complete chain has its own runtime-only
 `lib.mkProtectedHibernationDriver`; see [the reproduction workflow](security-testing.md#authenticated-hibernation-chain)
-and the patch-set README for recorded results and remaining physical acceptance.
+and the patch-set README for recorded VM results, and
+[verification](verification.md) for the physical deployment observations.

@@ -14,7 +14,7 @@ are separate observations.
 | Nix images | Kernel/ZFS matching, staged ELF dependencies, public trust inputs and size limits. |
 | Generic Linux | Arch ZFS-root boot and snapshot, rollback, clone and promotion scenarios. |
 | Encrypted Arch | Hidden passphrase input, cancellation/wrong-key refusal, ordinary and writable snapshot-clone boot; also through enforced OVMF Secure Boot, CMS/IMA and `zfs=` root authorization. |
-| Framework image integration | DMI-scoped recovery module built for Linux 7.2.9, immutable module options and required early loading checked in staged images. Physical deployment is not established. |
+| Framework image integration | DMI-scoped recovery module built for Linux 7.2.9, immutable module options and required early loading checked in staged images. The owner also booted the deployed loader and NixOS on a physical Framework Laptop 13; see the physical results below. |
 | NixOS | Exact-generation ZFS-root boot and writable snapshot-clone boot, preserving the source dataset and snapshot. |
 | NixOS specialisations | Menu selection checks the exact child closure; native installation prepares signed parent/child inputs, mounts distinct home datasets, and restores prepared links after a missing child secret. This does not establish enforced Secure Boot for the variant. |
 | Protected loader | OVMF Secure Boot; forced kernel/module signatures, lockdown, signed IMA policy, sealed boot inputs and an unprivileged UI. |
@@ -24,17 +24,35 @@ are separate observations.
 | Experimental authenticated hibernation | Linux 7.2.9 through patch 0028 restored RAM and created the next image with CRB/SHA-256 and TIS/dual-bank TPMs, LUKS2 swap and ZFS. Signature-trailer/payload tampering and TPM clear were rejected before pool import; consumed attempts remained protected on the next boot. The complete OVMF Secure Boot/PE/IMA/CMS enforced loader-to-target chain restored RAM and created the next image. |
 | TPM interruption and repeat cycles | CRB/SHA-256 restored the same RAM session three times. Unavailable TPM stopped resume before pool import without consuming the image; restoring TPM and the clean initramfs allowed retry and another complete cycle, retaining the original boot ID, RAM data and target kexec prohibition. |
 | Compressed authenticated images | CRB/SHA-256 passed three restorations with default compression and TPM-absence/retry. The separate full Secure Boot/PE/IMA/CMS chain passed all seven checks with compression too. Actual compression/decompression messages were asserted, rather than inferred from configuration. |
-| Suspend-then-hibernate | Encrypted ZFS/LUKS2 fixture passed preparation refusal, byte-preserving activation refusal for pending images, early wake, failed-hibernation suspend fallback and two successive timed RAM restorations. The Linux 7.2.9 CRB/SHA-256 variant with runtime systemd 262.1 and compression also passed TPM absence/refusal/retry and a subsequent direct cycle (four authenticated restorations total). These use real s2idle with injected ACPI power-button wakes; automatic RTC/battery wake is a separate physical gate. |
+| Suspend-then-hibernate | Encrypted ZFS/LUKS2 fixture passed preparation refusal, byte-preserving activation refusal for pending images, early wake, failed-hibernation suspend fallback and two successive timed RAM restorations. The Linux 7.2.9 CRB/SHA-256 variant with runtime systemd 262.1 and compression also passed TPM absence/refusal/retry and a subsequent direct cycle (four authenticated restorations total). These use real s2idle with injected ACPI power-button wakes. |
 | Empty-swap repair without TPM | Explicit repair boot with `systemd.tpm2_wait=0` passed: healthy ZFS and ordinary paging, no hibernation, integrity Lockdown retained. This parameter does not bypass the native image gate. |
-| Cancellation-only rescue | Verified cancellation/UI scenarios and FAT candidate/known-good publication passed. The exact production EFI artifact passed OVMF boot, menu/F2 and F10; production disk access and physical boot remain separate gates. |
+| Cancellation-only rescue | Verified cancellation/UI scenarios and FAT candidate/known-good publication passed. The exact production EFI artifact passed OVMF boot, menu/F2 and F10. On the owner's Framework, firmware rejected unsigned rescue with Secure Boot enabled; with it disabled, rescue booted and loaded NixOS. |
 | Recovery and lifecycle | Manager faults, console restoration, process reaping, restart, protected recovery and clean poweroff. |
 
-These are isolated VM and source checks. Physical Framework deployment, target v262 signed NvPCR
-integration and across-kexec PCR15 log transport remain open gates.
+The table records source/VM coverage and the specific physical observations below.
+Target v262 signed NvPCR integration and across-kexec PCR15 log transport remain
+open gates.
 The ordinary TPM rows describe the userspace measurement policy. The opt-in
 hibernation kernel separately provisions and protects its RFC-specific NV index;
-it has no normal-deployment acceptance claim. See
+its physical validation applies to the explicit experimental deployment below. See
 [hibernation architecture and validation](hibernation-design.md).
+
+## Physical Framework validation (2026-11-01)
+
+The owner's Framework Laptop 13 (Intel Core Ultra Series 1) runs NixOS with
+encrypted ZFS, dedicated LUKS2 swap and the patched Linux 7.2.9 kernel.
+
+- The signed enforced zbm-rs image booted with firmware Secure Boot enabled and
+  loaded the selected NixOS specialisation.
+- Firmware rejected the unsigned rescue with Secure Boot enabled. After the owner
+  disabled Secure Boot, rescue booted and loaded the Niri specialisation.
+- Repeated direct hibernation/resume cycles succeeded, requested through
+  `systemctl hibernate` and the desktop shell. The kernel reported
+  `Restored authenticated NULL-primary context` and
+  `Hibernation image restored successfully`; ZFS reported healthy pools afterward.
+
+These results describe the installed Framework deployment. The VM negative tests
+and the broader acceptance matrix below retain their separately stated scope.
 
 ## Reproduction and records
 

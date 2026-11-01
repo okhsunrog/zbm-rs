@@ -7,12 +7,15 @@ use Sean Rhodes's userspace encrypted-snapshot series.
 
 ## Status
 
-As of 31 October 2026, the full Linux 7.2.9 kernel and matching ZFS 2.4.4 build
-with patches 0001–0028 passed. The build uses a disposable public VM certificate and retains
+As of 1 November 2026, the full Linux 7.2.9 kernel and matching ZFS 2.4.4 build
+with patches 0001–0028 passed. The VM build uses a disposable public certificate and retains
 forced integrity Lockdown, kexec signatures and module signatures. Authenticated
 RAM restoration, subsequent hibernation and the complete enforced Secure Boot
-chain passed in disposable VMs. The port is not installed on the physical host. No
-upstream merge or release date is established by the RFC.
+chain passed in disposable VMs. The owner's signed build is also installed on a
+physical Framework Laptop 13, where repeated authenticated hibernation/resume
+cycles passed with Secure Boot enabled. See the
+[physical validation results](../../../docs/verification.md#physical-framework-validation-2026-11-01).
+No upstream merge or release date is established by the RFC.
 
 The CRB/SHA-256-only and TIS/SHA-1+SHA-256 EFI/kexec probes passed: the NV index
 remained protected, PCR5 survived handoff, and target kexec loads were prohibited.
@@ -64,8 +67,8 @@ import. The following boot still required explicit cancellation after a consumed
 image failed verification. These tests retain an initial successful restoration;
 they are not the older negative-only diagnostic runs.
 
-Physical hardware acceptance and deployment with the owner's matching public
-trust inputs remain required. LUKS unlock never substitutes for RAM authentication.
+Other deployments still require matching public trust inputs and their own
+hardware validation. LUKS unlock never substitutes for RAM authentication.
 
 ## Patch order and provenance
 

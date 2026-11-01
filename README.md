@@ -1,6 +1,6 @@
 <h1 align="center">zbm-rs</h1>
 
-> A Rust ZFS boot manager with Secure Boot, native NixOS generations and snapshot boot.
+> A Rust ZFS boot manager with Secure Boot, native NixOS generations, snapshot boot and experimental TPM-authenticated hibernation/resume.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/okhsunrog/zbm-rs/check.yml?label=ci)](https://github.com/okhsunrog/zbm-rs/actions/workflows/check.yml) [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue)](#license) [![Status](https://img.shields.io/badge/status-early%20development-lightgrey)](docs/roadmap.md)
 
@@ -15,10 +15,13 @@
 ---
 
 > [!NOTE]
-> Enforced NixOS and passphrase-encrypted Arch root/snapshot-clone boot have passed OVMF Secure Boot tests.
-> Physical Secure Boot acceptance is still pending. Passphrase-encrypted Arch
-> root and snapshot-clone boot have disposable VM coverage. Default images are unsigned and use
-> `security.mode = "off"`. See [tested scope](docs/verification.md).
+> Secure Boot loading and authenticated hibernation/resume have been tested on a
+> physical Framework Laptop 13 (Intel Core Ultra Series 1) running NixOS with
+> encrypted ZFS and LUKS2 swap. Firmware rejected the unsigned rescue with Secure
+> Boot enabled; rescue booted with it disabled. Enforced NixOS and encrypted Arch
+> root/snapshot-clone boot also have OVMF coverage. Default images are unsigned,
+> use `security.mode = "off"` and leave hibernation disabled.
+> See [tested scope and physical results](docs/verification.md).
 
 ## Overview
 
@@ -36,6 +39,11 @@ Bootspec generations and snapshots from one keyboard-driven interface.
   supplied specialisation link or retained system profiles, then validates the
   exact Bootspec relationship before publishing. An unregistered standalone
   store closure without a discoverable parent is published on its own.
+- **Experimental hibernation/resume.** Return to the exact saved NixOS generation
+  and specialisation, with plain or LUKS2 dedicated swap. The UI identifies a
+  pending session and requires confirmed, verified cancellation before conflicting
+  boot or pool operations. An optional patched-kernel backend authenticates RAM
+  with TPM under Secure Boot and integrity Lockdown.
 - **Writable snapshot boot.** Prepare an owned clone without rolling back the
   source dataset. Ordinary mode also supports confirmed rollback, persistent
   clones and promotion.
@@ -78,6 +86,31 @@ successful input loading. The event records preparation, not successful OS
 execution. SRK/NvPCR setup and OS phase measurements belong to the selected OS.
 TPM-based disk unlock, remote attestation, rollback resistance and PCR15 log transport into
 the selected OS are not implemented. See [TPM ownership and evidence](docs/tpm.md).
+
+## Hibernation and resume
+
+Opt-in NixOS integration records the running target before hibernation and
+restores RAM in the target initramfs before ZFS pool imports or persistent
+filesystem mounts. A recognized saved session takes precedence over the normal
+default generation or preferred specialisation. Loader inspection uses read-only
+pool imports while that session exists.
+
+F2 offers **Discard saved session (stay in menu)** and **Cold boot selected system
+(discard saved session)**. Selecting another target or performing a conflicting
+pool operation also requires confirmation and verified image invalidation.
+Browsing and powering off preserve the session. Independent rescue can cancel a
+saved session but never resume it.
+
+Dedicated plain and LUKS2 GPT swap partitions are supported. Enforced resume under
+Secure Boot and integrity Lockdown requires the experimental TPM-authenticated
+kernel backend and matching signed boot policy. This backend is separate from
+PCR15 boot measurements. RAM authentication does not prove that a ZFS pool was
+unchanged while hibernated, so the integration remains experimental and disabled
+by default.
+
+See the [hibernation design and NixOS configuration](docs/hibernation-design.md),
+[kernel patches](nix/patches/hibernation-tpm-7.2.9/README.md) and
+[verification results](docs/verification.md).
 
 ## Relationship to ZFSBootMenu
 
@@ -151,6 +184,7 @@ as the installed OS; verify the active revision in the next physical boot log.
 
 - [Secure Boot design](docs/secure-boot-model.md) and [owner signing](docs/security-testing.md)
 - [TPM measurements](docs/tpm.md)
+- [Hibernation, resume and saved-session cancellation](docs/hibernation-design.md)
 - [Boot environments, snapshots and controls](docs/usage.md)
 - [Building](docs/build.md) and [configuration](docs/configuration.md)
 - [Arch and Framework deployment](docs/arch-deployment.md)
