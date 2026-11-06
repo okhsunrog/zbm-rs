@@ -2,19 +2,31 @@
 use std::{env, fs, io};
 use zbm_core::{
     boot::BootPlan,
-    resume::{device::Device, linux::Swap},
+    resume::{
+        device::Device,
+        linux::{BootRecord, Swap},
+    },
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if args.len() < 2 {
         return Err(io::Error::other(
-            "usage: resume-device-probe SPEC_JSON status|record|verify|cancel|restore [ARG]",
+            "usage: resume-device-probe SPEC_JSON status|record|record-live|finish|arm|verify|cancel|restore [ARG]",
         )
         .into());
     }
     let device: Device = serde_json::from_slice(&fs::read(&args[0])?)?;
-    let write = matches!(args[1].as_str(), "record" | "cancel");
+    if args[1] == "record-live" && args.len() == 3 {
+        let plan: BootPlan = serde_json::from_slice(&fs::read(&args[2])?)?;
+        BootRecord::open_device(&device)?.record(42, &plan)?;
+        return Ok(());
+    }
+    if args[1] == "finish" && args.len() == 2 {
+        BootRecord::open_device(&device)?.finish_attempt()?;
+        return Ok(());
+    }
+    let write = matches!(args[1].as_str(), "record" | "cancel" | "arm");
     let swap = Swap::open_device(&device, write)?;
     match args[1].as_str() {
         "status" if args.len() == 2 => println!("{}", serde_json::to_string(&swap.status()?)?),
@@ -27,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         "cancel" if args.len() == 3 => swap.cancel(&args[2])?,
+        "arm" if args.len() == 3 => swap.arm_attempt(&args[2])?,
         "restore" if args.len() == 2 => swap.restore()?,
         _ => return Err(io::Error::other("Invalid probe operation").into()),
     }

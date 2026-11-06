@@ -84,6 +84,16 @@ impl Device {
     }
 
     pub(crate) fn open(&self, write: bool) -> io::Result<File> {
+        self.open_with_flags(write, if write { libc::O_EXCL } else { 0 })
+    }
+
+    /// The runtime boot-record writer cannot claim kernel-active swap. Keep
+    /// this separate from the exclusive image/cancellation access path.
+    pub(crate) fn open_boot_record(&self) -> io::Result<File> {
+        self.open_with_flags(true, libc::O_DIRECT)
+    }
+
+    fn open_with_flags(&self, write: bool, flags: libc::c_int) -> io::Result<File> {
         self.validate()?;
         let partuuid = match self {
             Self::Partition { partuuid } | Self::Luks2 { partuuid, .. } => partuuid,
@@ -102,7 +112,7 @@ impl Device {
         let file = OpenOptions::new()
             .read(true)
             .write(write)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | if write { libc::O_EXCL } else { 0 })
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | flags)
             .open(&path)?;
         let metadata = file.metadata()?;
         if !metadata.file_type().is_block_device() {

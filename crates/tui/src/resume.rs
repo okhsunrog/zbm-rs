@@ -253,7 +253,7 @@ pub fn utility(args: &[std::ffi::OsString]) -> Result<bool> {
             .output()?;
         anyhow::ensure!(output.status.success(), "Cannot read the running pool GUID");
         let guid = std::str::from_utf8(&output.stdout)?.trim().parse()?;
-        zbm_core::resume::linux::Swap::open_device(&device, true)?.record(guid, &plan)?;
+        zbm_core::resume::linux::BootRecord::open_device(&device)?.record(guid, &plan)?;
         return Ok(true);
     }
     if args.first().is_some_and(|arg| {
@@ -297,11 +297,13 @@ pub fn utility(args: &[std::ffi::OsString]) -> Result<bool> {
                     .into(),
             }
         };
-        let swap = zbm_core::resume::linux::Swap::open_device(&device, recording || finishing)?;
+        if finishing {
+            zbm_core::resume::linux::BootRecord::open_device(&device)?.finish_attempt()?;
+            return Ok(true);
+        }
+        let swap = zbm_core::resume::linux::Swap::open_device(&device, recording)?;
         if activating {
             swap.activate()?;
-        } else if finishing {
-            swap.finish_attempt()?;
         } else if recording {
             use std::io::Read;
             let guid: u64 = args[2]

@@ -161,7 +161,7 @@ let
         };
         fileSystems."/" = { device = "testpool/root"; fsType = "zfs"; options = [ "zfsutil" ]; };
         swapDevices = [{ device = "/dev/mapper/resume-swap"; }];
-        environment.systemPackages = [ pkgs.kexec-tools pkgs.cryptsetup pkgs.lvm2 loader ]
+        environment.systemPackages = [ pkgs.kexec-tools pkgs.cryptsetup pkgs.lvm2 pkgs.uv pkgs.python3 loader ]
           ++ pkgs.lib.optional authenticated pkgs.tpm2-tools;
         environment.etc."zbm-rs/test-resume-policy.json".source = resumeConfig;
         system.stateVersion = "26.05";
@@ -302,8 +302,12 @@ assert tpmBanks != [] && pkgs.lib.unique tpmBanks == tpmBanks
     machine.succeed("printf preserved-in-ram > /run/resume-proof; echo 67108864 > /sys/power/image_size")
     status_command = "${loader}/bin/zbm-rs --resume-status-config ${resumeConfig}"
     record_command = "${targetConfig.systemd.services.systemd-hibernate.preStart}"
+    finish_command = "${targetConfig.systemd.services.systemd-hibernate.postStop}"
     activate_command = "${loader}/bin/zbm-rs --resume-activate-config ${resumeConfig}"
     ${pkgs.lib.optionalString composite (builtins.readFile ./check-suspend-then-hibernate.py)}
+    pressure_program_path = "${./boot-record-pressure.py}"
+    python_command = "${pkgs.python3}/bin/python3"
+    ${builtins.readFile ./check-boot-record-pressure.py}
     machine.execute("systemctl --no-block ${sleepOperation}", check_return=False)
     ${pkgs.lib.optionalString composite "wake_from_suspend(8)"}
     machine.wait_for_shutdown(timeout=datetime.timedelta(seconds=180))
@@ -335,7 +339,7 @@ assert tpmBanks != [] && pkgs.lib.unique tpmBanks == tpmBanks
     assert json.loads(machine.succeed("${loader}/bin/zbm-rs --resume-status-config ${resumeConfig}"))["state"] == "inactive"
     # The restored kernel may have older block-cache pages. Confirm the cleared
     # attempt is actually on disk, rather than accepting a cached header alone.
-    machine.succeed("dd if=/dev/mapper/resume-swap of=/run/resume-header-direct bs=4096 count=1 iflag=direct status=none; dd if=/dev/mapper/resume-swap of=/run/resume-header-cached bs=4096 count=1 status=none; cmp /run/resume-header-direct /run/resume-header-cached")
+    check_live_pressure()
     check_target_kexec_disabled()
     machine.succeed("test $(cat /run/resume-proof) = preserved-in-ram; test $(findmnt -n -o SOURCE /) = testpool/root; zpool status -x | grep -q 'all pools are healthy'")
     machine.succeed("journalctl -b --no-pager | grep -E 'hibernation (entry|exit)' ")
@@ -357,6 +361,7 @@ assert tpmBanks != [] && pkgs.lib.unique tpmBanks == tpmBanks
     ''}
     machine.wait_for_unit("multi-user.target")
     finished()
+    check_live_pressure()
     ''}
     ''}
     ${pkgs.lib.optionalString authenticated ''

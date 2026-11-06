@@ -7,9 +7,12 @@ use crate::boot::BootPlan;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{self, Read},
-    os::{fd::AsRawFd, unix::fs::FileExt},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{FileExt, FileTypeExt, MetadataExt, OpenOptionsExt},
+    },
     path::Path,
 };
 
@@ -87,7 +90,126 @@ pub fn verify_running_cmdline(expected: &[String]) -> io::Result<()> {
 
 pub struct Swap {
     file: File,
+    io: HeaderIo,
 }
+
+enum HeaderIo {
+    Buffered,
+    Direct { write_size: usize },
+}
+
+#[repr(align(4096))]
+struct AlignedHeader([u8; PAGE]);
+
+/// Restricted runtime access to the bootloader-owned first 1024 bytes. This
+/// type deliberately exposes neither image cancellation nor resume/activation.
+/// The snapshot lease excludes native hibernation while the header is accessed;
+/// all ZBM access also shares the same flock. No snapshot is created or restored.
+pub struct BootRecord {
+    swap: Swap,
+    _snapshot: File,
+}
+
+impl BootRecord {
+    pub fn open_device(device: &super::device::Device) -> io::Result<Self> {
+        check_page_size()?;
+        let file = device.open_boot_record()?;
+        lock_header(&file, true)?;
+        let mut sector: libc::c_int = 0;
+        // BLKSSZGET: the logical sector constrains direct I/O, including on
+        // dm-crypt devices. Do not silently fall back to cached header reads.
+        if unsafe { libc::ioctl(file.as_raw_fd(), 0x1268, &mut sector) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let write_size = boot_record_write_size(sector)?;
+        let snapshot = lease_boot_record(&file)?;
+        Ok(Self {
+            swap: Swap {
+                file,
+                io: HeaderIo::Direct { write_size },
+            },
+            _snapshot: snapshot,
+        })
+    }
+
+    pub fn record(&self, pool_guid: u64, plan: &BootPlan) -> io::Result<()> {
+        self.swap.record(pool_guid, plan)
+    }
+
+    pub fn finish_attempt(&self) -> io::Result<()> {
+        self.swap.finish_attempt()
+    }
+}
+
+fn lease_boot_record(file: &File) -> io::Result<File> {
+    // Linux rejects writes to active swap unless a snapshot client has selected
+    // that device. Holding /dev/snapshot also owns hibernate_acquire(), excluding
+    // native image/header updates, including root's direct /sys/power/state use.
+    // Open read-only: no restore bitmaps, freeze or image operations are needed.
+    let snapshot = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open("/dev/snapshot")?;
+    let metadata = snapshot.metadata()?;
+    if !metadata.file_type().is_char_device() || metadata.rdev() != libc::makedev(10, 231) {
+        return Err(error("Unexpected snapshot device identity"));
+    }
+    let dev = file.metadata()?.rdev();
+    let (major, minor) = (libc::major(dev), libc::minor(dev));
+    if major >= 1 << 12 || minor >= 1 << 20 {
+        return Err(error(
+            "Resume device cannot be encoded for the snapshot API",
+        ));
+    }
+    // Packed struct resume_swap_area: signed 64-bit page offset, new_encode_dev.
+    let mut area = [0_u8; 12];
+    let encoded = (minor & 0xff) | (major << 8) | ((minor & !0xff) << 12);
+    area[8..].copy_from_slice(&encoded.to_ne_bytes());
+    if unsafe {
+        libc::ioctl(
+            snapshot.as_raw_fd(),
+            libc::_IOW::<[u8; 12]>(b'3'.into(), 13),
+            area.as_ptr(),
+        )
+    } != 0
+    {
+        let failure = io::Error::last_os_error();
+        // Inactive swap needs no write exemption. Retain the lease so it cannot
+        // become a native image while updating it. All other errors are fatal.
+        if failure.raw_os_error() != Some(libc::ENODEV) {
+            return Err(failure);
+        }
+    }
+    Ok(snapshot)
+}
+
+fn boot_record_write_size(sector: libc::c_int) -> io::Result<usize> {
+    match sector {
+        512 | 1024 | 2048 | 4096 => Ok(BOOTBITS.max(sector as usize)),
+        _ => Err(error("Unsupported logical sector size for boot-record I/O")),
+    }
+}
+
+fn check_page_size() -> io::Result<()> {
+    if unsafe { libc::sysconf(libc::_SC_PAGESIZE) } != PAGE as libc::c_long {
+        return Err(error("Resume currently requires 4096-byte kernel pages"));
+    }
+    Ok(())
+}
+
+fn lock_header(file: &File, write: bool) -> io::Result<()> {
+    if unsafe {
+        libc::flock(
+            file.as_raw_fd(),
+            (if write { libc::LOCK_EX } else { libc::LOCK_SH }) | libc::LOCK_NB,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 impl Swap {
     pub fn open(partuuid: &str, write: bool) -> io::Result<Self> {
         Self::open_device(
@@ -99,27 +221,23 @@ impl Swap {
     }
 
     pub fn open_device(device: &super::device::Device, write: bool) -> io::Result<Self> {
-        if unsafe { libc::sysconf(libc::_SC_PAGESIZE) } != PAGE as libc::c_long {
-            return Err(error("Resume currently requires 4096-byte kernel pages"));
-        }
+        check_page_size()?;
         let file = device.open(write)?;
         // O_EXCL prevents cancellation of kernel-active swap; flock serializes
         // cooperating zbm-rs processes. Neither replaces durability barriers.
-        if unsafe {
-            libc::flock(
-                file.as_raw_fd(),
-                if write { libc::LOCK_EX } else { libc::LOCK_SH } | libc::LOCK_NB,
-            )
-        } != 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self { file })
+        lock_header(&file, write)?;
+        Ok(Self {
+            file,
+            io: HeaderIo::Buffered,
+        })
     }
     fn header(&self) -> io::Result<[u8; PAGE]> {
-        let mut h = [0; PAGE];
-        self.file.read_exact_at(&mut h, 0)?;
-        Ok(h)
+        let mut h = AlignedHeader([0; PAGE]);
+        // Retrying a short direct read at an unaligned offset is invalid.
+        if self.file.read_at(&mut h.0, 0)? != PAGE {
+            return Err(error("Incomplete swap-header read"));
+        }
+        Ok(h.0)
     }
     pub fn status(&self) -> io::Result<Status> {
         status(&self.header()?)
@@ -144,7 +262,7 @@ impl Swap {
         Ok(())
     }
 
-    /// Call while swap is inactive, before swapon and the hibernation request.
+    /// Call before the hibernation request, outside kernel header updates.
     /// The kernel preserves bootbits when marking the image. Never retrofit a
     /// record onto an already-created image.
     pub fn record(&self, pool_guid: u64, plan: &BootPlan) -> io::Result<()> {
@@ -154,7 +272,7 @@ impl Swap {
         let h = self.header()?;
         if &h[PAGE - 10..] != SWAP || !matches!(status(&h)?, Status::Inactive) {
             return Err(error(
-                "Resume recording requires inactive, formatted swap without an image",
+                "Resume recording requires formatted swap without an image or unfinished attempt",
             ));
         }
         if h[..BOOTBITS].iter().any(|b| *b != 0) && !owned_record(&h) {
@@ -194,7 +312,25 @@ impl Swap {
         bits[..16].copy_from_slice(MAGIC);
         bits[16..20].copy_from_slice(&(packed.len() as u32).to_le_bytes());
         bits[20..20 + packed.len()].copy_from_slice(&packed);
-        self.file.write_all_at(&bits, 0)?;
+        // Recheck after potentially slow artifact hashing, under the same flock.
+        // A changed native header must never be copied back by the 4Kn RMW path.
+        if self.header()? != *before {
+            return Err(error("Swap header changed before updating its boot record"));
+        }
+        match self.io {
+            HeaderIo::Buffered => self.file.write_all_at(&bits, 0)?,
+            HeaderIo::Direct { write_size } => {
+                let mut aligned = AlignedHeader(*before);
+                aligned.0[..BOOTBITS].copy_from_slice(&bits);
+                // On 4Kn devices preserve the rest of the logical sector.
+                // Only bootbits may change; never write into swap payload.
+                if self.file.write_at(&aligned.0[..write_size], 0)? != write_size {
+                    return Err(error(
+                        "Incomplete boot-record write; resume state is uncertain",
+                    ));
+                }
+            }
+        }
         self.file.sync_all()?;
         let after = self.header()?;
         if after[..BOOTBITS] != bits || after[BOOTBITS..] != before[BOOTBITS..] {
@@ -222,7 +358,7 @@ impl Swap {
     }
 
     /// Only the restored kernel has the boot ID saved before hibernation.
-    /// Run after systemd-hibernate returns, with swap temporarily deactivated.
+    /// Run after systemd-hibernate returns, outside kernel header updates.
     pub fn finish_attempt(&self) -> io::Result<()> {
         let h = self.header()?;
         if &h[PAGE - 10..] != SWAP {
@@ -489,7 +625,10 @@ mod tests {
             file.write_all_at(SWAP, (PAGE - 10) as u64).unwrap();
             Self {
                 directory,
-                swap: Swap { file },
+                swap: Swap {
+                    file,
+                    io: HeaderIo::Buffered,
+                },
             }
         }
         fn mark_image(&self) {
@@ -518,6 +657,17 @@ mod tests {
                 .unwrap();
             self.mark_image();
         }
+    }
+
+    #[test]
+    fn runtime_write_size_preserves_sector_alignment_without_payload_access() {
+        for (sector, expected) in [(512, 1024), (1024, 1024), (2048, 2048), (4096, 4096)] {
+            assert_eq!(boot_record_write_size(sector).unwrap(), expected);
+        }
+        for sector in [0, -512, 256, 768, 8192] {
+            assert!(boot_record_write_size(sector).is_err());
+        }
+        assert_eq!(std::mem::align_of::<AlignedHeader>(), PAGE);
     }
     impl Drop for Fixture {
         fn drop(&mut self) {

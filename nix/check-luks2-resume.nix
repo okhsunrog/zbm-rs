@@ -23,15 +23,15 @@ let
 in
 pkgs.testers.runNixOSTest {
   name = "zbm-luks2-resume-device";
-  globalTimeout = 300;
+  globalTimeout = 600;
   nodes.machine = { ... }: {
     virtualisation.memorySize = 2048;
     virtualisation.emptyDiskImages = [ 768 ];
-    environment.systemPackages = [ probe pkgs.cryptsetup pkgs.lvm2 pkgs.gptfdisk pkgs.python3 ];
+    environment.systemPackages = [ probe pkgs.cryptsetup pkgs.lvm2 pkgs.gptfdisk pkgs.python3 pkgs.uv pkgs.zstd ];
   };
   testScript = ''
     machine.start()
     machine.wait_for_unit("multi-user.target")
-    machine.succeed("${pkgs.python3}/bin/python3 ${./check-luks2-resume.py}", timeout=180)
+    machine.succeed("uv run --offline --no-project --python ${pkgs.python3}/bin/python3 ${./check-luks2-resume.py} ${./check-live-boot-record.py}", timeout=420)
   '';
 }

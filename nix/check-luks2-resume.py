@@ -3,6 +3,8 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import runpy
+import sys
 
 
 def run(*args, ok=True, error=None):
@@ -89,6 +91,7 @@ run("cryptsetup", "close", "resume-swap")
 run("cryptsetup", "open", "--readonly", "--key-file", "/root/test-key", "/dev/vdb1", "resume-swap")
 assert json.loads(probe("status"))["state"] == "inactive"
 probe("record", str(plan_path), ok=False)
+probe("record-live", str(plan_path), ok=False)
 run("cryptsetup", "close", "resume-swap")
 run("cryptsetup", "open", "--key-file", "/root/test-key", "/dev/vdb1", "resume-swap")
 run("swapon", "/dev/mapper/resume-swap")
@@ -96,6 +99,7 @@ try:
     probe("record", str(plan_path), ok=False)  # Active swap cannot be written.
 finally:
     run("swapoff", "/dev/mapper/resume-swap")
+runpy.run_path(sys.argv[1], init_globals=globals())
 probe("record", str(plan_path))
 with open("/dev/mapper/resume-swap", "r+b", buffering=0) as swap:
     swap.seek(4096)

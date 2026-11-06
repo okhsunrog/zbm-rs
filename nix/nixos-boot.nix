@@ -181,25 +181,16 @@ let
       (fs: builtins.head (lib.splitString "/" fs.device))
       (builtins.filter (fs: fs.fsType == "zfs") (builtins.attrValues config.fileSystems))
   );
-  activateResume = "${loader}/bin/zbm-rs --resume-activate-config ${loaderConfig}";
   recordResume = pkgs.writeShellScript "zbm-record-resume" ''
     set -eu
     export PATH=${lib.makeBinPath [ pkgs.util-linux pkgs.cryptsetup pkgs.lvm2 config.boot.zfs.package ]}
-    swapoff ${lib.escapeShellArg resumeDevice}
-    trap ${lib.escapeShellArg activateResume} EXIT
     ${loader}/bin/zbm-rs --resume-record-current-config \
       ${lib.escapeShellArg config.fileSystems."/".device} ${loaderConfig}
-    ${activateResume}
-    trap - EXIT
   '';
   finishResume = pkgs.writeShellScript "zbm-finish-resume" ''
     set -eu
     export PATH=${lib.makeBinPath [ pkgs.util-linux pkgs.cryptsetup pkgs.lvm2 ]}
-    swapoff ${lib.escapeShellArg resumeDevice}
-    trap ${lib.escapeShellArg activateResume} EXIT
     ${loader}/bin/zbm-rs --resume-finish-config ${loaderConfig}
-    ${activateResume}
-    trap - EXIT
   '';
   resumeSleepService = lib.mkIf h.enable {
     preStart = "${recordResume}";

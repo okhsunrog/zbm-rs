@@ -85,7 +85,7 @@ mappings, suspension, active swap, changed boot artifacts, expired cancellation
 consent and malformed headers.
 
 Linux reserves the first 1024 bytes of swap for bootbits and preserves them when
-marking a hibernation image. Before swapon/hibernation, zbm-rs writes a versioned,
+marking a hibernation image. Before hibernation, zbm-rs writes a versioned,
 size-bounded compressed boot record there: a nonce, pool/target identity, hashes
 of kernel/initramfs, and exact planned arguments. Existing nonzero foreign
 bootbits are refused. A record is never added to an existing image. The record
@@ -121,14 +121,14 @@ A damaged owned record also requires explicit cancellation. Neither is treated
 as an empty swap on the following boot. A valid image not yet consumed can still
 be retried. Images predating this protocol remain cancellable but cannot resume.
 
-The post-hibernation hook temporarily deactivates swap and calls
-`--resume-finish-config`. Only the original kernel boot ID saved before sleep
+The post-hibernation hook calls `--resume-finish-config` without deactivating
+swap. Only the original kernel boot ID saved before sleep
 can clear the flag after a successful RAM restore; a fresh kernel cannot do so.
-Failure to finish keeps the next boot conservative. The hook reactivates swap
-even on failure. This is recovery bookkeeping, not cryptographic evidence or a
-pool consistency seal. `--resume-status-config` inspects this state without
-modifying the device. Unit tests cover consumed images, stale consent, a wrong
-boot ID and torn records. The ordinary Linux 6.18.55 encrypted-root VM restored
+Failure to finish keeps the next boot conservative. This is recovery bookkeeping,
+not cryptographic evidence or a pool consistency seal. `--resume-status-config`
+inspects this state without modifying the device. Unit tests cover consumed
+images, stale consent, a wrong boot ID and torn records. The ordinary Linux
+6.18.55 encrypted-root VM restored
 RAM, retained its boot ID, completed the finish hook, and matched direct and
 buffered header reads. The TPM-authenticated CRB/SHA-256 and TIS/dual-bank VMs
 restored RAM and successfully created the next signed image. Signature-trailer
@@ -209,13 +209,31 @@ by default; custom `lib.mkImage` users pass it as `loaderConfig.resume`. The ent
 policy must match, not just the PARTUUID. Legacy plain configurations retain
 `swapPartuuid`. The swap partition must
 already be configured/active; the module neither formats it nor partitions disks.
-The record step temporarily swaps it off, records the booted NixOS target, and
-reactivates it when verified inactive, including after ordinary recording errors.
-Reactivation checks the same device identity and resume state, then uses the
-kernel's `swapon` syscall on the pinned file descriptor. It never uses util-linux's
-automatic image-signature rewriting. A pending image, damaged record or unfinished
-attempt leaves swap off and reports failure. Failure aborts hibernation. Memory pressure
-can make swapoff fail; that is not overridden. Both `systemd-hibernate.service`
+Preparation and completion use the restricted `resume::linux::BootRecord` API.
+The verified plain/LUKS2 device is opened with direct I/O, while the existing
+block-inode flock serializes ZBM operations. A read-only `/dev/snapshot` lease
+and `SNAPSHOT_SET_SWAP_AREA` select the active device for Linux's swap-write
+exemption and exclude concurrent native hibernation. The lease is released
+before the actual sleep request. No freeze, snapshot creation, image restoration
+or swap-page allocation ioctl is issued. Opening and closing the lease invokes
+the kernel's hibernation preparation/completion notifier chains; kernels must
+provide `CONFIG_HIBERNATION_SNAPSHOT_DEV` and permit native hibernation.
+
+Only the first 1024 bootbits bytes may change. Direct reads bypass the restored
+kernel's potentially stale block cache. Writes obey the device's logical sector
+size: 512/1024-byte sectors write 1024 bytes; larger sectors preserve the rest of
+the sector through a checked read-modify-write, up to a 4096-byte header. The
+header is rechecked before writing, flushed, and read back through direct I/O.
+Unsupported sector sizes, a busy snapshot lease, I/O errors, a pending image,
+damaged metadata or an unfinished attempt abort preparation. There is no cached
+I/O or swapoff fallback. Ordinary hooks never deactivate/reactivate swap, so
+their memory demand does not grow with swap occupancy.
+
+Cancellation and target-initramfs arming retain exclusive device access, refusing
+kernel-active swap. Explicit activation still checks the device identity and
+resume state, then uses the kernel's `swapon` syscall on the pinned descriptor;
+it never uses util-linux's automatic image-signature rewriting.
+Both `systemd-hibernate.service`
 and `systemd-suspend-then-hibernate.service` use fail-closed `ExecStartPre`
 preparation and `ExecStopPost` completion. The composite service does not start
 the direct hibernation service. Its record covers the whole operation: initial
@@ -484,6 +502,30 @@ and exercises real RAM restoration through the target initramfs. It verifies the
 unchanged kernel boot ID, a surviving RAM-only file and pool health after resume.
 The intervening bootstrap uses separate disks and never imports the hibernated
 pool or opens its swap. Neither is physical or enforced/Secure Boot acceptance.
+
+The direct and composite fixtures additionally keep 640 MiB of verifiable
+anonymous memory in a cgroup limited to 192 MiB of resident memory. Preparation
+and completion must succeed with at least 256 MiB still swapped out. A validated
+syscall trace must contain no swapoff/swapon from the native hooks; repeated RAM
+restores must preserve the anonymous data, boot ID, active swap and direct versus
+cached header agreement.
+
+`nix build .#checks.x86_64-linux.luks2-resume-device` covers runtime boot-record
+writes on active plain/LUKS2 swap and a real 4096-byte-sector loop partition. It
+checks native-header/payload preservation, the kernel snapshot lease and flock,
+wrong-boot refusal, pending and damaged records, read-only mappings, and
+device-mapper drop-write/EIO injection. Lost writes must fail direct readback;
+an uncompleted consumed-image flag must remain protected.
+
+On 2026-11-06 the runtime path passed the device fixture, the EFI lifecycle and
+failure smoke scenario, and six real encrypted-root RAM restorations under swap
+pressure: two with Linux 6.18.55 and four with the Linux 7.2.9 TPM CRB/SHA-256
+backend under integrity Lockdown. The latter used systemd 262.1 with the
+Framework's timer patch and included TPM-unavailable refusal/retry plus a final
+direct hibernation. The native hooks issued no swapoff/swapon, the anonymous
+data and boot ID survived, and the direct/cached headers agreed. These results
+cover disposable VMs; physical acceptance of the changed runtime path remains
+pending.
 
 The optional `lib.mkTpmHibernationProbe` and `lib.mkTpmHibernationTest` factories
 accept the same experimental `kernelPackages` plus public signed kernel/module
