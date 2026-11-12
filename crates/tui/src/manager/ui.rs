@@ -104,6 +104,7 @@ pub enum Panel {
     ConfirmRollback,
     ConfirmPromote,
     ConfirmResume,
+    LowBattery,
     Unlock,
 }
 
@@ -116,6 +117,8 @@ pub struct UnlockProgress {
 
 #[derive(Default)]
 pub struct Ui {
+    pub power: crate::power::Power,
+    resume_anyway: bool,
     pub unlock_progress: Option<UnlockProgress>,
     pub resume_confirmation: Option<(String, Command)>,
     pub unlock_prompt: Option<String>,
@@ -137,6 +140,7 @@ pub struct Ui {
 }
 
 pub enum Input {
+    ResumeAnyway,
     Unlock(zeroize::Zeroizing<Vec<u8>>),
     Changed(&'static str),
     Command(Command, bool),
@@ -144,6 +148,11 @@ pub enum Input {
 }
 
 impl Ui {
+    pub fn warn_low_battery(&mut self, power: crate::power::Power) {
+        self.open_panel(Panel::LowBattery);
+        self.power = power;
+        self.resume_anyway = false;
+    }
     fn unlock_status(&self, pool_guid: u64, dataset: &str) -> Option<&'static str> {
         self.unlock_progress
             .as_ref()
@@ -569,7 +578,7 @@ impl Ui {
         }
     }
     pub fn telemetry(&self, state: &State) -> serde_json::Value {
-        serde_json::json!({"unlock_progress":self.unlock_progress.as_ref().map(|p| if p.discovering { "discovering" } else { "unlocking" }),"view":View::of(state),"filter":self.screens.get(&self.key).map(|s|s.query.as_str()).unwrap_or(""),"searching":self.searching,"panel":self.panel,"selected_row":self.selected(state).map(|r|r.id),"selected_action":if self.panel == Panel::Actions { self.menu.selected().and_then(|i| self.menu_commands.get(i)) } else { None }})
+        serde_json::json!({"power":self.power,"resume_anyway":self.resume_anyway,"unlock_progress":self.unlock_progress.as_ref().map(|p| if p.discovering { "discovering" } else { "unlocking" }),"view":View::of(state),"filter":self.screens.get(&self.key).map(|s|s.query.as_str()).unwrap_or(""),"searching":self.searching,"panel":self.panel,"selected_row":self.selected(state).map(|r|r.id),"selected_action":if self.panel == Panel::Actions { self.menu.selected().and_then(|i| self.menu_commands.get(i)) } else { None }})
     }
     pub fn reason(&self, command: Command, state: &State, options: &Options) -> Option<String> {
         if options.config.security.mode == crate::config::SecurityMode::Enforce
@@ -806,6 +815,33 @@ impl Ui {
             );
         }
         let command = Command::from_key(key);
+        if self.panel == Panel::LowBattery {
+            match key.code {
+                KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab
+                    if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() =>
+                {
+                    self.resume_anyway = !self.resume_anyway;
+                    return Input::Changed("battery-choice");
+                }
+                KeyCode::Enter if command == Some(Command::Open) => {
+                    self.panel = Panel::None;
+                    return if self.resume_anyway {
+                        Input::ResumeAnyway
+                    } else {
+                        Input::Command(Command::PowerOff, false)
+                    };
+                }
+                KeyCode::Esc => {
+                    self.panel = Panel::None;
+                    return Input::Changed("battery-cancelled");
+                }
+                KeyCode::F(_) if command.is_some_and(Command::recovery) => {
+                    self.panel = Panel::None;
+                    return Input::Command(command.unwrap(), false);
+                }
+                _ => return Input::Ignored,
+            }
+        }
         if self.panel == Panel::Unlock {
             use zeroize::Zeroize;
             match key.code {
@@ -1223,6 +1259,78 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn low_battery_requires_explicit_choice_and_never_cancels_session() {
+        let mut state = resume_state();
+        let mut ui = Ui::default();
+        ui.sync(&mut state);
+        let power = crate::power::Power {
+            batteries: vec![crate::power::Battery {
+                capacity: Some(3),
+                status: "Discharging".into(),
+            }],
+            external: false,
+        };
+        ui.warn_low_battery(power.clone());
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        assert!(matches!(
+            ui.input(key(KeyCode::Enter), &mut state),
+            Input::Command(Command::PowerOff, false)
+        ));
+        assert_eq!(state.resume.session_id(), Some("session-one"));
+        ui.warn_low_battery(power.clone());
+        // Plugging in must update the view without accepting the dialog.
+        ui.power.external = true;
+        ui.power.batteries[0].status = "Charging".into();
+        assert_eq!(ui.panel, Panel::LowBattery);
+        assert!(!ui.resume_anyway);
+        ui.input(key(KeyCode::Tab), &mut state);
+        assert!(matches!(
+            ui.input(key(KeyCode::Enter), &mut state),
+            Input::ResumeAnyway
+        ));
+        ui.warn_low_battery(power.clone());
+        assert!(!ui.resume_anyway);
+        ui.input(key(KeyCode::Esc), &mut state);
+        assert_eq!(ui.panel, Panel::None);
+        assert_eq!(state.resume.session_id(), Some("session-one"));
+        for (width, height) in [(80, 25), (60, 20)] {
+            ui.warn_low_battery(power.clone());
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| ui.draw(f, &state, &options())).unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            for expected in [
+                "Low battery",
+                "Battery: 3%",
+                "Shut down",
+                "Resume anyway",
+                "Enter: confirm",
+            ] {
+                assert!(
+                    text.contains(expected),
+                    "{width}x{height}: {expected}: {text}"
+                );
+            }
+            ui.open_panel(Panel::Unlock);
+            terminal.draw(|f| ui.draw(f, &state, &options())).unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .take(width as usize)
+                .map(|c| c.symbol())
+                .collect();
+            assert!(text.contains("Battery: 3% · Discharging"), "{text}");
+        }
+    }
     fn resume_state() -> State {
         let target: BootTarget = serde_json::from_value(serde_json::json!({
             "dataset":"tank/root","generation":7,"label":"NixOS","root":"/guest",

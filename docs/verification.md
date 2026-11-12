@@ -10,6 +10,7 @@ are separate observations.
 | --- | --- |
 | Rust and immutable configuration | Unit/integration checks, formatting, Clippy, Cargo input tracking and Nix/Rust configuration parity. |
 | Startup and direct boot | Automatic catalog, startup passphrase with cancellation/retry, resumed kernel selection, single-Enter encrypted Arch boot, countdown cancellation and immediate Arch boot in disposable VMs. |
+| Low-battery resume | Sysfs-shaped power fixtures in a disposable TCG VM: visible charge at unlock, unknown charge, manual and immediate-auto resume warnings, charger updates without automatic acceptance, discharge on AC, cancellation/retry, explicit consent through real kexec, and byte-identical full disk after default shutdown. `cargo xtask resume-smoke` exercises the loader handoff; its payload is another loader, not restored RAM. Battery hardware and physical low-charge resume remain untested. |
 | Local key dependencies | An encrypted non-BE keysource unlocks a dependent BE, resumes its requested kernel chooser and leaves no temporary key file or passphrase in serial diagnostics. |
 | Nix images | Kernel/ZFS matching, staged ELF dependencies, public trust inputs and size limits. |
 | Generic Linux | Arch ZFS-root boot and snapshot, rollback, clone and promotion scenarios. |

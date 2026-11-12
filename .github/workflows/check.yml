@@ -40,6 +40,10 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf util-linux dosfstools mtools
       - run: cargo xtask smoke --run target/vm/ci-lifecycle --tcg --lifecycle --failures
         working-directory: zbm-rs
+      - run: nix build .#zbm-rs-efi-test-resume --out-link result-resume
+        working-directory: zbm-rs
+      - run: cargo xtask resume-smoke --image result-resume --run target/vm/ci-resume --tcg
+        working-directory: zbm-rs
       - run: nix build .#zbm-rs-efi-test-host-only-scsi --out-link result-scsi
         working-directory: zbm-rs
       - run: cargo xtask smoke --image result-scsi --run target/vm/ci-host-only-scsi --port 2231 --tcg --scsi
@@ -66,6 +70,7 @@ jobs:
             zbm-rs/result/sizes.json
             zbm-rs/result-test/sizes.json
             zbm-rs/target/vm/ci-lifecycle
+            zbm-rs/target/vm/ci-resume
             zbm-rs/target/vm/ci-specialisation-boot
             zbm-rs/target/vm/ci-nixos-boot
             zbm-rs/target/vm/ci-snapshot-boot

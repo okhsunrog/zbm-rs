@@ -107,12 +107,15 @@ fn cancelled_header(run: &Path) -> Result<()> {
 }
 
 fn seed_image(run: &Path, target: &Value, guid: &str) -> Result<()> {
-    let kernel = format!(
-        "{}{}",
-        target["root"].as_str().unwrap(),
-        target["inputs"]["kernel"].as_str().unwrap()
-    );
-    let plan = json!({"target":target, "kernel":kernel, "initrd":null, "cmdline":["root=ZFS=zbm_resume/root"]});
+    // Match this fixture's ordinary fstab-based plan, including the real
+    // loader initramfs and its arguments. It is not a systemd initramfs.
+    let root = target["root"].as_str().unwrap();
+    let inputs = &target["inputs"];
+    let kernel = format!("{root}{}", inputs["kernel"].as_str().unwrap());
+    let initrd = format!("{root}{}", inputs["initrd"].as_str().unwrap());
+    let mut cmdline = vec![json!(format!("init={}", inputs["init"].as_str().unwrap()))];
+    cmdline.extend(inputs["kernel_params"].as_array().unwrap().iter().cloned());
+    let plan = json!({"target":target,"kernel":kernel,"initrd":initrd,"cmdline":cmdline});
     vm::write_file(run, "/run/resume-plan.json", &serde_json::to_vec(&plan)?)?;
     guest(
         run,
@@ -120,6 +123,97 @@ fn seed_image(run: &Path, target: &Value, guid: &str) -> Result<()> {
             "zbm-rs --resume-record-config /etc/zbm-rs/config.json {guid} /run/resume-plan.json; printf preserved-payload | dd of=/dev/mapper/resume-swap bs=1 seek=4096 conv=notrunc 2>/dev/null; printf 'SWAPSPACE2S1SUSPEND\\000' | dd of=/dev/mapper/resume-swap bs=1 seek=4076 conv=notrunc 2>/dev/null; sync"
         ),
     )?;
+    Ok(())
+}
+
+// A sysfs-shaped mount exists only inside this disposable VM. Production has
+// no environment override or test control that could spoof power readings.
+fn power_fixture(run: &Path) -> Result<()> {
+    guest(
+        run,
+        "mkdir -p /run/power-fixture/BAT1 /run/power-fixture/AC; mount --bind /run/power-fixture /sys/class/power_supply; printf Battery > /run/power-fixture/BAT1/type; printf Mains > /run/power-fixture/AC/type; printf 0 > /run/power-fixture/AC/online; printf 3 > /run/power-fixture/BAT1/capacity; printf Discharging > /run/power-fixture/BAT1/status",
+    )?;
+    Ok(())
+}
+
+fn low_battery(run: &Path) -> Result<()> {
+    wait_for(30, None, || {
+        ensure!(
+            vm::screen(run)?["ui"]["panel"] == "LowBattery",
+            "Waiting for low-battery confirmation"
+        );
+        Ok(())
+    })
+}
+
+fn battery_warning_checks(run: &Path, header: &str) -> Result<()> {
+    power_fixture(run)?;
+    vm::key(run, "ret")?;
+    low_battery(run)?;
+    vm::screenshot(run, &run.join("low-battery.png"))?;
+    ensure!(
+        vm::screen(run)?["ui"]["resume_anyway"] == false,
+        "Shutdown must be selected"
+    );
+    guest(
+        run,
+        "printf 1 > /run/power-fixture/AC/online; printf Charging > /run/power-fixture/BAT1/status",
+    )?;
+    wait_for(10, None, || {
+        let s = vm::screen(run)?;
+        ensure!(
+            s["ui"]["power"]["external"] == true
+                && s["ui"]["power"]["batteries"][0]["status"] == "Charging",
+            "Waiting for charger update"
+        );
+        ensure!(
+            s["ui"]["panel"] == "LowBattery",
+            "Plugging in started resume"
+        );
+        Ok(())
+    })?;
+    vm::screenshot(run, &run.join("low-battery-charging.png"))?;
+    vm::key(run, "esc")?;
+    wait_for(10, None, || {
+        ensure!(
+            vm::screen(run)?["event"] == "catalog-ready",
+            "Waiting for catalog refresh after warning cancellation"
+        );
+        Ok(())
+    })?;
+    ensure!(
+        guest(
+            run,
+            "dd if=/dev/mapper/resume-swap bs=4096 count=1 2>/dev/null | sha256sum"
+        )? == header,
+        "Battery warning modified the saved image"
+    );
+    // An inadequate charger must still warn, and consent must reset on retry.
+    guest(run, "printf Discharging > /run/power-fixture/BAT1/status")?;
+    vm::key(run, "ret")?;
+    wait_for(10, None, || prompt(run))?;
+    password(run, "source-passphrase")?;
+    low_battery(run)?;
+    ensure!(
+        vm::screen(run)?["ui"]["resume_anyway"] == false,
+        "Retry reused consent"
+    );
+    vm::key(run, "esc")?;
+    wait_for(10, None, || {
+        ensure!(
+            vm::screen(run)?["event"] == "catalog-ready",
+            "Waiting for catalog refresh after warning cancellation"
+        );
+        Ok(())
+    })?;
+    guest(
+        run,
+        "umount /sys/class/power_supply; rm /run/zbm-rs/boot-plan.json",
+    )?;
+    vm::key(run, "f6")?;
+    wait_for(15, None, || prompt(run))?;
+    password(run, "source-passphrase")?;
+    pending(run)?;
     Ok(())
 }
 
@@ -230,6 +324,27 @@ touch /fixture/nix/store/system1/init /fixture/nix/store/system2/init
             "test $(zpool get -H -o value readonly zbm_resume) = on; ! grep -q ' - zfs ' /proc/self/mountinfo",
         )?;
         vm::screenshot(run, &run.join("shared-unlock.png"))?;
+        power_fixture(run)?;
+        wait_for(10, None, || {
+            prompt(run)?;
+            ensure!(
+                vm::console(run)?.contains("Battery: 3%"),
+                "Battery is not visible at unlock"
+            );
+            Ok(())
+        })?;
+        vm::screenshot(run, &run.join("battery-at-unlock.png"))?;
+        guest(run, "rm /run/power-fixture/BAT1/capacity")?;
+        wait_for(10, None, || {
+            prompt(run)?;
+            ensure!(
+                vm::console(run)?.contains("Battery: Unknown"),
+                "Missing charge was not shown as unknown"
+            );
+            Ok(())
+        })?;
+        vm::screenshot(run, &run.join("battery-unknown.png"))?;
+        guest(run, "umount /sys/class/power_supply")?;
         password(run, "wrong-passphrase")?;
         wait_for(25, None, || {
             ensure!(
@@ -281,6 +396,7 @@ touch /fixture/nix/store/system1/init /fixture/nix/store/system2/init
             run,
             "dd if=/dev/mapper/resume-swap bs=4096 count=1 2>/dev/null | sha256sum",
         )?;
+        battery_warning_checks(run, &header)?;
         action(run, "CancelResume")?;
         vm::screenshot(run, &run.join("discard-stay-confirmation.png"))?;
         vm::key(run, "esc")?;
@@ -442,6 +558,59 @@ touch /fixture/nix/store/system1/init /fixture/nix/store/system2/init
         })?;
         cancelled_header(run)?;
         vm::screenshot(run, &run.join("after-cold-boot.png"))?;
+        // Explicit low-battery consent must reach the common kexec path. The
+        // payload boots the loader again; this does not claim RAM restoration.
+        seed_image(run, &target(&after_cold), &guid)?;
+        power_fixture(run)?;
+        vm::key(run, "f6")?;
+        pending(run)?;
+        let before_resume = guest(run, "cat /proc/sys/kernel/random/boot_id")?;
+        vm::key(run, "ret")?;
+        low_battery(run)?;
+        vm::key(run, "tab")?;
+        wait_for(10, None, || {
+            ensure!(
+                vm::screen(run)?["ui"]["resume_anyway"] == true,
+                "Waiting for explicit resume selection"
+            );
+            Ok(())
+        })?;
+        vm::screenshot(run, &run.join("low-battery-resume-anyway.png"))?;
+        vm::key(run, "ret")?;
+        wait_for(90, Some(&mut owned.0), || {
+            ensure!(
+                vm::screen(run)?["config"]["resume"]["credential"]["pool_guid"] == "42",
+                "Waiting for confirmed resume handoff"
+            );
+            Ok(())
+        })?;
+        fs::remove_file(run.join("known_hosts"))?;
+        wait_for(90, Some(&mut owned.0), || {
+            ensure!(
+                guest(run, "cat /proc/sys/kernel/random/boot_id")? != before_resume,
+                "Confirmation did not boot the fixture"
+            );
+            Ok(())
+        })?;
+        guest(run, "rm /etc/zbm-rs/config.json")?;
+        vm::write_file(
+            run,
+            "/etc/zbm-rs/config.json",
+            &serde_json::to_vec(&config)?,
+        )?;
+        vm::key(run, "f6")?;
+        wait_for(25, None, || {
+            state(run, "locked")?;
+            prompt(run)
+        })?;
+        password(run, "source-passphrase")?;
+        pending(run)?;
+        action(run, "CancelResume")?;
+        vm::key(run, "ret")?;
+        wait_for(15, None, || {
+            state(run, "inactive")?;
+            cancelled_header(run)
+        })?;
         // Rescue uses the same image inspection/cancellation API. It must not
         // turn a recognized image into a default resume or bypass confirmation.
         seed_image(run, &target(&after_cold), &guid)?;
@@ -511,20 +680,22 @@ touch /fixture/nix/store/system1/init /fixture/nix/store/system2/init
             ensure!(s["event"] == "catalog-ready", "Waiting for second image");
             Ok(())
         })?;
-        vm::key(run, "s")?;
-        wait_for(10, None, || {
-            ensure!(
-                vm::screen(run)?["ui"]["panel"] == "ConfirmResume",
-                "Waiting for power-off test dialog"
-            );
-            Ok(())
-        })?;
+        power_fixture(run)?;
+        config["boot"]["mode"] = "immediate".into();
+        vm::write_file(
+            run,
+            "/etc/zbm-rs/config.json",
+            &serde_json::to_vec(&config)?,
+        )?;
+        vm::key(run, "f6")?;
+        low_battery(run)?;
+        vm::screenshot(run, &run.join("low-battery-autoboot.png"))?;
         let before = vm::ssh_timeout(run, "sha256sum /dev/vda", 60)?
             .split_whitespace()
             .next()
             .unwrap()
             .to_owned();
-        vm::key(run, "f10")?;
+        vm::key(run, "ret")?;
         let mut exit = None;
         wait_for(20, None, || {
             exit = owned.0.try_wait()?;
@@ -559,7 +730,7 @@ touch /fixture/nix/store/system1/init /fixture/nix/store/system2/init
         fs::write(
             run.join("report.json"),
             serde_json::to_vec_pretty(
-                &json!({"passed":true,"checks":["foreign-mapping","metadata-only-before-unlock","wrong-ZFS-password","different-LUKS-password","shared-credential","manager-restart","pending-default","other-generation-confirmation","Esc-preserves-image","expired-consent-blocks-cold-boot","standalone-discard-stays-in-menu","verified-cancel-before-shell","payload-preserved","cold-kexec-pins-saved-generation","rescue-rejects-restore-utility","rescue-boot-requires-cancellation","rescue-standalone-discard","F10-preserves-entire-disk","no-secret-telemetry"],"real_ram_restore":false,"cold_handoff_payload":"loader-fixture"}),
+                &json!({"passed":true,"checks":["foreign-mapping","metadata-only-before-unlock","wrong-ZFS-password","different-LUKS-password","shared-credential","manager-restart","pending-default","battery-visible-at-unlock","unknown-battery-is-not-zero","low-battery-explicit-consent-kexec","low-battery-manual-resume","charger-updates-without-resume","discharging-on-AC-warns","battery-Esc-preserves-image","low-battery-stops-immediate-autoboot","battery-default-shutdown-preserves-entire-disk","other-generation-confirmation","Esc-preserves-image","expired-consent-blocks-cold-boot","standalone-discard-stays-in-menu","verified-cancel-before-shell","payload-preserved","cold-kexec-pins-saved-generation","rescue-rejects-restore-utility","rescue-boot-requires-cancellation","rescue-standalone-discard","no-secret-telemetry"],"real_ram_restore":false,"cold_handoff_payload":"loader-fixture"}),
             )?,
         )?;
         Ok(())

@@ -2,6 +2,7 @@ mod broker;
 mod config;
 mod diagnostics;
 mod manager;
+mod power;
 mod resume;
 mod security;
 mod session;

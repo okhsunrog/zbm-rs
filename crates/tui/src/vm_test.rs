@@ -54,7 +54,7 @@ pub fn utility() -> io::Result<bool> {
             let loaded = crate::manager::executor::LoadedKernel::load_verified(&plan, None)?;
             println!("ZBM_TEST_VERIFIED_LOAD_PASS");
             if args.len() == 4 {
-                loaded.execute()?;
+                loaded.execute(false)?;
             }
         }
         Some("--test-legacy-kexec") => {

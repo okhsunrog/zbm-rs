@@ -45,6 +45,25 @@ Menu/countdown/immediate policy comes only from the signed image. Ordinary JSON
 settings do not affect Rust compilation; only the compiled security mode and
 explicit diagnostic ESP bind the executable. See [configuration](configuration.md).
 
+System battery charge and status are read from Linux power-supply sysfs every
+second, including while entering a passphrase. Peripheral and absent batteries
+are ignored; unreadable capacity is shown as unknown, never as zero. Images
+include the ACPI battery and AC adapter drivers in both portable and host-only
+profiles. With multiple batteries, each available reading is displayed and any
+reading below 5% can trigger the warning.
+
+Before a prepared resume kernel is executed, the common manual/automatic handoff
+asks for confirmation if a system battery is below 5% and external power is not
+detected, or a battery is still discharging on external power. The dialog defaults
+to `Shut down`; `Resume anyway` requires selecting it explicitly. Plugging in
+updates the status without starting resume. Esc unloads the prepared kernel and
+refreshes the catalog with automatic boot cancelled, since boot preparation has
+already exported the owned pools. Encrypted roots may need unlocking again.
+Neither Esc nor shutdown cancels
+the saved session. The privileged executor rechecks power immediately before
+handoff; explicit consent belongs only to that prepared kernel. Cold boot and
+machines without battery telemetry do not require this confirmation.
+
 Native NixOS installation prepares source-bound signed artifacts outside the
 store; see [NixOS deployment](nixos-deployment.md). Discovery never executes
 runtime secret appenders and handoff revalidates both source and authorization.

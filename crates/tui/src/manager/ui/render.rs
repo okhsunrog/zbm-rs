@@ -369,7 +369,11 @@ impl Ui {
     fn primary_keys(&self, state: &State, options: &Options, compact: bool) -> Line<'static> {
         let mut keys = Vec::new();
         if self.panel != Panel::None {
-            if matches!(self.panel, Panel::Help | Panel::Details) {
+            if self.panel == Panel::LowBattery {
+                keys.extend(keycap("Tab/Left/Right", "Select", MUTED));
+                keys.extend(keycap("Enter", "Confirm", FOCUS));
+                keys.extend(keycap("Esc", "Cancel resume", MUTED));
+            } else if matches!(self.panel, Panel::Help | Panel::Details) {
                 keys.extend(keycap("Up/Down", "Scroll", MUTED));
                 keys.extend(keycap("Esc", "Close", FOCUS));
             } else if self.panel == Panel::Actions {
@@ -463,8 +467,19 @@ impl Ui {
             Constraint::Length(recovery_text.line_count(content_width) as u16),
         ])
         .areas(area);
-        let [brand, policy] = Layout::horizontal([Constraint::Min(1), Constraint::Length(22)])
-            .areas(header.inner(Margin::new(margin, 0)));
+        let battery = self.power.label().unwrap_or_default();
+        let battery_width = (battery.chars().count() as u16 + u16::from(!battery.is_empty()))
+            .min(content_width.saturating_sub(28));
+        let [brand, battery_area, policy] = Layout::horizontal([
+            Constraint::Min(1),
+            Constraint::Length(battery_width),
+            Constraint::Length(22),
+        ])
+        .areas(header.inner(Margin::new(margin, 0)));
+        frame.render_widget(
+            Paragraph::new(battery).style(ink(if self.power.low() { DANGER } else { MUTED })),
+            battery_area,
+        );
         let title = options.config.ui.title.as_deref().unwrap_or("zbm-rs");
         frame.render_widget(
             Paragraph::new(Line::from(vec![
@@ -709,6 +724,7 @@ impl Ui {
             Panel::Help => 32,
             Panel::Actions => 30,
             Panel::Details => 34,
+            Panel::LowBattery => 18,
             Panel::ConfirmResume
             | Panel::ConfirmRollback
             | Panel::ConfirmDiscard
@@ -723,7 +739,10 @@ impl Ui {
         );
         frame.render_widget(Clear, popup);
         let accent = match self.panel {
-            Panel::ConfirmRollback | Panel::ConfirmDiscard | Panel::ConfirmResume => DANGER,
+            Panel::ConfirmRollback
+            | Panel::ConfirmDiscard
+            | Panel::ConfirmResume
+            | Panel::LowBattery => DANGER,
             Panel::ConfirmPromote => NOTICE,
             _ => FOCUS,
         };
@@ -736,6 +755,7 @@ impl Ui {
                 Panel::ConfirmRollback => "Rollback dataset [Esc] cancel",
                 Panel::ConfirmPromote => "Clone and promote [Enter] confirm [Esc] cancel",
                 Panel::ConfirmResume => "Discard saved session? [Enter] continue [Esc] cancel",
+                Panel::LowBattery => "Low battery",
                 Panel::Unlock => "Unlock boot environment [Enter] unlock [Esc] cancel",
                 Panel::None => unreachable!(),
             },
@@ -826,6 +846,47 @@ impl Ui {
             );
         } else {
             let mut text = match self.panel {
+                Panel::LowBattery => vec![
+                    Line::styled(
+                        self.power
+                            .label()
+                            .unwrap_or_else(|| "Battery: Unknown".into()),
+                        strong(DANGER),
+                    ),
+                    Line::raw(if self.power.external {
+                        "External power connected"
+                    } else {
+                        "External power not detected"
+                    }),
+                    Line::raw(""),
+                    Line::raw(
+                        "Your laptop may power off while restoring your session. Connect a charger or shut down and resume later.",
+                    ),
+                    Line::raw(""),
+                    Line::raw("Shutting down keeps your saved session."),
+                    Line::raw(""),
+                    Line::from(vec![
+                        Span::styled(
+                            "[ Shut down ]",
+                            if !self.resume_anyway {
+                                strong(BASE).bg(FOCUS)
+                            } else {
+                                ink(INK)
+                            },
+                        ),
+                        Span::raw("   "),
+                        Span::styled(
+                            "[ Resume anyway ]",
+                            if self.resume_anyway {
+                                strong(BASE).bg(FOCUS)
+                            } else {
+                                ink(INK)
+                            },
+                        ),
+                    ]),
+                    Line::raw(""),
+                    Line::raw("Tab/Left/Right: select   Enter: confirm   Esc: cancel"),
+                ],
                 Panel::ConfirmResume => vec![
                     Line::raw(
                         self.resume_confirmation

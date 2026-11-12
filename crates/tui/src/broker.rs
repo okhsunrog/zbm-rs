@@ -38,12 +38,14 @@ enum Request {
     Hello,
     Discover,
     Operation(Box<Action>),
-    Execute,
+    PowerWarning,
+    Execute { low_battery_confirmed: bool },
     Unload,
 }
 
 #[derive(Serialize, Deserialize)]
 enum Reply {
+    PowerWarning(Option<crate::power::Power>),
     ResumeStatus(zbm_core::resume::Status),
     ResumeCancelled,
     Unlock(zbm_core::unlock::Resolution),
@@ -221,8 +223,16 @@ pub async fn resume_status() -> Result<zbm_core::resume::Status> {
     })
     .await?
 }
-pub fn execute() -> Result<()> {
-    call(Request::Execute)?;
+pub fn power_warning() -> Result<Option<crate::power::Power>> {
+    match call(Request::PowerWarning)? {
+        Reply::PowerWarning(power) => Ok(power),
+        _ => bail!("Unexpected power status response"),
+    }
+}
+pub fn execute(low_battery_confirmed: bool) -> Result<()> {
+    call(Request::Execute {
+        low_battery_confirmed,
+    })?;
     bail!("Broker kexec unexpectedly returned")
 }
 pub fn unload() {
@@ -407,11 +417,19 @@ pub fn run() -> Result<()> {
                         }
                     }
                 }
-                Request::Execute => {
+                Request::PowerWarning => Reply::PowerWarning(
+                    loaded
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("No kernel is loaded"))?
+                        .power_warning()?,
+                ),
+                Request::Execute {
+                    low_battery_confirmed,
+                } => {
                     loaded
                         .as_ref()
                         .ok_or_else(|| anyhow::anyhow!("No verified kernel is loaded"))?
-                        .execute()?;
+                        .execute(low_battery_confirmed)?;
                     Reply::Done
                 }
                 Request::Unload => {

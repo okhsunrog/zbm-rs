@@ -44,7 +44,7 @@ let
   hardware = if hardwareManifest == null then {} else builtins.fromJSON (builtins.readFile hardwareManifest);
   portable = [ "nvme" "ahci" "sd_mod" "usb_storage" "uas" "usbhid" "hid_generic"
     "xhci_pci" "ehci_pci" "atkbd" "i8042" "virtio_pci" "virtio_blk" "virtio_scsi" "virtio_gpu" ];
-  roots = lib.unique ([ "zfs" ] ++ (if profile == "portable" then portable else hardware.modules or [])
+  roots = lib.unique ([ "zfs" "battery" "ac" ] ++ (if profile == "portable" then portable else hardware.modules or [])
     ++ extraModules ++ forcedModules ++ lib.optionals testProfile [ "e1000" ]
     ++ lib.optionals tpmEnabled [ "tpm_crb" "tpm_tis" ]
     # Resolve the kernel's crypto API alias: 7.2 renamed aes_generic to aes.

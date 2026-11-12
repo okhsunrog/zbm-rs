@@ -107,12 +107,28 @@ impl LoadedKernel {
         self.resume_id = crate::resume::handoff(pool_guid, plan)?;
         Ok(())
     }
-    pub fn execute(&self) -> io::Result<()> {
+    pub fn power_warning(&self) -> io::Result<Option<crate::power::Power>> {
         if matches!(self.state, LoadedState::Remote) {
-            return crate::broker::execute().map_err(|e| io::Error::other(e.to_string()));
+            return crate::broker::power_warning().map_err(|e| io::Error::other(e.to_string()));
+        }
+        let power = crate::power::Power::read();
+        Ok((self.resume_id.is_some() && power.low()).then_some(power))
+    }
+
+    pub fn execute(&self, low_battery_confirmed: bool) -> io::Result<()> {
+        if matches!(self.state, LoadedState::Remote) {
+            return crate::broker::execute(low_battery_confirmed)
+                .map_err(|e| io::Error::other(e.to_string()));
         }
         crate::resume::check_handoff(self.resume_id.as_deref())
             .map_err(|e| io::Error::other(e.to_string()))?;
+        // Recheck in the privileged handoff, before releasing swap or starting
+        // the restored kernel. Consent applies only to this loaded kernel.
+        if !low_battery_confirmed && self.power_warning()?.is_some() {
+            return Err(io::Error::other(
+                "Low battery; resume requires confirmation",
+            ));
+        }
         crate::resume::release_mapping().map_err(|e| io::Error::other(e.to_string()))?;
         unsafe {
             libc::sync();

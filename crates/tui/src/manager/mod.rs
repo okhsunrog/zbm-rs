@@ -89,6 +89,7 @@ async fn tui(
         state.resume = crate::resume::display_status(&options.config).await;
     }
     let mut ui = Ui::default();
+    ui.power = crate::power::Power::read();
     ui.sync(&mut state);
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let mut rescan = true;
@@ -104,6 +105,9 @@ async fn tui(
     let mut auto_deadline: Option<Instant> = None;
     let mut after_cancellation: Option<ResumeContinuation> = None;
     let mut continuation: Option<ResumeContinuation> = None;
+    let mut handoff: Option<executor::LoadedKernel> = None;
+    let mut low_battery_confirmed = false;
+    let mut power_tick = Instant::now();
     loop {
         #[cfg(feature = "vm-test")]
         if let Some(control) = control
@@ -277,11 +281,9 @@ async fn tui(
                 }
                 Ok(Outcome::Boot(plan, loaded)) => {
                     save_plan(&plan)?;
-                    emit(options, "kexec", &state, &ui)?;
-                    ratatui::restore();
-                    channel.unwrap().request(Request::KexecStarting)?;
-                    loaded.execute()?;
-                    unreachable!("successful kexec leaves this kernel")
+                    handoff = Some(loaded);
+                    low_battery_confirmed = false;
+                    "kernel-loaded"
                 }
                 Err(error) => {
                     after_cancellation = None;
@@ -324,6 +326,24 @@ async fn tui(
             state.error = Some("Operation timed out after 30 seconds. Use Shell or Restart to reconcile ZFS state.".into());
             refresh(terminal, &mut state, options, &mut ui)?;
             emit(options, "operation-timeout", &state, &ui)?;
+        }
+        if let Some(loaded) = &handoff
+            && ui.panel != Panel::LowBattery
+        {
+            if let Some(power) = loaded.power_warning()?.filter(|_| !low_battery_confirmed) {
+                auto_cancelled = true;
+                auto_deadline = None;
+                state.countdown_secs = None;
+                ui.warn_low_battery(power);
+                refresh(terminal, &mut state, options, &mut ui)?;
+                emit(options, "low-battery-warning", &state, &ui)?;
+            } else {
+                emit(options, "kexec", &state, &ui)?;
+                ratatui::restore();
+                channel.unwrap().request(Request::KexecStarting)?;
+                loaded.execute(low_battery_confirmed)?;
+                unreachable!("successful kexec leaves this kernel")
+            }
         }
         if !state.activity.is_scanning()
             && state.activity.operation().is_none()
@@ -467,7 +487,21 @@ async fn tui(
                     }
                     None => ui.input(key, &mut state),
                 };
+                if input_panel == Panel::LowBattery
+                    && ui.panel != Panel::LowBattery
+                    && !matches!(input, Input::ResumeAnyway)
+                {
+                    // Closing the warning unloads the prepared kernel, never
+                    // cancels the saved session or restarts automatic boot.
+                    handoff.take();
+                    if matches!(input, Input::Changed("battery-cancelled")) {
+                        // Boot preparation exported our pools. Rebuild the
+                        // catalog before offering another target or retry.
+                        rescan = true;
+                    }
+                }
                 match input {
+                    Input::ResumeAnyway => low_battery_confirmed = true,
                     Input::Unlock(passphrase) => {
                         if let Some(selection) = &unlocking
                             && let Some(challenge) = &selection.challenge
@@ -719,6 +753,15 @@ async fn tui(
                     emit(options, event, &state, &ui)?;
                 }
             }
+        }
+        if power_tick.elapsed() >= Duration::from_secs(1) {
+            let power = crate::power::Power::read();
+            if ui.power != power {
+                ui.power = power;
+                refresh(terminal, &mut state, options, &mut ui)?;
+                emit(options, "power-changed", &state, &ui)?;
+            }
+            power_tick = Instant::now();
         }
         if startup_done
             && !auto_cancelled
