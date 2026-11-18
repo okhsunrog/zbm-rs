@@ -9,6 +9,10 @@ use std::{
 };
 
 const EXTEND: &str = "/usr/lib/systemd/systemd-pcrextend";
+/// The helper runs inside a boot operation, which the manager and the broker
+/// socket bound to 30 seconds. Leave room to report an optional failure and
+/// finish the handoff instead of timing out the whole operation.
+const HELPER_DEADLINE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Evidence {
@@ -36,7 +40,7 @@ fn helper(program: &str, args: &[&str], name: &str) -> io::Result<bool> {
         .stdout(log.try_clone()?)
         .stderr(log)
         .spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + HELPER_DEADLINE;
     let result = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status.success()),

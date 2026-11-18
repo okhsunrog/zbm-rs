@@ -630,6 +630,10 @@ impl Ui {
         }
         if state.resume.unlock_target().is_some() {
             return match command {
+                // Opening still acts on the selected pool row.
+                Command::Open if state.pools.get(state.selected).is_none() => {
+                    Some("No pool found; rescan after checking the disks".into())
+                }
                 Command::Open
                 | Command::Search
                 | Command::Back
@@ -1742,6 +1746,24 @@ mod tests {
             Input::Command(Command::Shell, false)
         ));
         assert!(ui.reason(Command::Open, &state, &options()).is_some());
+    }
+
+    #[test]
+    fn locked_swap_without_pools_refuses_open() {
+        let mut state = State {
+            resume: zbm_core::resume::Status::Locked {
+                pool_guid: 42,
+                encryption_root: "tank/root".into(),
+            },
+            ..State::default()
+        };
+        let mut ui = Ui::default();
+        ui.sync(&mut state);
+        assert!(ui.reason(Command::Open, &state, &options()).is_some());
+        assert!(ui.reason(Command::Rescan, &state, &options()).is_none());
+        state.pools = zbm_core::preview();
+        ui.sync(&mut state);
+        assert!(ui.reason(Command::Open, &state, &options()).is_none());
     }
 
     #[test]
