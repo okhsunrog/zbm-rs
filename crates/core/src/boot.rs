@@ -433,7 +433,52 @@ fn specialisation_target(
     Ok(target)
 }
 
+/// Bounded NixOS generation discovery. The current profile and the saved
+/// hibernation session stay visible even when newer generations exceed the limit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Catalog {
+    pub limit: u32,
+    retain: Option<(String, u64)>,
+}
+
+impl Catalog {
+    pub fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            retain: None,
+        }
+    }
+    /// A session can only resume its exact generation, so the menu must list it.
+    pub fn retaining(self, status: &crate::resume::Status) -> Self {
+        match status.session() {
+            Some(session) => self.retaining_target(&session.target),
+            None => self,
+        }
+    }
+    /// Keep one requested generation listed, e.g. for independent revalidation.
+    pub fn retaining_target(mut self, target: &BootTarget) -> Self {
+        self.retain = target
+            .generation()
+            .map(|generation| (target.dataset.clone(), generation));
+        self
+    }
+    fn retained(&self, dataset: &str) -> Option<u64> {
+        self.retain
+            .as_ref()
+            .filter(|(retained, _)| retained == dataset)
+            .map(|(_, generation)| *generation)
+    }
+}
+
 pub fn discover_generations(root: &Path, dataset: &str, limit: u32) -> io::Result<TargetDiscovery> {
+    discover_catalog(root, dataset, &Catalog::new(limit))
+}
+
+pub fn discover_catalog(
+    root: &Path,
+    dataset: &str,
+    catalog: &Catalog,
+) -> io::Result<TargetDiscovery> {
     let directory = match rooted_path(root, Path::new("/nix/var/nix/profiles")) {
         Ok(path) => path,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -483,14 +528,26 @@ pub fn discover_generations(root: &Path, dataset: &str, limit: u32) -> io::Resul
             .is_some_and(|path| current.as_ref().ok() == Some(path))
         })
     });
-    candidates.truncate(limit as usize);
-    if let Some(number) = current_number
-        && !candidates.contains(&number)
-    {
-        candidates.pop();
+    let retained = catalog
+        .retained(dataset)
+        .filter(|number| candidates.contains(number));
+    let pinned = [current_number, retained];
+    candidates.truncate(catalog.limit as usize);
+    for number in pinned.into_iter().flatten() {
+        if candidates.contains(&number) {
+            continue;
+        }
+        // Make room by dropping the oldest unpinned generation. With nothing
+        // left to drop the pinned generation extends the bounded list.
+        if let Some(index) = candidates
+            .iter()
+            .rposition(|candidate| !pinned.contains(&Some(*candidate)))
+        {
+            candidates.remove(index);
+        }
         candidates.push(number);
-        candidates.sort_unstable_by(|a, b| b.cmp(a));
     }
+    candidates.sort_unstable_by(|a, b| b.cmp(a));
     let mut discovery = TargetDiscovery::default();
     for generation in candidates {
         let profile = PathBuf::from(format!("/nix/var/nix/profiles/system-{generation}-link"));
@@ -890,6 +947,68 @@ mod tests {
         assert!(discovery.targets.is_empty());
         assert_eq!(discovery.rejected.len(), 2);
         assert!(discovery.rejected[0].error.contains("architecture"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn saved_session_generation_stays_listed_beyond_the_limit() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("zbm-retained-{}", std::process::id()));
+        fs::create_dir_all(root.join("nix/var/nix/profiles")).unwrap();
+        for number in 1..=5 {
+            let toplevel = format!("/nix/store/os-{number}");
+            let directory = root.join(toplevel.trim_start_matches('/'));
+            fs::create_dir_all(&directory).unwrap();
+            let document = serde_json::json!({"org.nixos.bootspec.v1": {
+                "system": "x86_64-linux", "kernel": format!("{toplevel}/kernel"),
+                "init": format!("{toplevel}/init"), "toplevel": toplevel,
+                "kernelParams": [], "label": format!("generation {number}")
+            }});
+            fs::write(
+                directory.join("boot.json"),
+                serde_json::to_vec(&document).unwrap(),
+            )
+            .unwrap();
+            symlink(
+                &toplevel,
+                root.join(format!("nix/var/nix/profiles/system-{number}-link")),
+            )
+            .unwrap();
+        }
+        symlink("system-5-link", root.join("nix/var/nix/profiles/system")).unwrap();
+        let listed = |catalog: &Catalog, dataset: &str| {
+            discover_catalog(&root, dataset, catalog)
+                .unwrap()
+                .targets
+                .iter()
+                .map(|target| target.generation().unwrap())
+                .collect::<Vec<_>>()
+        };
+        let saved = discover_generations(&root, "tank/root", 5).unwrap().targets[4].clone();
+        assert_eq!(saved.generation(), Some(1));
+        let status = crate::resume::Status::Pending {
+            session: Box::new(crate::resume::Session {
+                id: "session-1".into(),
+                pool_guid: 42,
+                target: saved,
+            }),
+        };
+        assert_eq!(listed(&Catalog::new(2), "tank/root"), [5, 4]);
+        let catalog = Catalog::new(2).retaining(&status);
+        assert_eq!(listed(&catalog, "tank/root"), [5, 1]);
+        assert_eq!(
+            listed(&Catalog::new(1).retaining(&status), "tank/root"),
+            [5, 1]
+        );
+        // Generation numbers belong to one root dataset.
+        assert_eq!(listed(&catalog, "tank/other"), [5, 4]);
+        assert_eq!(
+            listed(
+                &Catalog::new(2).retaining(&crate::resume::Status::Inactive),
+                "tank/root"
+            ),
+            [5, 4]
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

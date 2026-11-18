@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use zbm_core::{
     Pool, Zfs,
     activity::{Activity, RecoveryAction},
-    boot::{BootPlan, BootTarget, SnapshotSource, TargetDiscovery},
+    boot::{BootPlan, BootTarget, Catalog, SnapshotSource, TargetDiscovery},
     boot_zfs::{self, Snapshot},
     environment::BootEnvironment,
 };
@@ -204,7 +204,13 @@ impl Action {
             } => {
                 boot_zfs::rollback(&zfs, &pool, &source).await?;
                 Outcome::Changed {
-                    environments: boot_zfs::environments(&zfs, &pool, false, limit).await?,
+                    environments: boot_zfs::environments(
+                        &zfs,
+                        &pool,
+                        false,
+                        &Catalog::new(limit).retaining(&resume),
+                    )
+                    .await?,
                     selected: source.name.split('@').next().unwrap().into(),
                     message: format!("Rolled back to {}", source.name),
                 }
@@ -217,7 +223,13 @@ impl Action {
             } => {
                 let dataset = boot_zfs::clone_environment(&zfs, &pool, &source, promote).await?;
                 Outcome::Changed {
-                    environments: boot_zfs::environments(&zfs, &pool, false, limit).await?,
+                    environments: boot_zfs::environments(
+                        &zfs,
+                        &pool,
+                        false,
+                        &Catalog::new(limit).retaining(&resume),
+                    )
+                    .await?,
                     selected: dataset.clone(),
                     message: format!(
                         "Created {}{}",
@@ -235,7 +247,7 @@ impl Action {
                     &zfs,
                     &pool,
                     readonly,
-                    limit,
+                    &Catalog::new(limit).retaining(&resume),
                     !matches!(resume, zbm_core::resume::Status::Locked { .. }),
                 )
                 .await?,

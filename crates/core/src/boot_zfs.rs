@@ -163,14 +163,15 @@ async fn mount_environment(
 async fn read_targets(
     root: &Path,
     dataset: &str,
-    limit: u32,
+    catalog: &boot::Catalog,
     properties: &BootProperties,
 ) -> io::Result<boot::TargetDiscovery> {
     let root = root.to_owned();
     let dataset = dataset.to_owned();
+    let catalog = catalog.clone();
     let properties = properties.clone();
     tokio::task::spawn_blocking(move || {
-        let nixos = boot::discover_generations(&root, &dataset, limit)?;
+        let nixos = boot::discover_catalog(&root, &dataset, &catalog)?;
         if !nixos.targets.is_empty() || !nixos.rejected.is_empty() {
             Ok(nixos)
         } else {
@@ -260,15 +261,19 @@ pub async fn refresh_target(zfs: &Zfs, target: &boot::BootTarget) -> io::Result<
         refreshed.mountpoint = Some(properties.mountpoint);
         return Ok(refreshed);
     }
-    let mut refreshed = read_targets(&target.root, &target.dataset, u32::MAX, &properties)
-        .await?
-        .targets
-        .into_iter()
-        .find(|t| {
-            t.inputs().kernel == target.inputs().kernel
-                && t.inputs().initrd == target.inputs().initrd
-        })
-        .ok_or_else(|| failure("Selected Linux kernel/initramfs pair changed"))?;
+    let mut refreshed = read_targets(
+        &target.root,
+        &target.dataset,
+        &boot::Catalog::new(u32::MAX),
+        &properties,
+    )
+    .await?
+    .targets
+    .into_iter()
+    .find(|t| {
+        t.inputs().kernel == target.inputs().kernel && t.inputs().initrd == target.inputs().initrd
+    })
+    .ok_or_else(|| failure("Selected Linux kernel/initramfs pair changed"))?;
     refreshed.snapshot = target.snapshot.clone();
     Ok(refreshed)
 }
@@ -277,9 +282,9 @@ pub async fn environments(
     zfs: &Zfs,
     pool: &Pool,
     readonly: bool,
-    limit: u32,
+    catalog: &boot::Catalog,
 ) -> io::Result<Vec<BootEnvironment>> {
-    environment_catalog(zfs, pool, readonly, limit, true).await
+    environment_catalog(zfs, pool, readonly, catalog, true).await
 }
 
 /// A locked resume container allows metadata discovery, never boot-root mounts.
@@ -287,7 +292,7 @@ pub async fn environment_catalog(
     zfs: &Zfs,
     pool: &Pool,
     readonly: bool,
-    limit: u32,
+    catalog: &boot::Catalog,
     inspect_targets: bool,
 ) -> io::Result<Vec<BootEnvironment>> {
     let imported = zfs.list_pools(&Default::default()).await.map_err(failure)?;
@@ -401,7 +406,7 @@ pub async fn environment_catalog(
                 continue;
             }
         };
-        match read_targets(&root, &dataset.name, limit, &environment.properties).await {
+        match read_targets(&root, &dataset.name, catalog, &environment.properties).await {
             Ok(discovery) => {
                 environment.unavailable = discovery
                     .targets
@@ -482,7 +487,7 @@ pub async fn reopen_writable(zfs: &Zfs, pool: &Pool, limit: u32) -> io::Result<(
         == "on"
     {
         release(zfs, pool).await?;
-        environments(zfs, pool, false, limit).await?;
+        environments(zfs, pool, false, &boot::Catalog::new(limit)).await?;
     }
     Ok(())
 }
@@ -798,7 +803,13 @@ pub async fn snapshot_targets(
         }
     }
     let properties = properties(zfs, source.dataset().as_str()).await?;
-    let mut discovery = read_targets(&root, source.dataset().as_str(), limit, &properties).await?;
+    let mut discovery = read_targets(
+        &root,
+        source.dataset().as_str(),
+        &boot::Catalog::new(limit),
+        &properties,
+    )
+    .await?;
     for target in &mut discovery.targets {
         target.snapshot = Some(snapshot.source.clone());
     }

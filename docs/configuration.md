@@ -56,7 +56,7 @@ compares actual derivation paths for changed image settings and compiled policy.
 | `diagnostics.esp_partuuid` | `null` | opt-in GPT partition UUID for failure-only FAT reports; compiled into the image as well as validated JSON |
 | `zfs.import_policy` | `host-id` | host-id or read-only; automatic startup import, never force |
 | `nixos.preferred_specialisation` | `null` | preferred named variant of the default generation; missing variant falls back to that generation; never overrides a saved session |
-| `nixos.generation_limit` | `20` | 1..512; maximum generations per root or snapshot |
+| `nixos.generation_limit` | `20` | 1..512; maximum generations per root or snapshot; the current profile and a saved hibernation session are always listed |
 | `resume.device` | `null` | explicit plain GPT partition or LUKS2 identity; experimental, security off and ESP logging disabled |
 | `resume.role` | `resume` | `cancel-only` disables restoration for independent rescue while retaining image detection and confirmed invalidation |
 | `resume.credential` | `null` | required for LUKS2; only `zfs-unlock` with a pinned decimal pool GUID and encryption root |

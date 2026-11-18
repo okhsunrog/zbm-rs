@@ -69,7 +69,7 @@ in {
     settings.diagnostics.continuous = lib.mkOption { type = lib.types.bool; default = false; description = "Continuously sync bounded kernel, lifecycle and health logs to the explicit ESP; preserves eight boots. Never records passphrase keystrokes."; };
     settings.zfs.importPolicy = lib.mkOption { type = lib.types.enum [ "host-id" "read-only" ]; default = "host-id"; description = "Policy for automatic startup imports; discovery itself remains non-mutating and imports are never forced."; };
     settings.nixos.preferredSpecialisation = lib.mkOption { type = lib.types.nullOr lib.types.str; default = null; description = "Preferred named specialisation of the current default NixOS generation. Missing variants fall back to that generation; saved-session resume always takes priority."; };
-    settings.nixos.generationLimit = lib.mkOption { type = lib.types.ints.between 1 512; default = 20; description = "Maximum NixOS generations per root dataset."; };
+    settings.nixos.generationLimit = lib.mkOption { type = lib.types.ints.between 1 512; default = 20; description = "Maximum NixOS generations per root dataset. The current profile and a saved hibernation session are always listed."; };
     settings.kernelArgs = lib.mkOption { type = lib.types.listOf lib.types.str; default = []; description = "Additional target kernel arguments; overriding Bootspec init or whitespace/quoting is unsupported."; };
     enable = lib.mkEnableOption "build a standalone zbm-rs EFI boot manager";
     image.profile = lib.mkOption { type = lib.types.enum [ "portable" "host-only" ]; default = "portable"; };

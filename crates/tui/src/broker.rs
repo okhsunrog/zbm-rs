@@ -257,7 +257,10 @@ async fn target(zfs: &Zfs, pool: &Pool, wanted: &BootTarget, limit: u32) -> Resu
             .await?
             .targets
     } else {
-        boot_zfs::environments(zfs, pool, crate::resume::current()?.protected(), limit)
+        // The limit bounds the menu, not trust: identity is matched below. A
+        // cold boot cancels the session first, so retain the request itself.
+        let catalog = zbm_core::boot::Catalog::new(limit).retaining_target(wanted);
+        boot_zfs::environments(zfs, pool, crate::resume::current()?.protected(), &catalog)
             .await?
             .into_iter()
             .flat_map(|be| be.targets)
