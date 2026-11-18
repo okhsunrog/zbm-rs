@@ -84,8 +84,12 @@ def live_checks(device_spec, path):
             fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
             probe("record-live", str(plan_path), ok=False)
             probe("finish", ok=False)
-        probe("finish")  # Early wake / failed hibernate needs no metadata write.
-        assert read_page(path) == recorded
+        # Early wake / failed hibernate: the unused record must not route a
+        # later unrecorded image, so finishing clears exactly the bootbits.
+        probe("finish")
+        assert read_page(path) == bytes(1024) + recorded[1024:]
+        assert json.loads(probe("status"))["state"] == "inactive"
+        write_page(path, recorded)
 
         # A still-present image must never be rewritten by a live operation.
         pending = bytearray(recorded)
@@ -106,9 +110,10 @@ def live_checks(device_spec, path):
         edit_record(path, boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip())
         probe("finish")
         assert json.loads(probe("status"))["state"] == "inactive"
-        assert read_page(path)[1024:] == original[1024:]
+        assert read_page(path) == bytes(1024) + original[1024:]
 
         # An interrupted metadata update must retain conservative boot status.
+        write_page(path, recorded)
         damaged = bytearray(read_page(path))
         damaged[20:128] = bytes(108)
         write_page(path, damaged)

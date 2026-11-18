@@ -124,6 +124,10 @@ be retried. Images predating this protocol remain cancellable but cannot resume.
 The post-hibernation hook calls `--resume-finish-config` without deactivating
 swap. Only the original kernel boot ID saved before sleep
 can clear the flag after a successful RAM restore; a fresh kernel cannot do so.
+Finishing removes the whole record, also after an early wake or failed
+hibernation, and image cancellation removes it as well. A record routes only
+the image created right after it: a later image written without a fresh
+record, e.g. through `/sys/power/state`, stays cancellable but never resumable.
 Failure to finish keeps the next boot conservative. This is recovery bookkeeping,
 not cryptographic evidence or a pool consistency seal. `--resume-status-config`
 inspects this state without modifying the device. Unit tests cover consumed

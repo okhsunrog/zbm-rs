@@ -312,16 +312,20 @@ impl Swap {
         bits[..16].copy_from_slice(MAGIC);
         bits[16..20].copy_from_slice(&(packed.len() as u32).to_le_bytes());
         bits[20..20 + packed.len()].copy_from_slice(&packed);
+        self.write_bits(&bits, before)
+    }
+
+    fn write_bits(&self, bits: &[u8; BOOTBITS], before: &[u8; PAGE]) -> io::Result<()> {
         // Recheck after potentially slow artifact hashing, under the same flock.
         // A changed native header must never be copied back by the 4Kn RMW path.
         if self.header()? != *before {
             return Err(error("Swap header changed before updating its boot record"));
         }
         match self.io {
-            HeaderIo::Buffered => self.file.write_all_at(&bits, 0)?,
+            HeaderIo::Buffered => self.file.write_all_at(bits, 0)?,
             HeaderIo::Direct { write_size } => {
                 let mut aligned = AlignedHeader(*before);
-                aligned.0[..BOOTBITS].copy_from_slice(&bits);
+                aligned.0[..BOOTBITS].copy_from_slice(bits);
                 // On 4Kn devices preserve the rest of the logical sector.
                 // Only bootbits may change; never write into swap payload.
                 if self.file.write_at(&aligned.0[..write_size], 0)? != write_size {
@@ -333,7 +337,7 @@ impl Swap {
         }
         self.file.sync_all()?;
         let after = self.header()?;
-        if after[..BOOTBITS] != bits || after[BOOTBITS..] != before[BOOTBITS..] {
+        if after[..BOOTBITS] != bits[..] || after[BOOTBITS..] != before[BOOTBITS..] {
             return Err(error("Resume record verification failed"));
         }
         Ok(())
@@ -358,7 +362,9 @@ impl Swap {
     }
 
     /// Only the restored kernel has the boot ID saved before hibernation.
-    /// Run after systemd-hibernate returns, outside kernel header updates.
+    /// Run after every sleep attempt returns, outside kernel header updates.
+    /// A record only routes the image created right after it, so remove it:
+    /// a later image written without a fresh record must stay unresumable.
     pub fn finish_attempt(&self) -> io::Result<()> {
         let h = self.header()?;
         if &h[PAGE - 10..] != SWAP {
@@ -367,17 +373,16 @@ impl Swap {
         if !owned_record(&h) {
             return Ok(());
         }
-        let mut record = record(&h)?;
-        if !record.attempting {
-            return Ok(());
-        }
-        if record.boot_id != fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim() {
+        let record = record(&h)?;
+        // Not attempting: hibernation failed, woke early or never ran.
+        if record.attempting
+            && record.boot_id != fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim()
+        {
             return Err(error(
                 "Only the restored kernel may finish the resume attempt",
             ));
         }
-        record.attempting = false;
-        self.write_record(&record, &h)
+        self.write_bits(&[0; BOOTBITS], &h)
     }
 
     /// Restore only Linux's original swap signature. Payload is not erased.
@@ -396,9 +401,10 @@ impl Swap {
         if &h[PAGE - 10..] == IMAGE && &h[PAGE - 20..PAGE - 10] != SWAP {
             return Err(error("Unrecognized original swap signature"));
         }
-        if owned_record(&h) && (attempted || record.is_none()) {
-            // Consent also discards an interrupted attempt's routing metadata.
-            // Clear it before the Linux signature: interruption stays blocked.
+        if owned_record(&h) {
+            // Consent also discards the image's routing metadata, so a later
+            // unrecorded image is never routed by it. Clear it before the
+            // Linux signature: an interrupted cancellation stays blocked.
             h[..BOOTBITS].fill(0);
             self.file.write_all_at(&h[..BOOTBITS], 0)?;
             self.file.sync_all()?;
@@ -841,12 +847,74 @@ mod tests {
             .unwrap();
         fixture.swap.finish_attempt().unwrap();
         assert!(matches!(fixture.swap.status().unwrap(), Status::Inactive));
+        assert!(
+            fixture.swap.header().unwrap()[..BOOTBITS]
+                .iter()
+                .all(|b| *b == 0)
+        );
         // A partially persisted record must not look like an empty session.
+        record.attempting = false;
+        fixture
+            .swap
+            .write_record(&record, &fixture.swap.header().unwrap())
+            .unwrap();
         fixture.swap.file.write_all_at(b"oops", 20).unwrap();
         let status = fixture.swap.status().unwrap();
         assert!(status.protected());
         fixture.swap.cancel(status.session_id().unwrap()).unwrap();
         assert!(matches!(fixture.swap.status().unwrap(), Status::Inactive));
+    }
+
+    #[test]
+    fn finished_or_discarded_record_never_routes_a_later_unrecorded_image() {
+        let unrecorded = |fixture: &Fixture| {
+            assert!(
+                fixture.swap.header().unwrap()[..BOOTBITS]
+                    .iter()
+                    .all(|b| *b == 0)
+            );
+            // Hibernation without the pre-sleep record, e.g. via /sys/power/state.
+            fixture.mark_image();
+            let status = fixture.swap.status().unwrap();
+            assert!(matches!(status, Status::Unavailable { .. }));
+            assert!(
+                fixture
+                    .swap
+                    .arm_attempt(status.session_id().unwrap())
+                    .is_err()
+            );
+        };
+        // Completed resume.
+        let fixture = Fixture::new();
+        fixture.recorded_image();
+        let h = fixture.swap.header().unwrap();
+        fixture.swap.arm_attempt(&digest(&h)).unwrap();
+        fixture
+            .swap
+            .file
+            .write_all_at(SWAP, (PAGE - 10) as u64)
+            .unwrap();
+        fixture.swap.finish_attempt().unwrap();
+        unrecorded(&fixture);
+        // Sleep returned without creating an image.
+        let fixture = Fixture::new();
+        fixture.recorded_image();
+        fixture
+            .swap
+            .file
+            .write_all_at(SWAP, (PAGE - 10) as u64)
+            .unwrap();
+        assert!(matches!(fixture.swap.status().unwrap(), Status::Inactive));
+        fixture.swap.finish_attempt().unwrap();
+        unrecorded(&fixture);
+        // Discarded pending image.
+        let fixture = Fixture::new();
+        fixture.recorded_image();
+        let status = fixture.swap.status().unwrap();
+        assert!(matches!(status, Status::Pending { .. }));
+        fixture.swap.cancel(status.session_id().unwrap()).unwrap();
+        assert!(matches!(fixture.swap.status().unwrap(), Status::Inactive));
+        unrecorded(&fixture);
     }
 
     #[test]
