@@ -3,6 +3,7 @@
 {
   config,
   lib,
+  options,
   pkgs,
   utils,
   ...
@@ -334,7 +335,9 @@ in
     boot.loader.supportsInitrdSecrets = true;
     boot.supportedFilesystems = [ "zfs" ];
     boot.zfs.forceImportRoot = false;
-    boot.initrd.systemd.enable = true;
+    # Nixpkgs from November 2026 removed scripted initrd along with this option
+    # (defining it is an error there); older Nixpkgs still needs it set.
+    boot.initrd.systemd.enable = lib.mkIf (options.boot.initrd.systemd.enable.visible or true) true;
     boot.kernelParams = lib.mkIf cfg.hibernation.enable [ "hibernate=noresume" ];
     boot.initrd.systemd.suppressedUnits = lib.mkIf cfg.hibernation.enable [ "systemd-hibernate-resume.service" "systemd-hibernate-resume@.service" ];
     boot.initrd.systemd.suppressedStorePaths = lib.mkIf cfg.hibernation.enable [
