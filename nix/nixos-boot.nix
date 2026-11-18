@@ -249,7 +249,7 @@ in
     kernelArgs = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
-      description = "Must match kernel_args in the installed zbm-rs image.";
+      description = "Must match kernel_args in the installed zbm-rs image; programs.zbm-rs.settings.kernelArgs defaults to it. Pass it as loaderConfig.kernel_args when calling lib.mkImage directly.";
     };
     signing = {
       enable = lib.mkEnableOption "owner signing of kernel, final initramfs and boot authorization";

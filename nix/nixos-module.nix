@@ -70,7 +70,7 @@ in {
     settings.zfs.importPolicy = lib.mkOption { type = lib.types.enum [ "host-id" "read-only" ]; default = "host-id"; description = "Policy for automatic startup imports; discovery itself remains non-mutating and imports are never forced."; };
     settings.nixos.preferredSpecialisation = lib.mkOption { type = lib.types.nullOr lib.types.str; default = null; description = "Preferred named specialisation of the current default NixOS generation. Missing variants fall back to that generation; saved-session resume always takes priority."; };
     settings.nixos.generationLimit = lib.mkOption { type = lib.types.ints.between 1 512; default = 20; description = "Maximum NixOS generations per root dataset. The current profile and a saved hibernation session are always listed."; };
-    settings.kernelArgs = lib.mkOption { type = lib.types.listOf lib.types.str; default = []; description = "Additional target kernel arguments; overriding Bootspec init or whitespace/quoting is unsupported."; };
+    settings.kernelArgs = lib.mkOption { type = lib.types.listOf lib.types.str; default = config.boot.loader.zbm-rs.kernelArgs; defaultText = lib.literalExpression "config.boot.loader.zbm-rs.kernelArgs"; description = "Additional target kernel arguments; overriding Bootspec init or whitespace/quoting is unsupported. Must equal boot.loader.zbm-rs.kernelArgs when generations are published."; };
     enable = lib.mkEnableOption "build a standalone zbm-rs EFI boot manager";
     image.profile = lib.mkOption { type = lib.types.enum [ "portable" "host-only" ]; default = "portable"; };
     image.hardwareManifest = lib.mkOption { type = lib.types.nullOr lib.types.path; default = null; };
@@ -94,6 +94,12 @@ in {
           swap_partuuid = cfg.settings.resume.swapPartuuid;
         }) == config.boot.loader.zbm-rs.hibernation.resumeConfig;
       message = "The loader image and target hibernation integration must use the same complete resume policy.";
+    } {
+      # Generations are installed, signed and recorded for hibernation with the
+      # target arguments, while the loader appends the image's arguments.
+      assertion = !config.boot.loader.zbm-rs.enable
+        || cfg.settings.kernelArgs == config.boot.loader.zbm-rs.kernelArgs;
+      message = "programs.zbm-rs.settings.kernelArgs must equal boot.loader.zbm-rs.kernelArgs.";
     }];
     system.build.zbm-rs-efi = image;
     environment.systemPackages = [ image.passthru.binary ];
