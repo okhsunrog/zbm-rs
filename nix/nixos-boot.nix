@@ -377,6 +377,20 @@ in
     # system-sleep scripts, ExecStartPre failures abort the sleep operation.
     systemd.services.systemd-hibernate = resumeSleepService;
     systemd.services.systemd-suspend-then-hibernate = resumeSleepService;
+    # Recording and resume need the booted generation in the catalog, which
+    # otherwise reads only profile links that nix-collect-garbage deletes.
+    systemd.services.zbm-pin-booted = lib.mkIf h.enable {
+      description = "Keep the booted generation bootable and resumable";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "local-fs.target" ];
+      before = [ "sleep.target" "nix-gc.service" ];
+      unitConfig.RequiresMountsFor = [ "/nix/var/nix" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${loader}/bin/zbm-rs --pin-booted-generation";
+      };
+    };
     systemd.sleep.settings.Sleep = lib.mkIf cfg.hibernation.enable {
       AllowHybridSleep = false;
       # Opt in through the native sleep settings, alongside HibernateDelaySec.

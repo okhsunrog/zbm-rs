@@ -233,6 +233,19 @@ damaged metadata or an unfinished attempt abort preparation. There is no cached
 I/O or swapoff fallback. Ordinary hooks never deactivate/reactivate swap, so
 their memory demand does not grow with swap occupancy.
 
+The record names the booted generation from the same catalog the loader uses at
+resume. That catalog reads system profile links, which `nix-collect-garbage`
+deletes for any generation but the current one, including a booted generation
+after a later switch. `zbm-pin-booted.service` therefore runs
+`zbm-rs --pin-booted-generation` at boot: it links the parent system of the
+booted generation (or specialisation) from
+`/nix/var/nix/gcroots/zbm-rs-booted/system-N-link`, replacing earlier boots'
+links. Nix never deletes a root, discovery always lists these generations even
+without a profile link or within `generation_limit`, and pruning keeps their
+prepared artifacts. A root is no more trusted than a profile link: both are
+root-owned files in the same dataset, and enforced boots still require the
+signed authorization of the target.
+
 Cancellation and target-initramfs arming retain exclusive device access, refusing
 kernel-active swap. Explicit activation still checks the device identity and
 resume state, then uses the kernel's `swapon` syscall on the pinned descriptor;

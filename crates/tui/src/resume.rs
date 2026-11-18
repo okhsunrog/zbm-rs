@@ -147,6 +147,24 @@ pub async fn unlock(
 pub fn utility(args: &[std::ffi::OsString]) -> Result<bool> {
     if args
         .first()
+        .is_some_and(|arg| arg == "--pin-booted-generation")
+    {
+        anyhow::ensure!(
+            unsafe { libc::geteuid() } == 0 && args.len() == 1,
+            "usage (root): zbm-rs --pin-booted-generation"
+        );
+        let booted = std::fs::canonicalize("/run/booted-system")?;
+        match zbm_core::boot::pin_booted(std::path::Path::new("/"), &booted)? {
+            Some(generation) => println!("Pinned booted generation {generation}"),
+            None => anyhow::bail!(
+                "No system generation contains the booted system {}",
+                booted.display()
+            ),
+        }
+        return Ok(true);
+    }
+    if args
+        .first()
         .is_some_and(|arg| arg == "--resume-capabilities")
     {
         anyhow::ensure!(args.len() == 1, "usage: zbm-rs --resume-capabilities");

@@ -474,37 +474,126 @@ pub fn discover_generations(root: &Path, dataset: &str, limit: u32) -> io::Resul
     discover_catalog(root, dataset, &Catalog::new(limit))
 }
 
+const PROFILES: &str = "/nix/var/nix/profiles";
+/// Roots written by `pin_booted`. Nix GC never deletes a root, unlike the
+/// profile generation links that `nix-collect-garbage -d` removes.
+pub const BOOTED_ROOTS: &str = "/nix/var/nix/gcroots/zbm-rs-booted";
+
+fn generation_number(name: &str) -> Option<u64> {
+    name.strip_prefix("system-")?
+        .strip_suffix("-link")?
+        .parse()
+        .ok()
+}
+
+/// Generation numbers linked in `directory`; `None` when it does not exist.
+fn generation_links(root: &Path, directory: &str) -> io::Result<Option<Vec<u64>>> {
+    let entries = match rooted_path(root, Path::new(directory)).and_then(fs::read_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut numbers = vec![];
+    for entry in entries {
+        if let Some(number) = entry?.file_name().to_str().and_then(generation_number) {
+            numbers.push(number);
+        }
+    }
+    Ok(Some(numbers))
+}
+
+/// The guest path of the system linked by `link` if it, or one of its
+/// specialisations, is `booted` (a rooted path).
+fn booted_parent(root: &Path, link: &Path, booted: &Path) -> Option<PathBuf> {
+    let parent = rooted_path(root, link).ok()?;
+    let matches = parent == booted
+        || fs::read_dir(parent.join("specialisation"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|variant| {
+                rooted_path(root, &link.join("specialisation").join(variant.file_name()))
+                    .is_ok_and(|path| path == booted)
+            });
+    matches
+        .then(|| Some(Path::new("/").join(parent.strip_prefix(root).ok()?)))
+        .flatten()
+}
+
+/// Keep the running generation bootable and resumable after its profile link
+/// is deleted: link its parent system from a GC root that discovery also reads.
+/// Run on the booted OS. Earlier boots' roots are removed; returns the pinned
+/// generation, or `None` when no generation contains the booted system.
+pub fn pin_booted(root: &Path, booted: &Path) -> io::Result<Option<u64>> {
+    let booted = rooted_path(root, booted)?;
+    let mut found = None;
+    // The profile is authoritative; a previous root covers a deleted link.
+    'search: for directory in [PROFILES, BOOTED_ROOTS] {
+        let mut numbers = generation_links(root, directory)?.unwrap_or_default();
+        numbers.sort_unstable_by(|a, b| b.cmp(a));
+        for number in numbers {
+            let link = PathBuf::from(format!("{directory}/system-{number}-link"));
+            if let Some(parent) = booted_parent(root, &link, &booted) {
+                found = Some((number, parent));
+                break 'search;
+            }
+        }
+    }
+    let gcroots = rooted_path(root, Path::new("/nix/var/nix/gcroots"))?;
+    let directory = gcroots.join(
+        Path::new(BOOTED_ROOTS)
+            .strip_prefix("/nix/var/nix/gcroots")
+            .unwrap(),
+    );
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Err(invalid("Booted generation root is not a directory")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&directory)?,
+        Err(error) => return Err(error),
+    }
+    let keep = found
+        .as_ref()
+        .map(|(number, _)| format!("system-{number}-link"));
+    if let (Some(name), Some((_, parent))) = (&keep, &found) {
+        let temporary = directory.join(format!(".{name}.tmp"));
+        match fs::remove_file(&temporary) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+        std::os::unix::fs::symlink(parent, &temporary)?;
+        fs::rename(&temporary, directory.join(name))?;
+    }
+    for entry in fs::read_dir(&directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_str();
+        if name.is_some_and(|name| generation_number(name).is_some())
+            && name != keep.as_deref()
+            && entry.file_type()?.is_symlink()
+        {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    fs::File::open(&directory)?.sync_all()?;
+    Ok(found.map(|(number, _)| number))
+}
+
 pub fn discover_catalog(
     root: &Path,
     dataset: &str,
     catalog: &Catalog,
 ) -> io::Result<TargetDiscovery> {
-    let directory = match rooted_path(root, Path::new("/nix/var/nix/profiles")) {
-        Ok(path) => path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(TargetDiscovery::default());
-        }
-        Err(error) => return Err(error),
+    let Some(mut candidates) = generation_links(root, PROFILES)? else {
+        return Ok(TargetDiscovery::default());
     };
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(TargetDiscovery::default());
-        }
-        Err(error) => return Err(error),
-    };
-    let mut candidates = vec![];
-    for entry in entries {
-        let name = entry?.file_name();
-        if let Some(number) = name
-            .to_str()
-            .and_then(|s| s.strip_prefix("system-"))
-            .and_then(|s| s.strip_suffix("-link"))
-            .and_then(|s| s.parse::<u64>().ok())
-        {
-            candidates.push(number);
-        }
-    }
+    // A booted generation stays listed after Nix deletes its profile link.
+    let booted = generation_links(root, BOOTED_ROOTS)?.unwrap_or_default();
+    let unlinked: Vec<u64> = booted
+        .iter()
+        .copied()
+        .filter(|number| !candidates.contains(number))
+        .collect();
+    candidates.extend(&unlinked);
     candidates.sort_unstable_by(|a, b| b.cmp(a));
     let current = rooted_path(root, Path::new("/nix/var/nix/profiles/system"));
     // A rollback may select an old generation outside the normal history limit.
@@ -531,9 +620,12 @@ pub fn discover_catalog(
     let retained = catalog
         .retained(dataset)
         .filter(|number| candidates.contains(number));
-    let pinned = [current_number, retained];
+    let pinned: Vec<Option<u64>> = [current_number, retained]
+        .into_iter()
+        .chain(booted.iter().copied().map(Some))
+        .collect();
     candidates.truncate(catalog.limit as usize);
-    for number in pinned.into_iter().flatten() {
+    for number in pinned.iter().copied().flatten() {
         if candidates.contains(&number) {
             continue;
         }
@@ -550,7 +642,12 @@ pub fn discover_catalog(
     candidates.sort_unstable_by(|a, b| b.cmp(a));
     let mut discovery = TargetDiscovery::default();
     for generation in candidates {
-        let profile = PathBuf::from(format!("/nix/var/nix/profiles/system-{generation}-link"));
+        let directory = if unlinked.contains(&generation) {
+            BOOTED_ROOTS
+        } else {
+            PROFILES
+        };
+        let profile = PathBuf::from(format!("{directory}/system-{generation}-link"));
         let mut add = |variant: Option<String>, result: io::Result<BootTarget>| match result {
             Ok(target) => discovery.targets.push(target),
             Err(error) => discovery.rejected.push(GenerationIssue {
@@ -1009,6 +1106,100 @@ mod tests {
             ),
             [5, 4]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn booted_generation_survives_deleted_profile_link() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("zbm-booted-{}", std::process::id()));
+        let profiles = root.join("nix/var/nix/profiles");
+        fs::create_dir_all(&profiles).unwrap();
+        fs::create_dir_all(root.join("nix/var/nix/gcroots")).unwrap();
+        let document = |name: &str| {
+            serde_json::json!({"org.nixos.bootspec.v1": {
+                "system": "x86_64-linux", "kernel": format!("/nix/store/{name}/kernel"),
+                "init": format!("/nix/store/{name}/init"), "toplevel": format!("/nix/store/{name}"),
+                "kernelParams": [], "label": name
+            }})
+        };
+        for name in ["os-1", "os-3", "os-3-niri", "os-5"] {
+            fs::create_dir_all(root.join("nix/store").join(name)).unwrap();
+        }
+        let mut parent = document("os-3");
+        parent["org.nixos.specialisation.v1"] = serde_json::json!({"niri": document("os-3-niri")});
+        for (name, value) in [
+            ("os-1", document("os-1")),
+            ("os-3", parent),
+            ("os-3-niri", document("os-3-niri")),
+            ("os-5", document("os-5")),
+        ] {
+            fs::write(
+                root.join("nix/store").join(name).join("boot.json"),
+                serde_json::to_vec(&value).unwrap(),
+            )
+            .unwrap();
+        }
+        fs::create_dir_all(root.join("nix/store/os-3/specialisation")).unwrap();
+        symlink(
+            "/nix/store/os-3-niri",
+            root.join("nix/store/os-3/specialisation/niri"),
+        )
+        .unwrap();
+        for number in [3, 5] {
+            symlink(
+                format!("/nix/store/os-{number}"),
+                profiles.join(format!("system-{number}-link")),
+            )
+            .unwrap();
+        }
+        symlink("system-5-link", profiles.join("system")).unwrap();
+        // A previous boot's root is replaced.
+        let roots = root.join(BOOTED_ROOTS.trim_start_matches('/'));
+        fs::create_dir(&roots).unwrap();
+        symlink("/nix/store/os-1", roots.join("system-1-link")).unwrap();
+        let listed = || {
+            discover_generations(&root, "tank/root", 1)
+                .unwrap()
+                .targets
+                .iter()
+                .map(|t| {
+                    (
+                        t.generation().unwrap(),
+                        t.specialisation().map(str::to_owned),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let booted = Path::new("/nix/store/os-3-niri");
+        assert_eq!(pin_booted(&root, booted).unwrap(), Some(3));
+        let names = |roots: &Path| {
+            let mut names = fs::read_dir(roots)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        assert_eq!(names(&roots), ["system-3-link"]);
+        assert_eq!(
+            fs::read_link(roots.join("system-3-link")).unwrap(),
+            Path::new("/nix/store/os-3")
+        );
+        // Pinned beyond the limit of one, even while the profile link exists.
+        assert_eq!(listed(), [(5, None), (3, None), (3, Some("niri".into()))]);
+        fs::remove_file(profiles.join("system-3-link")).unwrap();
+        assert_eq!(listed(), [(5, None), (3, None), (3, Some("niri".into()))]);
+        // Repinning after the link deletion keeps the existing root.
+        assert_eq!(pin_booted(&root, booted).unwrap(), Some(3));
+        assert_eq!(names(&roots), ["system-3-link"]);
+        // A system outside every generation leaves no stale root.
+        assert_eq!(
+            pin_booted(&root, Path::new("/nix/store/os-1")).unwrap(),
+            None
+        );
+        assert!(names(&roots).is_empty());
+        assert_eq!(listed(), [(5, None)]);
         fs::remove_dir_all(root).unwrap();
     }
 

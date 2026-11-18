@@ -45,9 +45,13 @@ def store_system(path, store):
     return resolved
 
 
-def retained_systems(profiles, run, store):
+def retained_systems(profiles, run, store, booted_roots=None):
     links = [profiles / "system", run / "current-system", run / "booted-system"]
     links.extend(path for path in profiles.iterdir() if PROFILE_NAME.fullmatch(path.name))
+    # The booted generation stays bootable and resumable without its profile
+    # link, including the parent and siblings of a booted specialisation.
+    if booted_roots is not None and booted_roots.is_dir():
+        links.extend(path for path in booted_roots.iterdir() if PROFILE_NAME.fullmatch(path.name))
     if not (profiles / "system").is_symlink():
         raise ValueError("Missing current system profile")
     systems = set()
@@ -151,7 +155,8 @@ def main():
     profiles = Path("/nix/var/nix/profiles")
     with profile_lock(profiles / "system.lock"), (base / ".publish.lock").open("a") as publication_lock:
         fcntl.flock(publication_lock, fcntl.LOCK_EX)
-        retained = retained_systems(profiles, Path("/run"), Path("/nix/store"))
+        retained = retained_systems(profiles, Path("/run"), Path("/nix/store"),
+                                    Path("/nix/var/nix/gcroots/zbm-rs-booted"))
         removals = plan(base, Path("/nix/var/nix/gcroots/zbm-rs"), retained, Path("/nix/store"))
         journal = base / ".cleanup.json"
         if not args.apply and journal.exists():

@@ -33,6 +33,27 @@ class Prune(unittest.TestCase):
             with self.assertRaises(ValueError):
                 prune.retained_systems(profiles, run, store)
 
+    def test_retains_booted_root_after_profile_link_deletion(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store, profiles, run, roots = (root / n for n in ("store", "profiles", "run", "roots"))
+            for path in (store, profiles, run, roots):
+                path.mkdir()
+            names = [f"{'a' * 31}{letter}-nixos-system-{letter}" for letter in "abc"]
+            for name in names:
+                (store / name).mkdir()
+            # Booted from the niri child of a generation whose link Nix deleted.
+            (store / names[0] / "specialisation").mkdir()
+            (store / names[0] / "specialisation/niri").symlink_to(store / names[1])
+            (roots / "system-4-link").symlink_to(store / names[0])
+            (profiles / "system-7-link").symlink_to(store / names[2])
+            (profiles / "system").symlink_to("system-7-link")
+            (run / "current-system").symlink_to(store / names[2])
+            (run / "booted-system").symlink_to(store / names[1])
+            self.assertEqual(prune.retained_systems(profiles, run, store), set(names[1:]))
+            self.assertEqual(prune.retained_systems(profiles, run, store, roots), set(names))
+            self.assertEqual(prune.retained_systems(profiles, run, store, root / "absent"), set(names[1:]))
+
     def test_plan_preserves_unknown_and_shared_entries(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

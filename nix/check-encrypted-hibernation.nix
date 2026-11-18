@@ -308,6 +308,14 @@ assert tpmBanks != [] && pkgs.lib.unique tpmBanks == tpmBanks
     pressure_program_path = "${./boot-record-pressure.py}"
     python_command = "${pkgs.python3}/bin/python3"
     ${builtins.readFile ./check-boot-record-pressure.py}
+    ${pkgs.lib.optionalString restoreBeforeNegative ''
+    # nix-collect-garbage -d may delete the booted generation's profile link.
+    # Recording and the loader's resume catalog must use the boot-time root.
+    machine.wait_for_unit("zbm-pin-booted.service")
+    booted_link = machine.succeed("readlink /nix/var/nix/profiles/system").strip()
+    machine.succeed(f"test $(readlink /nix/var/nix/gcroots/zbm-rs-booted/{booted_link}) = $(readlink -f /nix/var/nix/profiles/{booted_link})")
+    machine.succeed(f"mv /nix/var/nix/profiles/{booted_link} /run/hidden-profile-link")
+    ''}
     machine.execute("systemctl --no-block ${sleepOperation}", check_return=False)
     ${pkgs.lib.optionalString composite "wake_from_suspend(8)"}
     machine.wait_for_shutdown(timeout=datetime.timedelta(seconds=180))
@@ -334,6 +342,7 @@ assert tpmBanks != [] && pkgs.lib.unique tpmBanks == tpmBanks
     machine.wait_for_unit("multi-user.target")
     after = machine.succeed("cat /proc/sys/kernel/random/boot_id").strip()
     assert before == after, (before, after, "cold boot occurred instead of RAM restore")
+    machine.succeed(f"mv /run/hidden-profile-link /nix/var/nix/profiles/{booted_link}")
     machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value systemd-${sleepOperation}.service) = inactive", timeout=30)
     machine.succeed("test $(systemctl show -p Result --value systemd-${sleepOperation}.service) = success")
     assert json.loads(machine.succeed("${loader}/bin/zbm-rs --resume-status-config ${resumeConfig}"))["state"] == "inactive"
