@@ -13,6 +13,8 @@ import re
 import shutil
 
 STORE_NAME = re.compile(r"[0-9a-z]{32}-nixos-system-[^/]+\Z")
+# Bundles are mkdtemp directories named after their system plus a suffix.
+BUNDLE_NAME = re.compile(r"([0-9a-z]{32}-nixos-system-[^/]+)\.[0-9A-Za-z_]+\Z")
 PROFILE_NAME = re.compile(r"system-[0-9]+-link\Z")
 
 
@@ -93,26 +95,43 @@ def plan(base, gcroots, retained, store):
                for other in published.iterdir()):
             continue
         removals.append((entry, root, bundle))
+    # Under the publication lock an unreferenced bundle is never an install in
+    # progress: it is a replaced bundle or the stage of an interrupted install.
+    referenced = {entry.readlink().name for entry in published.iterdir()
+                  if entry.is_symlink() and entry.readlink().parent == Path("../bundles")}
+    planned = {bundle.name for _, _, bundle in removals}
+    for bundle in sorted(bundles.iterdir()):
+        match = BUNDLE_NAME.fullmatch(bundle.name)
+        if (not match or bundle.name in referenced or bundle.name in planned
+                or bundle.is_symlink() or not bundle.is_dir()):
+            continue
+        removals.append((published / match[1], gcroots / match[1], bundle))
     return removals
 
 
 def finish(base, gcroots, store, retained, name, bundle_name):
-    if not STORE_NAME.fullmatch(name) or name in retained:
-        raise ValueError("Cleanup journal references a retained or invalid system")
+    if not STORE_NAME.fullmatch(name):
+        raise ValueError("Cleanup journal references an invalid system")
     if not bundle_name.startswith(name + ".") or Path(bundle_name).name != bundle_name:
         raise ValueError("Invalid bundle in cleanup journal")
     entry, root, bundle = base / "nixos" / name, gcroots / name, base / "bundles" / bundle_name
     target = Path("../bundles") / bundle_name
-    if entry.is_symlink() and entry.readlink() != target:
-        raise ValueError("Publication changed during cleanup")
+    if bundle.is_symlink():
+        raise ValueError("Refusing to delete a linked bundle")
+    referenced = any(other.is_symlink() and other.readlink() == target
+                     for other in (base / "nixos").iterdir())
+    if name in retained or (entry.is_symlink() and entry.readlink() != target):
+        # Retained or published again since the journal was written: keep the
+        # publication and its root, remove only the bundle if nothing uses it.
+        if not referenced and bundle.exists():
+            shutil.rmtree(bundle)
+        return
     if entry.exists() and not entry.is_symlink():
         raise ValueError("Foreign publication encountered")
     if root.is_symlink() and root.readlink() != store / name:
         raise ValueError("GC root changed during cleanup")
     if root.exists() and not root.is_symlink():
         raise ValueError("Foreign GC root encountered")
-    if bundle.is_symlink():
-        raise ValueError("Refusing to delete a linked bundle")
     if any(other != entry and other.is_symlink() and other.readlink() == target
            for other in (base / "nixos").iterdir()):
         raise ValueError("Bundle is still published")
@@ -161,8 +180,10 @@ def main():
         journal = base / ".cleanup.json"
         if not args.apply and journal.exists():
             print("Interrupted cleanup requires recovery before applying further changes", flush=True)
-        for entry, _, _ in removals:
-            print(("Removing " if args.apply else "Would remove ") + entry.name, flush=True)
+        for entry, _, bundle in removals:
+            published = entry.is_symlink() and entry.readlink() == Path("../bundles") / bundle.name
+            label = entry.name if published else "unused bundle " + bundle.name
+            print(("Removing " if args.apply else "Would remove ") + label, flush=True)
         if args.apply:
             clean(base, Path("/nix/var/nix/gcroots/zbm-rs"), Path("/nix/store"), retained, removals)
 

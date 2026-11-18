@@ -164,11 +164,18 @@ TPM SRK/NvPCR setup remains owned by the selected OS. Package the actual loader'
 signed PCR policy and public key in that OS's initrd as appropriate; don't reset
 the TPM or treat an EFI signature as a substitute for OS policy.
 
-Failed publication restores the preceding prepared-generation link. Publication
-does not delete older bundles. `zbm-prune-generations` previews stale entries;
-`zbm-prune-generations --apply` removes recognized stale entries, their GC roots
-and unshared bundles. Retained profiles, current and booted systems, and their
-specialisations are protected. Unknown entries and authorizations are retained.
+Failed publication restores the preceding prepared-generation link. After the
+whole set of a generation and its specialisations is published, the bundles it
+replaced are deleted unless another entry still links them.
+`zbm-prune-generations` previews stale entries; `zbm-prune-generations --apply`
+removes recognized stale entries, their GC roots and unshared bundles, and any
+bundle no entry links, such as the stage of an interrupted publication. It runs
+under the publication lock, so it never sees a publication in progress. An
+interrupted cleanup resumes on the next run; if its system was published again
+or is retained meanwhile, only the journalled bundle is removed, and only when
+unlinked. Retained profiles, current and booted systems, the pinned booted
+generation, and their specialisations are protected. Unknown entries and
+authorizations are retained.
 The automatic Nix GC service runs this reconciliation after pruning profiles,
 then runs GC again. Explicit `nix-collect-garbage` does not invoke the service;
 run the reconciliation separately after such manual generation deletion.

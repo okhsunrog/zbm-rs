@@ -74,7 +74,7 @@ class Prune(unittest.TestCase):
             (gcroots / name).symlink_to("/foreign")
             self.assertEqual(prune.plan(base, gcroots, set(), store), [])
 
-    def test_interrupted_cleanup_resumes_and_retained_system_fails_closed(self):
+    def test_interrupted_cleanup_resumes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             base, gcroots, store = root / "boot", root / "gcroots", root / "store"
@@ -86,13 +86,55 @@ class Prune(unittest.TestCase):
             (gcroots / name).symlink_to(store / name)
             journal = base / ".cleanup.json"
             journal.write_text(json.dumps({"system": name, "bundle": bundle.name}))
-            with self.assertRaises(ValueError):
-                prune.clean(base, gcroots, store, {name}, [])
-            self.assertTrue(journal.exists())
             prune.clean(base, gcroots, store, set(), [])
             self.assertFalse(journal.exists())
             self.assertFalse((gcroots / name).is_symlink())
             self.assertFalse(bundle.exists())
+
+    def test_republished_or_retained_journal_system_never_blocks_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base, gcroots, store = root / "boot", root / "gcroots", root / "store"
+            for path in (base / "nixos", base / "bundles", gcroots, store):
+                path.mkdir(parents=True)
+            name = "a" * 32 + "-nixos-system-old"
+            old, new = (base / "bundles" / (name + suffix) for suffix in (".old", ".new"))
+            old.mkdir()
+            new.mkdir()
+            entry = base / "nixos" / name
+            entry.symlink_to(Path("../bundles") / new.name)
+            (gcroots / name).symlink_to(store / name)
+            journal = base / ".cleanup.json"
+            # Published again after the interrupted cleanup of the old bundle.
+            journal.write_text(json.dumps({"system": name, "bundle": old.name}))
+            prune.clean(base, gcroots, store, set(), [])
+            self.assertFalse(journal.exists())
+            self.assertFalse(old.exists())
+            self.assertTrue(new.is_dir() and entry.is_symlink() and (gcroots / name).is_symlink())
+            # Retained while the journalled bundle is still published: keep it.
+            journal.write_text(json.dumps({"system": name, "bundle": new.name}))
+            prune.clean(base, gcroots, store, {name}, [])
+            self.assertFalse(journal.exists())
+            self.assertTrue(new.is_dir() and entry.is_symlink() and (gcroots / name).is_symlink())
+
+    def test_plan_collects_unreferenced_bundles(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base, gcroots, store = root / "boot", root / "gcroots", root / "store"
+            for path in (base / "nixos", base / "bundles", gcroots, store):
+                path.mkdir(parents=True)
+            name = "a" * 32 + "-nixos-system-live"
+            live, replaced, stage = (base / "bundles" / (name + s) for s in (".live", ".old", ".stage"))
+            for bundle in (live, replaced, stage):
+                bundle.mkdir()
+            (base / "bundles" / "unknown").mkdir()
+            (base / "nixos" / name).symlink_to(Path("../bundles") / live.name)
+            (gcroots / name).symlink_to(store / name)
+            removals = prune.plan(base, gcroots, {name}, store)
+            self.assertEqual(sorted(bundle.name for _, _, bundle in removals), [replaced.name, stage.name])
+            prune.clean(base, gcroots, store, {name}, removals)
+            self.assertEqual(sorted(p.name for p in (base / "bundles").iterdir()), [live.name, "unknown"])
+            self.assertTrue((base / "nixos" / name).is_symlink() and (gcroots / name).is_symlink())
 
     def test_interruption_during_deletion_is_recoverable(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -160,6 +160,26 @@ def install_set(config, systems, dataset, base):
             restore_link(gcroot, previous_gcroot)
             shutil.rmtree(stage)
         raise
+    # Rollback above needs the replaced bundles; once the whole set is
+    # published they only waste space. Interrupted removal leaves an
+    # unreferenced bundle that generation pruning collects.
+    for _, previous, stage, _, _ in receipts:
+        remove_replaced(base, previous, Path("../bundles") / stage.name)
+
+
+def remove_replaced(base, previous, current):
+    if previous is None:
+        return
+    previous = Path(previous)
+    if previous == current or previous.parent != Path("../bundles") or previous.name in ("", ".", ".."):
+        return
+    bundle = base / "bundles" / previous.name
+    if bundle.is_symlink() or not bundle.is_dir():
+        return
+    if any(entry.is_symlink() and Path(os.readlink(entry)) == previous
+           for entry in (base / "nixos").iterdir()):
+        return
+    shutil.rmtree(bundle)
 
 
 def install(config, system, spec, document_bytes, dataset, base):
